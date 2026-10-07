@@ -57,6 +57,12 @@ trap_common:
 	ldw	28(%r8), %r24
 	ldo	1(%r24), %r24
 	stw	%r24, 28(%r8)
+	/* an external interrupt (4) is acknowledged by clearing EIRR, or it
+	 * would be taken again as soon as RFIR restores PSW.I */
+	comib,<>,n	4, %r1, 1f
+	ldi	-1, %r24
+	mtctl	%r24, %cr23
+1:
 	/* resume after the trapping insn: queue = (back, back + 4) */
 	mtctl	%r17, %cr18
 	ldo	4(%r17), %r17

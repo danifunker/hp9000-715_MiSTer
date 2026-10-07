@@ -54,6 +54,9 @@ package pa_pkg;
     localparam logic [5:0] TRAP_HPMC      = 6'd1;
     localparam logic [5:0] TRAP_RCTR      = 6'd3;
     localparam logic [5:0] TRAP_EXT       = 6'd4;
+    localparam logic [5:0] TRAP_LPMC      = 6'd5;
+    localparam logic [5:0] TRAP_ITLB      = 6'd6;
+    localparam logic [5:0] TRAP_IMP       = 6'd7;
     localparam logic [5:0] TRAP_ILLEGAL   = 6'd8;
     localparam logic [5:0] TRAP_BREAK     = 6'd9;
     localparam logic [5:0] TRAP_PRIV_OP   = 6'd10;
@@ -65,6 +68,9 @@ package pa_pkg;
     localparam logic [5:0] TRAP_NA_DTLB   = 6'd17;
     localparam logic [5:0] TRAP_ASSIST_EM = 6'd22;
     localparam logic [5:0] TRAP_UNALIGNED = 6'd28;
+    localparam logic [5:0] TRAP_HPT       = 6'd23;   // higher-privilege transfer
+    localparam logic [5:0] TRAP_LPT       = 6'd24;   // lower-privilege transfer
+    localparam logic [5:0] TRAP_TAKEN_BR  = 6'd25;
     localparam logic [5:0] TRAP_TOC       = 6'd32;   // not a vector: entry at 0xF0000000
 
     // ------------------------------------------------------------ control word

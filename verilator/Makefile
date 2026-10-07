@@ -124,15 +124,24 @@ tb_ldst: obj_dir_tb/mem_vectors.txt
 # ---------------------------------------------------------------------------
 # CPU test ROMs on the RTL core (verilator/cputest): `make cputest SUITE=alu1`
 # runs tests/cpu/build/<suite>.bin and checks the log with compare.py.
-CT_RTL = $(RTL)/cpu/pa_pkg.sv $(RTL)/cpu/pa_decode.sv $(RTL)/cpu/pa_alu.sv $(RTL)/cpu/pa_shift.sv \
-	$(RTL)/cpu/pa_max1.sv $(RTL)/cpu/pa_ldst.sv $(RTL)/cpu/pa_core_seq.sv cputest/cputest_top.sv
-CT_EXE = obj_dir_ct/Vcputest_top
+# CORE=seq runs the sequential bring-up core, CORE=pipe (default) the
+# pipelined pa_cpu; the binaries live in obj_dir_ct/$(CORE).
+CPU_RTL = $(RTL)/cpu/pa_pkg.sv $(RTL)/cpu/pa_decode.sv $(RTL)/cpu/pa_alu.sv $(RTL)/cpu/pa_shift.sv \
+	$(RTL)/cpu/pa_max1.sv $(RTL)/cpu/pa_ldst.sv $(RTL)/cpu/pa_regfile.sv $(RTL)/cpu/pa_cr16.sv \
+	$(RTL)/cpu/pa_biu.sv $(RTL)/cpu/pa_fetch.sv $(RTL)/cpu/pa_core.sv $(RTL)/cpu/pa_cpu.sv \
+	$(RTL)/cpu/pa_core_seq.sv
+CT_RTL = $(CPU_RTL) cputest/cputest_top.sv
+CORE ?= pipe
+CT_PIPE_seq = 0
+CT_PIPE_pipe = 1
+CT_EXE = obj_dir_ct/$(CORE)/Vcputest_top
 SUITE ?= alu1
 
-$(CT_EXE): $(CT_RTL) cputest/tb_cputest.cpp
+obj_dir_ct/%/Vcputest_top: $(CT_RTL) cputest/tb_cputest.cpp
 	$(V) --cc --exe --build -j 0 -O3 -Wno-fatal -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL \
 		-Wno-UNUSEDPARAM -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC --x-assign fast --x-initial fast \
-		--Mdir obj_dir_ct --top-module cputest_top -o Vcputest_top $(CT_RTL) cputest/tb_cputest.cpp
+		-GPIPE=$(CT_PIPE_$*) \
+		--Mdir obj_dir_ct/$* --top-module cputest_top -o Vcputest_top $(CT_RTL) $(abspath cputest/tb_cputest.cpp)
 
 obj_dir_ct/%.hex: $(CPUT)/build/%.bin
 	@mkdir -p obj_dir_ct
@@ -143,3 +152,18 @@ cputest: $(CT_EXE) obj_dir_ct/$(SUITE).hex
 	python3 $(CPUT)/compare.py $(SUITE) obj_dir_ct/$(SUITE).log $(if $(filter alu1 alu2 shift max1,$(SUITE)),--model,--ref $(CPUT)/ref/qemu/$(SUITE).log)
 
 .PHONY: cputest
+
+# ---------------------------------------------------------------------------
+# Lockstep co-simulation of the sequential and the pipelined core on one
+# ROM: `make cosim SUITE=alu1` (tests/run-cosim.sh runs every suite).
+COSIM_EXE = obj_dir_cosim/Vcosim_top
+$(COSIM_EXE): $(CT_RTL) cosim/cosim_top.sv cosim/tb_cosim.cpp
+	$(V) --cc --exe --build -j 0 -O3 -Wno-fatal -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL \
+		-Wno-UNUSEDPARAM -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC --x-assign fast --x-initial fast \
+		--Mdir obj_dir_cosim --top-module cosim_top -o Vcosim_top $(CT_RTL) cosim/cosim_top.sv \
+		$(abspath cosim/tb_cosim.cpp)
+
+cosim: $(COSIM_EXE) obj_dir_ct/$(SUITE).hex
+	$(COSIM_EXE) +rom=obj_dir_ct/$(SUITE).hex
+
+.PHONY: cosim

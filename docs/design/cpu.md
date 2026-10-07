@@ -1,7 +1,9 @@
 # CPU design specification -- PA-7100LC (PCX-L) for the HP 9000/715 core
 
-Status: specification, 2026-10-07. No RTL exists yet; this is what the RTL in
-`rtl/cpu/` is built from. Every requirement names the document that imposes
+Status: specification, 2026-10-07, with review 07 (`docs/review/07-hpux-cpu-specifics.md`)
+folded in the same day. The RTL in `rtl/cpu/` is built from it: `pa_cpu` is
+the pipelined core (sections 6.1-6.8; the fit log is `cpu-timing.md`),
+`pa_core_seq` the sequential reference it is co-simulated against. Every requirement names the document that imposes
 it. Where the architecture leaves a choice, the choice is stated as **ours**
 and, where it is a simplification, it has a `docs/STUBS.md` entry.
 
@@ -28,9 +30,9 @@ field is written `[n:m]` in Verilog order, which is said explicitly.
 | Topic | Decision | Why |
 |---|---|---|
 | Architecture | PA-RISC 1.1 3rd ed., Level 1 (16-bit space IDs, 48-bit VA), + MAX-1 halfword ops (32-bit forms), + PCX-L implementation specifics (diagnose, fast TLB inserts, FMPYCFXT, clip-test FTEST, multi-endian word ops) | user decision; ERS s.1.3, s.2 |
-| Issue | single issue, in order; DR0 revision field = **0** | ROM skips the cycle-exact dual-issue test and forces single issue at rev 0 (BOOT s.4.2 0x4108D, HW s.8.2); P-008 |
+| Issue | single issue, in order; DR0 revision field = **0** by default (`pa_cpu` parameter `CPU_REVISION`), **0xC with a one-word ROM patch recommended** (review 07 s.1.6 option B) | ROM skips the cycle-exact dual-issue test and forces single issue at rev 0 (BOOT s.4.2 0x4108D, HW s.8.2); P-008. Rev 0 leaves Linux a stale PDC_SOFT_POWER pointer and HP-UX 10.20 on its pre-production gateway path (review 07 s.1) -- Q3 |
 | Pipeline | 5 stages F-D-E-M-W, precise commit in W, replay from W for misses | sec. 6 |
-| Clock | **50 MHz** target (same as the Indy core's R4600), 64 MHz stretch | sec. 6.9 |
+| Clock | **64 MHz** (the real 715/64's clock); the pipelined core without caches fits at 72.5 MHz (`cpu-timing.md`) | sec. 6.9 |
 | L2 caches | **real 128 KB I + 128 KB D**, direct-mapped, 32-byte lines, VIPT (index VA[15:26] with the PCX-L space hash, tag = 20-bit RPN), write-back, write-allocate, per-word parity, full diagnose access; ~244 M10K | the ROM's cache/TLB/memory tests and code-in-cache need exactly this (BOOT s.4.3-4.5, HW s.8.3) |
 | L1 I-cache | **real** 1 KB (128 x 8 bytes) on-chip I-cache in front of L2-I, with DR27-29/RI1/WI1 | test 0x42094 checks that an L1 hit overrides L2 on a real fetch; 0x42097 that FIC invalidates both |
 | TLB | 64-entry fully associative unified CAM + 8 block entries, PCX-L lock/replacement rules, DR8 diagnose control, 1-entry I-lookaside (I-LAB) | ERS s.6; tests 0x41091-0x41096 |
@@ -308,11 +310,28 @@ translation that needs one (fetch, data access, LPA/PROBE/FDC/PDC/FIC):
 | yes | no | 1 | 0 | next pointer: word3 (entry at word0) or word7 (entry at word4) |
 | yes | no | 1 | 1 | word3 of the line |
 
-CR28 is written on ITLB failures too: the ROM requires it (BOOT s.4.4 0x41095,
-"also for an ITLB miss"), although ERS s.2.1.6 calls it unreliable on silicon;
-HP-UX does not rely on it (R06 s.3.1). The PDIR is big-endian (DR0.ENDIAN
-ignored, P-011). No buddy pages (ERS s.6.7.6). HP-UX mode: DR25 U = 1, N = 0
-("cr28 mode 2", R06 s.3.3). Linux never enables the walker.
+CR28 rules settled by review 07 (s.2.5):
+
+* **Trap 15 with DR25.D = 0 must carry CR28 from this walk, exactly as the
+  table says**: HP-UX 10.20's DTLB-miss handler does not recompute the hash,
+  it starts the chain at CR28 and treats CR28 = 0 as a page fault
+  (`dtlb_got_next_ptr_PCXT`). With U = 1, N = 0 (HP-UX's mode) a tag
+  mismatch takes the *contents* of word3 (entry at word0) or word7 (entry at
+  word4), which may be 0.
+* Trap 6: the same table (ROM 0x41095 checks it; HP-UX ignores it). Trap 17:
+  the same, harmless (Q4 answered). Trap 16: never raised.
+* **A walker that is disabled for that side (DR25 I/D = 1) never writes
+  CR28** -- Linux keeps a live value there with `CONFIG_TLB_PTLOCK`. On a
+  successful walk CR28 is unchanged. The walker never writes the PDIR.
+* The walk is performed for every data access miss (loads, stores, LDCW,
+  STBYS, FP loads/stores, also to I/O-space addresses; LDWAX/STWAS are
+  absolute) and for LPA/PROBE/FDC/PDC/FIC (17).
+
+The PDIR is big-endian (DR0.ENDIAN ignored, P-011). No buddy pages (ERS
+s.6.7.6). HP-UX mode: DR25 U = 1, N = 0 ("cr28 mode 2", R06 s.3.3; set_state
+5 enables both walkers). Linux never enables the walker. One shared TLB: a
+D-side insert serves instruction fetches too (HP-UX relies on it, review 07
+s.4 item 2).
 
 ### 2.7 Caches as the VM sees them
 
@@ -457,7 +476,8 @@ everything (no RTL); Test is `todo` (tests/cpu, sec. 7).
 | Undefined major opcode: 07, 0F, 14-17, 1C-1F, 27, 2E, 2F, 36, 37, 3B-3F | **illegal instruction trap 8** | ACD p.5-1 ("an undefined major opcode is an illegal instruction"), p.4-20..4-21 trap 8, table D-1; 0F is "product specific" and PCX-L defines nothing there (its Viper graphics-flush ops trap 8, ERS s.2.2.12) |
 | Undefined extension inside a defined major opcode (integer, memory, system, branch) | trap 8 (**ours**; ACD leaves it to the implementation) | ACD p.5-1 |
 | Undefined/reserved FP sub-op (0C/0E) | unimplemented exception, delayed (sec. 3.5) | ERS s.7.2.1 |
-| Undefined DIAG encoding | trap 8 (**ours**, open question Q7) | ERS s.8.3.9 lists every defined one |
+| Undefined DIAG encoding | **trap 8** at PL 0 (Q7 settled by review 07: no reachable undefined DIAG in either OS on a correctly identified PCX-L; trap 8 makes HP-UX's PCX-T misidentification visible). At PL != 0 the privilege check comes first (trap 10), as for every DIAG. The simulator logs every DIAG executed outside the ROM | ERS s.8.3.9 lists every defined one |
+| **Nullified** undefined or PA 2.0 opcode | never traps (nullification is decided before the decode-time traps are raised): HP-UX 10.20 has ~30 nullified LDD/STD words in generic PA 1.1 paths (review 07 s.3.4) | ERS s.5.3.5 (group 3 traps never occur on nullified instructions) |
 | Reserved instruction fields ("rv", ERS "X" bits) | ignored | ACD p.5-2; ERS s.8.3.9 "assume X == 0" |
 | PA 2.0-only forms (bit 26 of 02 set, `,*`/`,d` completers, LDD/STD/LDDA/STDA/LDCD/STDBY, the 14/16/17/1C/1E/1F long-displacement loads/stores, FMPYFADD 2E, CMPB/CMPIB doubleword 27/2F/3B, EXTRD/DEPD 36/3C/3D, MAX-2 3E, BVE, B,L,PUSH, B,L long, CLRBTS/POPBTS/PUSHBTS, MFIA, MTSARCM, IxTLBT, PxTLB,L, FDC short, FIC 4F, unsigned FCNV, FNEG/FNEGABS) | trap 8 (or unimplemented exception for 0C/0E forms) -- never execute them | PA 1.1 tables; QEMU wrongly executes several of them (sec. 7.3) |
 | Privileged instruction at PL != 0 | trap 10 before any other effect | ACD p.4-21 |
@@ -646,8 +666,10 @@ all register fields 0.
 | SET_TAG x | 42 | 0x14000840 | x = 11:15 | tag latch <- GR[x] | planned | todo |
 
 DIAG instructions do not come in pairs on PCX-L and can be nullified (ERS
-s.8.4). Linux executes only MFCPU_C/MTCPU DR0 (0x141C0600/0x141C0240, L
-pacache.S:1314-1321); HP-UX 10.20 none on PCX-L (R06 s.3.1). Note: the PCX-T
+s.8.4). Linux executes MFCPU_C/MTCPU DR0 (0x141C0600/0x141C0240, L
+pacache.S:1314-1321) once at boot and MFCPU_T DR25 once a second at rev != 0;
+HP-UX 10.20 executes **MFCPU_T DR25 (0x1720141C) at 4 Hz** (the soft-power
+poll, review 07 s.1.4) and nothing else on a PCX-L. Note: the PCX-T
 DR0 read 0x141C1A00 that HP-UX uses on a misidentified CPU decodes on PCX-L as
 **SHDW_GR** -- harmless only because the PCX-L path is taken when PDC reports
 8 BTLB slots.
@@ -788,7 +810,7 @@ DR0/8 and _T for DR25/27-29 and calls DR1/24/26 unreadable -- P-018).
 
 | Bits | Name | Access | Ours | Used by |
 |---|---|---|---|---|
-| 0:5 | revision | r | **0** (P-008) | `set_dr0` forces single issue, SOU/ISTRM off at rev 0; test 0x4108D skipped; PDC_MODEL versions returns DR0 >> 26 (FW s.2.2 #4: the real 715/64 reports **0xC**); PDC_SOFT_POWER returns 0 without acting at rev 0 (FW s.2.2 #23) -- see Q3 |
+| 0:5 | revision | r | `CPU_REVISION` parameter, **0** (P-008) until Q3 is decided | five ROM consumers (review 07 s.1.1): `set_dr0` (SOU/ISTRM/DUAL_DIS fix-ups), selftest2 (test 0x4108D runs unless rev 0 -- or the ROM word at offset 0xB810 is patched), MIOC control bit 14, `pdc_soft_power` (returns without writing at rev 0), `pdc_model_versions` (the real 715/64 reports **0xC**). HP-UX 10.20: rev < 0xC -> `normal_gate = 0`, every syscall through trap 7 (review 07 s.1.3) |
 | 6 | L2IHPMC | r / W1C | set on any L2-I parity error (fetch hit, RI2D/RI2T) | HPMC classifier, 0x42095 |
 | 7 | L2IHPMC_DIS | r/w | masks (holds pending) the L2-I HPMC | |
 | 8 | L2DHPMC | r / W1C | L2-D parity error (load/store hit, walker read, RDD/RDT) | |
@@ -803,6 +825,7 @@ DR0/8 and _T for DR25/27-29 and calls DR1/24/26 unreadable -- P-018).
 | 20 | ISTRM_EN | r/w | stored, no effect (P-013) | |
 | 21:22 | DUAL_DIS | r/w | stored, no effect (always single issue) | |
 | 23 | ENDIAN | r/w | copied to PSW.E on interruption; no other effect (P-011); PDC_PSW reads/writes it (FW #21) | |
+| (DR25 bit 0) | POWFAIL / soft-power | r | `pa_cpu` input `soft_pwr_n` (1 = button not pressed, reset 1), sampled every cycle; **HP-UX 10.20 polls it at 4 Hz** (`getCPU25_PCXL`, MFCPU_T 0x1720141C) and Linux at 1 Hz at rev != 0: 0 for two polls = clean shutdown (review 07 s.1.4; cpu-requests #1) | |
 | 24 | SOU_EN | r/w | stored, no effect | |
 | 25 | SHINT_EN | r/w | stored, no effect (store hints ignored) | |
 | 26 | IPREF_EN | r/w | stored, no effect | |
@@ -1148,10 +1171,13 @@ clock crossing, the memory map, MIOC registers and the CPU HPA page.
 
 ### 6.9 Clock target and timing
 
-**Target 50 MHz** (20 ns; the Indy core's R4600 meets 50 MHz with +0.65 ns at
-89 % device use). Ours is 32-bit and shallower; 64 MHz (the real 715/64's
-clock, 15.6 ns) is a stretch goal, not a requirement -- CR16 is decoupled from
-the core clock (sec. 5.2). Paths to watch:
+**Target 64 MHz** (15.6 ns, the real 715/64's clock; user decision
+2026-10-07). Measured fits are logged in `cpu-timing.md`: the sequential core
+51.6 MHz, the pipelined core without caches 72.5 MHz with the E-stage
+branch-resolve -> next-PC path on top. The fetch is split into F1 (RAM
+access) and F2 (tag compare / select) so the I-cache M10Ks keep their output
+registers; the costs are in cpu-timing.md 2.1. CR16 is decoupled from the
+core clock either way (sec. 5.2). Paths to watch:
 
 | Path | Estimate | Mitigation if it fails |
 |---|---|---|
@@ -1280,6 +1306,8 @@ traps immediate; CPU HPA at 0xFFFB0000. Found while writing this spec:
 | 15 | caches not modelled: I/D always coherent, no aliasing, no write-back -- missing FDC/FIC in guest code goes unnoticed | -- | sec. 2.7, 5.5 |
 | 16 | 256-entry TLB never evicts what PCX-L's 64 would; PxTLBE semantics only for its own layout | cpu.h:249-251, mem_helper.c:651 | sec. 2.3 |
 | 17 | IIR = 0 when the faulting instruction cannot be re-read | int_helper.c:174-176 | IIR = instruction word |
+| 18 | RSM with i = 0 executes at any privilege level ("HP-UX 11i and HP ODE use rsm for read-access to PSW") | translate.c trans_rsm | trap 10 at PL != 0 (ACD p.5-144); `tests/cpu/model.py` QEMU_REF_BUGS `rsm0-pl3`. Worth remembering for HP-UX 11i: its user code expects something to execute `rsm 0` |
+| 19 | B,GATE's link register is not IAOQ_Back + 4 with the GATE's PL in bits 30:31 (the sys suite sees link - target = 3 - target) | translate.c trans_b_gate | ACD p.5-63; QEMU_REF_BUGS `gate-link` |
 
 Agreeing with ours (no action): unaligned trap 28 also for absolute accesses
 (MO_ALIGN, cpu.c:170); LDCW at word but not 16-byte alignment loads and clears
@@ -1353,12 +1381,12 @@ PA 1.1 illegal set: 07, 0F, 14-17, 1C-1F, 27, 2E, 2F, 36, 37, 3B-3F (sec.
 |---|---|---|
 | Q1 | Full **128 KB + 128 KB** caches cost ~247 M10K of 553 (the framework takes ~98). OK, or plan for the ROM-supported 32 KB variant (one-word ROM patch, ~65 M10K)? | 128 + 128, unpatched ROM |
 | Q2 | **50 MHz** core (64 MHz stretch). Acceptable that we are slower than a real 715/64 (single issue, replay misses)? | 50 MHz |
-| Q3 | **CPU revision 0** skips the dual-issue timing test, but the real 715/64 reports **0xC** (FW s.2.2 #4, PARISC_PDC_VERSION in 715_64.h). At rev 0 PDC_MODEL versions returns 0 and PDC_SOFT_POWER "succeeds" without acting (so the OSes may poll DR25 bit 0, which reads 1). Does HP-UX/Linux apply rev-0 errata? Needs a scan of HP-UX for `cpu_version` uses | rev 0; scan HP-UX before boot attempts |
-| Q4 | CR28 on a failed walk for **non-access** misses (trap 17): written (ours, same walker) or not? ERS silent; HP-UX's non-access handler may use TR4 as scratch | written; check HP-UX `$ndtlbmss` before enabling |
+| Q3 | **CPU revision**: 0 (ROM unpatched, dual-issue test skipped) or **0xC** (what a real 715/64 reports) with the one-word ROM patch of review 07 s.1.6 (offset 0xB810: 0x86802012 -> 0xE8000012). Review 07: rev 0 is unsafe for Linux (stale PDC_SOFT_POWER pointer) and puts HP-UX 10.20 on its trap-7 gateway path; 0xC + patch behaves exactly like the real machine | `CPU_REVISION` = 0 until the user decides (cpu-requests #2) |
+| Q4 | answered by review 07 s.2: CR28 written for 15, 6 and 17 per the table, never when the walker is disabled | -- |
 | Q5 | Little-endian: is "PSW.E stored, no effect" (P-011) acceptable for every target OS (NeXTSTEP? NetBSD?) | yes |
 | Q6 | MAX-1 reference: patch the scratch QEMU to allow MAX-1 on `-M 715` (and fix HSHLADD), or rely on `model.py` alone? | model.py; optional QEMU patch |
-| Q7 | Undefined DIAG encodings: trap 8 (ours, exposes bugs) or execute as NOP (QEMU-like, lenient)? | trap 8 + simulator warning |
-| Q8 | HP-UX 9.05/11.00 PCX-L specifics (fast inserts, other DIAGs) are unscanned (R06 s.7 item 6). Scan before the RTL freezes the decode? | scan in parallel with RTL |
+| Q7 | answered by review 07 s.3.6: trap 8, simulator logs DIAGs outside the ROM | -- |
+| Q8 | HP-UX 10.20 and Linux scanned (review 07 s.3): the only DIAG HP-UX executes on a PCX-L is MFCPU_T DR25; no fast inserts, MAX-1, multi-endian ops or SPOPs; FSTQS (major 0F) stays off while PDC's key is 0x72. HP-UX 11i's kernel (media in `~/Downloads`) and 9.05 (no image) remain unscanned | keep IxTLBxF and MAX-1 for HP-UX 9 and user code |
 | Q9 | Should the trap suite also expect 28 for unaligned *absolute* accesses (our choice) or skip them as undefined? | expect 28 |
 
 ### 8.5 Next steps

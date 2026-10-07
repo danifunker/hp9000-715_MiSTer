@@ -47,7 +47,8 @@ module pa_core_seq
     output logic        dbg_trap,
     output logic [5:0]  dbg_trap_vec,
     output logic [31:0] dbg_psw,
-    output logic        dbg_halted
+    output logic        dbg_halted,
+    output logic [31:0] dbg_gr [32]       // every GR (lockstep co-simulation)
 );
     // ================================================================ state
     logic [31:0] gr [32];
@@ -225,7 +226,9 @@ module pa_core_seq
         ex_trap = TRAP_NONE;
         ex_is_mem = 1'b0;
         ex_isr_ior_addr = ls_ea;
-        if (c.illegal || (c.br == BR_GATE && c.fu == FU_BRANCH && psw[P_B]))
+        if (c.fu == FU_DIAG && cur_pl != 2'd0)                 // DIAG: privilege before the encoding check
+            ex_trap = TRAP_PRIV_OP;
+        else if (c.illegal || (c.br == BR_GATE && c.fu == FU_BRANCH && psw[P_B]))
             ex_trap = TRAP_ILLEGAL;
         else if (c.priv && cur_pl != 2'd0)
             ex_trap = TRAP_PRIV_OP;
@@ -521,4 +524,5 @@ module pa_core_seq
     endtask
 
     assign dbg_psw = psw;
+    assign dbg_gr = gr;
 endmodule

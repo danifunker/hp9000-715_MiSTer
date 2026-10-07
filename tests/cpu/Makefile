@@ -12,7 +12,7 @@ CFLAGS = -O1 -mpa-risc-1-1 -mschedule=7100LC -mdisable-fpregs -mno-space-regs \
 	-ffreestanding -nostdlib -fno-builtin -fno-pic \
 	-fno-asynchronous-unwind-tables -Wall -Isrc
 
-SUITES = alu1 alu2 shift mem branch trap fp fpedge max1
+SUITES = alu1 alu2 shift mem branch trap fp fpedge max1 sys
 COMMON = src/crt0.S src/ivt.S src/main.c src/uart.c
 
 all: $(SUITES:%=build/%.bin)

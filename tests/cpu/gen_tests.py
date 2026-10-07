@@ -5,7 +5,7 @@ group, each running a list of vectors and storing per vector:
     alu/shift suites: result, nullify flag (1 = next insn executed), the
                       PSW carry/borrow bits as a nibble map (idcor %r0)
 
-usage: gen_tests.py SUITE OUTDIR      (suites: alu1, alu2, shift, mem, branch, trap, fp, fpedge, max1)
+usage: gen_tests.py SUITE OUTDIR      (suites: alu1, alu2, shift, mem, branch, trap, fp, fpedge, max1, sys)
 
 Writes OUTDIR/gen_SUITE.S and OUTDIR/gen_SUITE.c. Candidate instructions
 are assembled once on their own first; any (mnemonic, condition) GNU as
@@ -930,15 +930,187 @@ def gen_max1(rng):
     return suite
 
 
+# ---------------------------------------------------------------------------
+# sys: system state -- space registers, control registers with their bit
+# masks, the PSW system mask, privilege (traps 10/11 at PL 3, entered with
+# BV and left with B,GATE), the IIA queues and RFI corner cases, the
+# interval timer. Same words as the trap suite (trap_vector). Everything
+# QEMU is known to get wrong (shadows with Q = 0, RCTR, IIAQ with Q = 0,
+# traps 23-25) is left out; those belong to the lockstep co-simulation and
+# the ROM's own self-tests.
+# ---------------------------------------------------------------------------
+PSW_INIT = 0x8          # what crt0 leaves: Q only
+
+
+def gen_sys(rng):
+    suite = Suite("sys")
+    uid = [0]
+    def lab():
+        uid[0] += 1
+        return "9%d" % uid[0]
+
+    def group(name, make, n):
+        body, ins = [], []
+        for v in range(n):
+            lines, setup, vin = make(v)
+            body += trap_vector(lines, setup)
+            ins.append(vin)
+        suite.add(name, n, TRAP_WORDS, body, ins)
+
+    # ---- space registers: 16 bits, any PL for sr0-4 (write), read any
+    def mk_sr(v):
+        s = v % 8
+        val = rng.getrandbits(16)
+        return (["\tmtsp\t%%r3, %%sr%d" % s, "\tmfsp\t%%sr%d, %%r5" % s], li(3, val), {"sr": s, "val": val})
+    group("mtsp/mfsp", mk_sr, 16)
+    # ldsid: s = 1..3 -> SR[s]; s = 0 -> SR[4 + GR[b]{0:1}]
+    def mk_ldsid(v):
+        s = v % 4
+        vals = [rng.getrandbits(16) for _ in range(8)]
+        base = (v % 4) << 30 | rng.getrandbits(30)
+        setup = []
+        for i in range(1, 8):
+            setup += li(3, vals[i]) + ["\tmtsp\t%%r3, %%sr%d" % i]
+        setup += li(4, base)
+        return (["\tldsid\t(%%sr%d, %%r4), %%r5" % s], setup, {"s": s, "base": base, "srs": vals})
+    group("ldsid", mk_ldsid, 16)
+
+    # ---- control registers: write a value, read it back; restore the ones
+    # the ROM depends on (IVA, EIEM, IPSW irrelevant between traps)
+    crs = [(8, 0xFFFF), (9, 0xFFFF), (12, 0xFFFF), (13, 0xFFFF),   # PIDs
+           (10, 0xFF), (11, 0x1F),                                   # CCR, SAR
+           (14, 0xFFFFFFFF), (15, 0xFFFFFFFF),                       # IVA, EIEM
+           (19, 0xFFFFFFFF), (20, 0xFFFF), (21, 0xFFFFFFFF),         # IIR, ISR, IOR
+           (24, 0xFFFFFFFF), (25, 0xFFFFFFFF), (26, 0xFFFFFFFF), (27, 0xFFFFFFFF),
+           (28, 0xFFFFFFFF), (29, 0xFFFFFFFF), (30, 0xFFFFFFFF), (31, 0xFFFFFFFF)]
+    for cr, mask in crs:
+        def mk(v, cr=cr, mask=mask):
+            val = rng.choice([0, 0xFFFFFFFF, 0x55555555, 0xAAAAAAAA, rng.getrandbits(32)]) & mask
+            lines = ["\tmfctl\t%%cr%d, %%r13" % cr] + li(3, val) + \
+                    ["\tmtctl\t%%r3, %%cr%d" % cr, "\tmfctl\t%%cr%d, %%r5" % cr, "\tmtctl\t%%r13, %%cr%d" % cr]
+            return (lines, (), {"cr": cr, "val": val})
+        group("cr%d" % cr, mk, 6)
+    # EIRR: write-1-to-clear; writing all ones reads back 0 (EIEM is 0)
+    def mk_eirr(v):
+        return (["\tmtctl\t%r3, %cr23", "\tmfctl\t%cr23, %r5"], li(3, 0xFFFFFFFF), {})
+    group("cr23-w1c", mk_eirr, 2)
+    # IPSW stores the implemented bits; the handler rewrites it on every trap
+    def mk_ipsw(v):
+        val = rng.choice([0x0155_5515, 0x02AA_AA0A, 0x0000_0008, 0x03FF_FF1F])
+        return (["\tmtctl\t%r3, %cr22", "\tmfctl\t%cr22, %r5"], li(3, val), {"val": val})
+    group("cr22", mk_ipsw, 4)
+    # the IIA queues: MTCTL (Q = 0 or 1, ours alike) advances the queue
+    def mk_q(v):
+        a, b = rng.getrandbits(32) & ~3, rng.getrandbits(32) & ~3
+        cr = 18 if v % 2 == 0 else 17
+        if cr == 17:
+            a &= 0xFFFF; b &= 0xFFFF
+        lines = li(3, a) + li(4, b) + ["\tmtctl\t%%r3, %%cr%d" % cr, "\tmtctl\t%%r4, %%cr%d" % cr,
+                                       "\tmfctl\t%%cr%d, %%r5" % cr, "\tmtctl\t%%r0, %%cr%d" % cr,
+                                       "\tmfctl\t%%cr%d, %%r13" % cr, "\tsub\t%r5, %r13, %r5"]
+        return (lines, (), {"cr": cr, "a": a, "b": b})
+    group("iiaq-queue", mk_q, 8)
+
+    # ---- PSW system mask: SSM/RSM/MTSM on Q and I (EIEM = 0, so I is safe)
+    def mk_ssm(v):
+        imm = [0, 8, 1, 9][v % 4]
+        # r5 = {old mask, after ssm, after rsm, after mtsm(old)}, a byte each
+        lines = ["\tssm\t%d, %%r13" % imm, "\tssm\t0, %r14", "\trsm\t%d, %%r15" % imm, "\tssm\t0, %r16",
+                 "\tmtsm\t%r13", "\tssm\t0, %r17",
+                 "\tshd\t%r13, %r14, 24, %r5", "\tdep\t%r16, 23, 8, %r5", "\tdep\t%r17, 31, 8, %r5"]
+        return (lines, (), {"imm": imm})
+    group("ssm/rsm/mtsm", mk_ssm, 8)
+
+    # ---- privilege: BV to a PL 3 target, the instruction, B,GATE back to PL 0
+    priv = [("ssm 0, %r5", 10), ("rsm 0, %r5", 10), ("mtsm %r0", 10),
+            ("mtctl %r3, %cr15", 11), ("mfctl %cr15, %r5", 11), ("mtsp %r3, %sr5", 11),
+            ("mtsp %r3, %sr7", 11), ("ldwax %r0(%r3), %r5", 10), ("stwas %r3, 0(%r3)", 10),
+            ("diag 0", 10), ("rfi", 10), ("mfctl %cr0, %r5", 11), ("mfctl %cr16, %r0", 0),
+            ("mfctl %cr11, %r5", 0), ("mtctl %r3, %cr11", 0), ("mfctl %cr26, %r5", 0),
+            ("mtsp %r3, %sr4", 0), ("mfsp %sr5, %r5", 0), ("ldsid (%sr1, %r3), %r5", 0),
+            ("mtctl %r3, %cr27", 11)]
+    def mk_priv(v):
+        insn, tr = priv[v]
+        l1, l2 = lab(), lab()
+        lines = ["\tldil\tL%%%sf, %%r13" % l1, "\tldo\tR%%%sf+3(%%r13), %%r13" % l1,
+                 "\tbv\t%r0(%r13)", "\tnop",
+                 "\t.align\t8", "%s:" % l1, "\t" + insn,
+                 "\tb,gate\t%sf, %%r14" % l2, "\tnop", "%s:" % l2, "\tsub\t%r14, %r13, %r14"]
+        return (lines, li(3, 0x12345678), {"insn": insn, "trap": tr})
+    group("pl3", mk_priv, len(priv))
+    # the link register of B,GATE carries the GATE's own PL; the target runs at PL 0
+    def mk_gate(v):
+        l1, l2 = lab(), lab()
+        lines = ["\tldil\tL%%%sf, %%r13" % l1, "\tldo\tR%%%sf+3(%%r13), %%r13" % l1,
+                 "\tbv\t%r0(%r13)", "\tnop",
+                 "%s:" % l1, "\tb,gate\t%sf, %%r14" % l2, "\tnop", "%s:" % l2,
+                 "\tsub\t%r14, %r13, %r5", "\tdep\t%r0, 31, 2, %r14",       # r5 = link - target (PL bits 3)
+                 "\tmfctl\t%cr11, %r13", "\tdepi\t0, 31, 2, %r13"]           # a privileged-at-PL3? no: any PL
+        return (lines, (), {})
+    group("gate-link", mk_gate, 2)
+
+    # ---- RFI: IPSW.N nullifies the first target instruction; the queue may
+    # carry a branch (back != front + 4)
+    def mk_rfi(v):
+        l1, l2, l3 = lab(), lab(), lab()
+        nul = v % 2
+        split = v // 2 % 2
+        lines = ["\tmtctl\t%r0, %cr17", "\tmtctl\t%r0, %cr17",
+                 "\tldil\tL%%%sf, %%r13" % l1, "\tldo\tR%%%sf(%%r13), %%r13" % l1, "\tmtctl\t%r13, %cr18"]
+        if split:
+            lines += ["\tldil\tL%%%sf, %%r13" % l2, "\tldo\tR%%%sf(%%r13), %%r13" % l2]
+        else:
+            lines += ["\tldo\t4(%r13), %r13"]
+        lines += ["\tmtctl\t%r13, %cr18"] + li(13, PSW_INIT | (0x00200000 if nul else 0)) + \
+                 ["\tmtctl\t%r13, %cr22", "\trfi", "\tnop",
+                  "%s:" % l1, "\tldi\t0x111, %r5", "\tb\t%sf" % l3, "\tnop",
+                  "%s:" % l2, "\tldi\t0x333, %r5",
+                  "%s:" % l3, "\tnop"]
+        return (lines, (), {"nul": nul, "split": split})
+    group("rfi", mk_rfi, 4)
+
+    # ---- the interval timer runs: two reads differ, and it counts up
+    def mk_itmr(v):
+        return (["\tmfctl\t%cr16, %r13", "\tldi\t200, %r14",
+                 "1:\taddib,>\t-1, %r14, 1b", "\tnop",
+                 "\tmfctl\t%cr16, %r14", "\tsub\t%r14, %r13, %r5",
+                 "\tcomiclr,>>=\t0, %r5, %r5", "\tldi\t1, %r5"], (), {})
+    group("itmr", mk_itmr, 2)
+    # a compare match sets EIRR bit 0, taken as trap 4 once I is set; the
+    # handler resumes wherever the loop was, so only r5 (EIRR after) and the
+    # trap number are compared: EIRR is cleared by the test afterwards
+    body = []
+    body += li(12, TRAPLOG)
+    for i in range(7):
+        body.append("\tstw\t%%r0, %d(%%r12)" % (4 * i))
+    body += li(5, SENTINEL) + CARRY_CLEAR + ["\tldi\t0, %r6"]
+    body += ["\tmtctl\t%r3, %cr23",                     # (r3 = -1 below) clear EIRR
+             "\tldil\tL%0x80000000, %r3", "\tmtctl\t%r3, %cr15",   # EIEM bit 0
+             "\tmfctl\t%cr16, %r13", "\tldo\t4096(%r13), %r13", "\tmtctl\t%r13, %cr16",
+             "\tssm\t1, %r0",
+             "\tldil\tL%200000, %r13", "\tldo\tR%200000(%r13), %r13",
+             "1:\tldw\t0(%r12), %r14", "\tcomib,<>,n\t0, %r14, 2f",
+             "\taddib,>\t-1, %r13, 1b", "\tnop",
+             "2:\trsm\t1, %r0", "\tmfctl\t%cr23, %r5", "\tmtctl\t%r0, %cr15",
+             "\tldi\t-1, %r3", "\tmtctl\t%r3, %cr23", "\tldi\t1, %r6"]
+    body = li(3, 0xFFFFFFFF) + body
+    body += ["\tstw,ma\t%r5, 4(%r9)", "\tstw,ma\t%r6, 4(%r9)",
+             "\tldw\t0(%r12), %r11", "\tstw,ma\t%r11, 4(%r9)"]
+    for i in range(5):
+        body.append("\tstw,ma\t%r0, 4(%r9)")
+    suite.add("itmr-interrupt", 1, TRAP_WORDS, body, [{}])
+    return suite
+
+
 GENERATORS = {"alu1": gen_alu1, "alu2": gen_alu2, "shift": gen_shift,
               "mem": gen_mem, "branch": gen_branch, "trap": gen_trap,
-              "fp": gen_fp, "fpedge": gen_fpedge, "max1": gen_max1}
+              "fp": gen_fp, "fpedge": gen_fpedge, "max1": gen_max1, "sys": gen_sys}
 
 
 def main(argv):
     if len(argv) != 3 or argv[1] not in GENERATORS:
         sys.exit(__doc__)
-    rng = random.Random({"alu1": 1, "alu2": 3, "shift": 2, "mem": 4, "branch": 5, "trap": 6, "fp": 7, "fpedge": 8, "max1": 9}[argv[1]] * 0x715)
+    rng = random.Random({"alu1": 1, "alu2": 3, "shift": 2, "mem": 4, "branch": 5, "trap": 6, "fp": 7, "fpedge": 8, "max1": 9, "sys": 10}[argv[1]] * 0x715)
     suite = GENERATORS[argv[1]](rng)
     os.makedirs(argv[2], exist_ok=True)
     suite.write(argv[2])

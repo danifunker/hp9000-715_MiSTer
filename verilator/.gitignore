@@ -4,3 +4,4 @@ screenshot_*.png
 *.fst
 build.log
 obj_dir_ct/
+obj_dir_cosim/

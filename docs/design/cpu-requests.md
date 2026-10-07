@@ -15,10 +15,10 @@ the pipelined core exists, the system uses `pa_core_seq` (uncached port only,
 
 | # | Requested by / date | What | Why (ROM step / OS need, doc ref) | Status / answer |
 |---|---|---|---|---|
-| 1 | system, 2026-10-07 | Soft-power input: a port (e.g. `soft_pwr_n`, 1 = not pressed, reset 1) that drives DR25 bit 0 (PA numbering) as read by MFCPU_T 0x1720141C | HP-UX polls it at 4 Hz, Linux at 1 Hz (revision != 0); an OSD "soft power off" holding it at 0 for 2+ polls gives a clean shutdown. Review 07 s.1.4, s.6 item 1 | open |
-| 2 | system, 2026-10-07 | CPU revision as a parameter (DR0[0:5] reset value), default 0 | User decision pending between revision 0 and 0xC (review 07 s.1.6 option B: DR0 = 0xC plus one ROM word 0xB810 -> 0xE8000012, which the system's ROM loader would apply) | open -- waits on the user |
 
 ## Done
 
 | # | What | Commit |
 |---|---|---|
+| 1 | `pa_cpu` port `soft_pwr_n` (1 = not pressed; sampled every cycle into DR25 bit 0, read by MFCPU_T). `pa_core_seq` has no DR25 input (DR25 reads what MTCPU wrote) | pipelined core commit |
+| 2 | `pa_cpu #(.CPU_REVISION(6'd0))` sets DR0 bits 0:5 (reset DR0 = {rev, 0x200}); default 0 until the user decides (revision 0xC needs the one-word ROM patch of review 07 s.1.6) | pipelined core commit |

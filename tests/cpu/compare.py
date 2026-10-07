@@ -62,6 +62,7 @@ WORD_NAMES.update({
     "mem": ["r5", "base"] + ["m%d" % i for i in range(16)],
     "branch": ["path", "r3", "r4"],
     "trap": ["r5", "exec", "trapno", "iir", "isr", "ior", "ipsw", "iiaoq"],
+    "sys": ["r5", "exec", "trapno", "iir", "isr", "ior", "ipsw", "iiaoq"],
     "fp": ["fhi", "flo", "status", "pad"],
     "fpedge": ["fhi", "flo", "status", "pad"],
 })

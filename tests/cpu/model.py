@@ -870,6 +870,27 @@ QEMU_REF_BUGS = [
                 "FP loads/stores and takes no trap",
      "manual": "ACD table D-1, p.5-1; docs/design/cpu.md 8.3",
      "qemu": "target/hppa/insns.decode fldw/fstw/fldd/fstd long forms, no PA 2.0 check"},
+    {"id": "rsm0-pl3",
+     "suite": "sys",
+     "groups": r"^pl3$",
+     "vector": lambda v: v["insn"].startswith("rsm"),
+     "traps_delta": 1,
+     "summary": "RSM with i = 0 at PL != 0: QEMU executes it (a deliberate "
+                "concession to HP-UX 11i and HP ODE, which read the PSW that way); "
+                "PA-RISC 1.1 makes every RSM a privileged operation (trap 10)",
+     "manual": "ACD p.5-144 (RSM: 'if (priv != 0) privileged_operation_trap'; "
+               "'may be executed only at the most privileged level')",
+     "qemu": "target/hppa/translate.c trans_rsm(): CHECK_MOST_PRIVILEGED only if a->i"},
+    {"id": "gate-link",
+     "suite": "sys",
+     "groups": r"^gate-link$",
+     "vector": lambda v: True,
+     "traps_delta": 0,
+     "summary": "B,GATE's link register: PA 1.1 stores IAOQ_Back + 4 with bits 30:31 "
+                "replaced by the GATE's own privilege level; QEMU stores a value that "
+                "is neither (the test sees link - target = 3 - target)",
+     "manual": "ACD p.5-63 (GATE: 'GR[t] <- cat(IAOQ_Back{0..29} + 4, IAOQ_Front{30..31})')",
+     "qemu": "target/hppa/translate.c trans_b_gate()"},
 ]
 
 
