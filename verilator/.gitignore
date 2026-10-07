@@ -3,3 +3,4 @@ obj_dir_tb/
 screenshot_*.png
 *.fst
 build.log
+obj_dir_ct/
