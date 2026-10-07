@@ -5,6 +5,12 @@ kernel taken out of the tenox disk image and disassembled with its symbol table)
 from HP-UX booting under QEMU with every PDC call logged, from the Linux 5.15
 source, and from the HP architecture documents.
 
+> **Correction (review 07, 2026-10-07):** the PDC_SOFT_POWER advice in s.0 item 8,
+> s.2.2 row 23, s.3.1, s.3.7 and the summary tables ("make SOFT_POWER fail", "no
+> DIAG on a PCX-L") is out of date. HP's PDC 1.6 never fails that call, so HP-UX
+> always polls DR25 bit 0 with MFCPU_T (0x1720141C) at 4 Hz, and so does Linux at
+> CPU revision != 0. See `07-hpux-cpu-specifics.md` s.1.4 and s.5.
+
 **How to read the citations**
 
 | Prefix | Meaning |

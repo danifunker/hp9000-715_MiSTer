@@ -156,7 +156,7 @@ Handler = first instruction. "−1"/"−2" = PDC_BAD_PROC/PDC_BAD_OPTION.
 | 20 | | — | | −1 | |
 | 21 | PSW | F0015150 | 0 mask (=1), 1 get, 2 set | Default-endianness bit: DR0 & 0x100. | HW |
 | 22 | SYSTEM_MAP | — | | **−1** (Linux then uses PDC_MEM_MAP) | |
-| 23 | SOFT_POWER | F0013B00 | 0 info, 1 enable/disable | Writes LASI PCR 0xF010C000: ARG3 = 1 → PCR &= ~1; ARG3 = 0 → PCR \|= 1, or \|= 3 when DR25 bit 31 is 0. Returns 0 without doing anything if DR0 >> 26 = 0. | HW |
+| 23 | SOFT_POWER | F0013B00 | 0 info, 1 enable/disable | Writes LASI PCR 0xF010C000: ARG3 = 1 → PCR &= ~1; ARG3 = 0 → PCR \|= 1, or \|= 3 when DR25 bit 0 (PA numbering, the soft-power button) is 0. Returns 0 without doing anything if DR0 >> 26 = 0. | HW |
 | 128 | MEM_MAP | F0013650 | 0 | device path → HPA plus "more pages"; table in §2.3. | table |
 | 129 | EEPROM | F00134B8 | 0 rd word, 1 wr word, 2 rd byte, 3 wr byte | ARG2 = offset < 0x2000. Offsets 0x1000–0x13FF (stable storage) need ARG4 = −1000 (the `PDC_EEPROM_EEPROM_PASSWORD` in Linux `pdc.h`). The BCH uses this for every EE 0x16xx flag. | EEPROM |
 | 130 | (EISA support) | F00124A0 | 0, 1, 2, 3, 5, 6 | 0 → 0xFC000000. 1/2 → write 0/1 to byte 0xFC010001. 3 → fill the EISA memory-window map registers at 0xFC100000 + 0x1000·n. 5 → 0xFC000000 + ARG. 6 → C routine 0xF0003DDC. **Not** `PDC_NVM`, which is what Linux numbers 130 on later machines. | HW |
@@ -644,7 +644,7 @@ The same routine also writes 0xBBBBBBBB and then HVERSION to
 | **Board-ID word 0xF00FFFFC** (bits 7..4), LED latch 0xF00EFFFF, EEPROM 0xF00C0000 (8 KB, data-polled), and the LASI#2/Dagger probe at 0xF041FFFF | hardware map |
 | `identity_init` writes 0xBBBBBBBB then HVERSION to **0xF0106134**. This is LASI SCSI + 0x134, outside the 53C710's 0x00–0x3F registers. Possibly a LASI scratch or ID register. | hardware map |
 | The probe IVA HPMC handler reads **MIOC +0x84** (error status). PDC_PIM LPMC also checks MEM_HPA+0x84 & 0x41. PDC_ADD_VALID sets DR0 \|= 0x2000 and clears 0x02AF0000 around the probe. | hardware map / CPU |
-| PDC_BROADCAST_RESET writes 5 to 0xFFFC0030. PDC_SOFT_POWER uses LASI PCR bits 1:0 and DR25 bit 31. PDC_TLB uses DR24/DR25. PDC_BLOCK_TLB uses DR8 + `idtlba`. | CPU (PCX-L diagnose model) |
+| PDC_BROADCAST_RESET writes 5 to 0xFFFC0030. PDC_SOFT_POWER uses LASI PCR bits 1:0 and DR25 bit 0. PDC_TLB uses DR24/DR25. PDC_BLOCK_TLB uses DR8 + `idtlba`. | CPU (PCX-L diagnose model) |
 | Artist registers that STI uses: region 2 + 0x18000 and + 0x200000; the 13 timing records (§4) say what the video timing generator must accept. | hardware map (Artist) |
 | `bootflow.sym` and `firmware.sym` are complementary; the shared addresses were left in bootflow.sym. | all |
 
