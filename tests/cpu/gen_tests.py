@@ -228,6 +228,8 @@ def gen_alu(rng, name, want, longimm):
                     body.append("\t%s\t%%r3, %%r4, %%r5" % mn)
                 body += vec_tail()
             suite.add("%s%s%s" % (m, "," + c if c else "", suffix), n, 3, body, ins)
+    if longimm:
+        gen_ds(rng, suite)
     # long immediates: ldil / ldo / addil (no condition, no nullify)
     for m in (("ldil", "addil", "ldo") if longimm else ()):
         body, ins = [], []
@@ -250,6 +252,35 @@ def gen_alu(rng, name, want, longimm):
             body += vec_tail()
         suite.add(m, N_PLAIN, 3, body, ins)
     return suite
+
+
+def gen_ds(rng, suite):
+    """DIVIDE STEP groups for alu2: every compare condition, with PSW V
+    forced to 0 or 1 first. `ds %r0,%r11,%r0` sets V regardless of its old
+    value: r11 = 0x80000000 gives V = 1, r11 = 1 gives V = 0 (and C/B = 0).
+    V afterwards is read from the IPSW of a break (PA PSW bit 14)."""
+    for cond in COND_CMP:
+        for vset in (0, 1):
+            body, ins = [], []
+            n = N_PLAIN if cond == "" else 6
+            for a, b in operand_pairs(rng, n):
+                carry = rng.choice([CARRY_CLEAR, CARRY_SET])
+                # C/B{0} is shifted in, so clear it first; then the DS forces V
+                body += CARRY_CLEAR + li(11, 0x80000000 if vset else 1)
+                body.append("\tds\t%r0, %r11, %r0")
+                if carry is CARRY_SET:
+                    body += CARRY_SET
+                body += li(3, a) + li(4, b)
+                body.append("\tldi\t0, %r6")
+                body.append("\tds%s\t%%r3, %%r4, %%r5" % ("," + cond if cond else ""))
+                body += ["\tldi\t1, %r6", "\tidcor\t%r0, %r7", "\tbreak\t0, 0"]
+                body += li(12, TRAPLOG)
+                body += ["\tldw\t16(%r12), %r8", "\textru\t%r8, 14, 1, %r8",
+                         "\tstw,ma\t%r5, 4(%r9)", "\tstw,ma\t%r6, 4(%r9)",
+                         "\tstw,ma\t%r7, 4(%r9)", "\tstw,ma\t%r8, 4(%r9)"]
+                ins.append({"a": a, "b": b, "v": vset,
+                            "carry": 1 if carry is CARRY_SET else 0})
+            suite.add("ds%s.v%d" % ("," + cond if cond else "", vset), n, 4, body, ins)
 
 
 def gen_shift(rng):

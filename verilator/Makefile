@@ -98,3 +98,14 @@ tb_shift: obj_dir_tb/shift_vectors.txt
 	./obj_dir_tb/tb_shift obj_dir_tb/shift_vectors.txt
 
 .PHONY: tb_alu tb_shift
+
+obj_dir_tb/max1_vectors.txt: $(CPUT)/unit_vectors.py $(CPUT)/model.py
+	@mkdir -p obj_dir_tb
+	$(MAKE) -C $(CPUT) build/gen_max1.json >/dev/null
+	python3 $(CPUT)/unit_vectors.py max1 -o $@
+
+tb_max1: obj_dir_tb/max1_vectors.txt
+	$(TB_V) --top-module pa_max1 -o tb_max1 $(RTL)/cpu/pa_max1.sv tb/tb_max1.cpp
+	./obj_dir_tb/tb_max1 obj_dir_tb/max1_vectors.txt
+
+.PHONY: tb_max1

@@ -13,9 +13,11 @@ also marks what the architecture leaves open; the QEMU log is only the
 source of the vector list. check mask: bit 0 result, bit 1 cond, bit 2 C/B.
 
 alu line:   a b cb_in a_shift logic_op lop inv_b cin_sel dcor cond_class
-            cond_c cond_f cb_we check | exp_result exp_cond exp_cb   (hex)
+            cond_c cond_f cb_we check ds psw_v | exp_result exp_cond exp_cb exp_v
+            (hex; check bit 3 = V)
 shift line: r1 r2 t_old imm5 op sign zero_fill use_imm amount len cond_c check
             | exp_result exp_cond                                     (hex)
+max1 line:  a b op sat sa | exp_result                                (hex)
 """
 import json
 import os
@@ -31,7 +33,7 @@ import model  # noqa: E402
 def expectation(suite, group, vin, cb_in):
     """(check mask, result, cond, cb) from the model's prediction."""
     p = model.predict(suite, group, vin)
-    t, executed, cbw = p.words
+    t, executed, cbw = p.words[:3]
     chk = 0
     res = cond = cb = 0
     if isinstance(t, int):
@@ -46,7 +48,11 @@ def expectation(suite, group, vin, cb_in):
     elif isinstance(cbw, int):
         chk |= 4
         cb = cb_from_idcor(cbw)
-    return chk, res, cond, cb
+    v = 0
+    if len(p.words) > 3 and isinstance(p.words[3], int):
+        chk |= 8
+        v = p.words[3]
+    return chk, res, cond, cb, v
 
 ARITH = {"": (0, 0), "=": (1, 0), "<": (2, 0), "<=": (3, 0), "nuv": (4, 0), "znv": (5, 0),
          "sv": (6, 0), "od": (7, 0), "tr": (0, 1), "<>": (1, 1), ">=": (2, 1), ">": (3, 1),
@@ -76,6 +82,7 @@ ALU = {
     "dcor": (0, 0, 0, 0, 0, 1, 2, UNIT, 0, 1, 0), "idcor": (0, 0, 0, 0, 0, 2, 2, UNIT, 0, 1, 0),
     "addi": (0, 0, 0, 0, 0, 0, 0, ARITH, 1, 1, 1), "subi": (0, 0, 0, 1, 1, 0, 0, CMP, 1, 1, 1),
     "comiclr": (0, 0, 0, 1, 1, 0, 0, CMP, 0, 0, 1),
+    "ds": (0, 0, 0, 0, 0, 0, 0, CMP, 1, 1, 0),      # the ds input does the rest
 }
 
 
@@ -112,7 +119,10 @@ def alu_lines(suite, groups):
     js = json.load(open(os.path.join(HERE, "build", "gen_%s.json" % suite)))
     out = []
     for g in js:
-        mn, cond, _carry = split_name(g["group"])
+        name = g["group"]
+        if name.startswith("ds") and name[-3:] in (".v0", ".v1"):
+            name = name[:-3]
+        mn, cond, _carry = split_name(name)
         if mn not in ALU:
             continue
         a_sh, lo, lop, inv, cin, dc, cls, table, cbwe, chk, imm = ALU[mn]
@@ -127,12 +137,12 @@ def alu_lines(suite, groups):
             else:
                 a, b = vin["a"], vin["b"]
             cb_in = 0xFF if vin.get("carry") else 0x00
-            mask, er, ec, ecb = expectation(suite, g["group"], vin, cb_in)
+            mask, er, ec, ecb, ev = expectation(suite, g["group"], vin, cb_in)
             if mn in ("comclr", "comiclr"):
                 mask &= ~1                          # writes 0: the CPU's job, not the ALU's
-            out.append("%08x %08x %02x %x %x %x %x %x %x %x %x %x %x %x | %08x %x %02x  # %s" % (
+            out.append("%08x %08x %02x %x %x %x %x %x %x %x %x %x %x %x %x %x | %08x %x %02x %x  # %s" % (
                 a, b, cb_in, a_sh, lo, lop, inv, cin, dc, cls, cc, cf, cbwe, mask,
-                er, ec, ecb, g["group"]))
+                int(mn == "ds"), vin.get("v", 0), er, ec, ecb, ev, g["group"]))
     return out
 
 
@@ -159,14 +169,36 @@ def shift_lines(groups):
                 zf = int(mn.startswith("z"))
                 use_imm = int(mn.endswith("i"))
             cb_in = 0xFF if vin.get("carry") else 0x00
-            mask, er, ec, _ = expectation("shift", g["group"], vin, cb_in)
+            mask, er, ec, _, _ = expectation("shift", g["group"], vin, cb_in)
             out.append("%08x %08x %08x %02x %x %x %x %x %02x %02x %x %x | %08x %x  # %s" % (
                 r1, r2, t_old, imm, op, sign, zf, use_imm, amount, ln, SHIFTC[cond],
                 mask & 3, er, ec, g["group"]))
     return out
 
 
+def max1_lines():
+    """MAX-1 needs no log (QEMU traps them): the model is the reference."""
+    js = json.load(open(os.path.join(HERE, "build", "gen_max1.json")))
+    ops = {"hadd": 0, "hsub": 1, "havg": 2, "hshladd": 3, "hshradd": 4}
+    out = []
+    for g in js:
+        for vin in g["inputs"]:
+            op, x, _, _, _ = model.max1_decode(vin["word"])
+            sat = {"ss": 1, "us": 2}.get(x, 0) if op in ("hadd", "hsub") else 0
+            sa = x if op in ("hshladd", "hshradd") else 0
+            p = model.predict("max1", g["group"], vin)
+            out.append("%08x %08x %x %x %x | %08x  # %s" % (
+                vin["a"], vin["b"], ops[op], sat, sa, p.words[0], g["group"]))
+    return out
+
+
 def main(argv):
+    if len(argv) >= 4 and argv[1] == "max1" and argv[2] == "-o":
+        lines = max1_lines()
+        with open(argv[3], "w") as f:
+            f.write("\n".join(lines) + "\n")
+        print("max1: %d vectors -> %s" % (len(lines), argv[3]))
+        return
     if len(argv) < 5 or argv[1] not in ("alu", "shift") or "-o" not in argv:
         sys.exit(__doc__)
     kind = argv[1]

@@ -256,8 +256,9 @@ def compare_group(suite, name, got, ref, inputs, use_model, nmax, known_qemu):
             r.problems.append("took %d traps, reference %d" % (got.traps, ref.traps))
     bug = model.qemu_bug_for(suite, name) if use_model else None
     whole_bug = bug is not None and bug["predict"] is None
-    if use_model and got.traps:
-        msg = "took %d traps, the model expects none" % got.traps
+    want_traps = model.expected_traps(suite, name, len(got.vectors)) if use_model else 0
+    if use_model and got.traps is not None and got.traps != want_traps:
+        msg = "took %d traps, the model expects %d" % (got.traps, want_traps)
         if known_qemu and whole_bug:
             r.warnings.append(msg + " (known QEMU bug %s)" % bug["id"])
         else:

@@ -23,6 +23,8 @@ module pa_alu (
     input  logic        inv_b,      // adder: use ~b (subtract, compare, UADDCM)
     input  logic [1:0]  cin_sel,    // adder carry in: 0 -> 0, 1 -> 1, 2 -> word carry (ADDC/SUBB)
     input  logic [1:0]  dcor,       // 0 none, 1 DCOR (b - 6s), 2 IDCOR (b + 6s)
+    input  logic        ds,         // DIVIDE STEP: a = (a << 1 | C/B{0}), +b or -b by PSW[V]
+    input  logic        psw_v,      // PSW V (divide step)
     input  logic [1:0]  cond_class, // 0 arithmetic/compare, 1 logical, 2 unit
     input  logic [2:0]  cond_c,     // condition c field
     input  logic        cond_f,     // condition negate
@@ -30,7 +32,8 @@ module pa_alu (
     output logic [7:0]  cb_out,     // carries of this operation (adder path)
     output logic        cond_sat,   // condition satisfied
     output logic        sv,         // signed overflow (incl. SHnADD shift-out)
-    output logic        uv          // unsigned overflow (adds: carry; SHnADD: shift-out too)
+    output logic        uv,         // unsigned overflow (adds: carry; SHnADD: shift-out too)
+    output logic        v_out       // new PSW V (divide step)
 );
     // ---------------------------------------------------------------- adder
     // DCOR/IDCOR: add or subtract 6 in each digit whose C/B bit is 0 / 1.
@@ -49,18 +52,19 @@ module pa_alu (
             opa = a;
             opb = b;
         end
-        opa_sh = opa << a_shift;
+        opa_sh = ds ? {opa[30:0], cb_in[7]} : (opa << a_shift);
     end
 
     logic        inv;
     logic        cin;
     always_comb begin
-        inv = (dcor == 2'd1) ? 1'b1 : (dcor == 2'd2) ? 1'b0 : inv_b;
+        inv = (dcor == 2'd1) ? 1'b1 : (dcor == 2'd2) ? 1'b0 : ds ? psw_v : inv_b;
         case (cin_sel)
             2'd0: cin = 1'b0;
             2'd1: cin = 1'b1;
             default: cin = cb_in[7];
         endcase
+        if (ds) cin = psw_v;                   // DS: + GR[r2], or + ~GR[r2] + 1
         if (dcor == 2'd1) cin = 1'b1;          // b + ~six + 1
         else if (dcor == 2'd2) cin = 1'b0;
     end
@@ -86,7 +90,7 @@ module pa_alu (
     assign add_sv = (opa_sh[31] == y[31]) && (sum[31] != opa_sh[31]);
     logic       sh_uv, sh_sv;
     always_comb begin
-        case (a_shift)
+        case (ds ? 2'd1 : a_shift)
             2'd1: begin sh_uv = |opa[31];    sh_sv = (opa[31] != opa[30]); end
             2'd2: begin sh_uv = |opa[31:30]; sh_sv = (opa[31:30] != {2{opa[29]}}); end
             2'd3: begin sh_uv = |opa[31:29]; sh_sv = (opa[31:29] != {3{opa[28]}}); end
@@ -95,6 +99,14 @@ module pa_alu (
     end
     assign sv = add_sv | sh_sv;
     assign uv = c[8] | sh_uv;
+    assign v_out = c[8] ^ b[31];                // DS: PSW[V] <- carry{0} xor GR[r2]{0}
+
+    // Condition 4/5's "unsigned overflow" (Table 5-1): for adds it is the
+    // carry (or a 1 shifted out); for subtracts it is the borrow, i.e. no
+    // carry -- or, for a subtracting divide step, a 1 shifted out too.
+    logic sub_type, c4;
+    assign sub_type = ds ? psw_v : inv_b;
+    assign c4 = sub_type ? (~c[8] | sh_uv) : ~(c[8] | sh_uv);
 
     // -------------------------------------------------------------- logical
     logic [31:0] lres;
@@ -123,8 +135,8 @@ module pa_alu (
                     3'd1: sat = zero;
                     3'd2: sat = result[31] ^ sv;
                     3'd3: sat = zero | (result[31] ^ sv);
-                    3'd4: sat = ~uv;
-                    3'd5: sat = zero | ~uv;
+                    3'd4: sat = c4;                    // NUV (adds) / << (subtracts)
+                    3'd5: sat = zero | c4;
                     3'd6: sat = sv;
                     3'd7: sat = result[0];
                 endcase

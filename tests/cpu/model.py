@@ -356,6 +356,41 @@ def arith(op, cond, r1, r2, cb_in):
     return Outcome(res, cs, s.cb if op in SETS_CB else None, notes)
 
 
+
+# ---------------------------------------------------------------------------
+# DIVIDE STEP [ACD p.5-102/5-103]
+#   if PSW[V]: GR[t] <- cat(lshift(GR[r1],1), PSW[C/B]{0}) + ~GR[r2] + 1
+#   else:      GR[t] <- cat(lshift(GR[r1],1), PSW[C/B]{0}) + GR[r2]
+#   PSW[C/B] <- carry_borrows ; PSW[V] <- xor(carry_borrows{0}, GR[r2]{0})
+# Conditions: the compare/subtract table (5-3), read as the subtract or add
+# interpretation of Table 5-1 depending on PSW[V] [p.5-5]. Overflow
+# includes the shift: signed = the bit shifted out differs from the new
+# leftmost bit, or the add/sub overflows; unsigned = the bit shifted out is
+# 1, or the add carries / the subtract borrows [p.5-103].
+# ---------------------------------------------------------------------------
+
+def ds(cond, r1, r2, cb_in, v):
+    """Returns (Outcome, new V)."""
+    r1 &= M32
+    r2 &= M32
+    shifted = ((r1 << 1) | (cb_in >> 7 & 1)) & M32
+    out = r1 >> 31                                    # the bit shifted out
+    shift_sv = out != (r1 >> 30 & 1)
+    s = Sum(shifted, ~r2, 1) if v else Sum(shifted, r2, 0)
+    if v:                                             # subtract interpretation
+        uv = bool(out) or not s.carry                 # "unsigned overflow" = borrow
+    else:
+        uv = bool(out) or bool(s.carry)
+    sv = shift_sv or s.sv
+    c, f = COND_CMP[cond]
+    notes = []
+    sv23 = None if shift_sv else s.sv
+    if shift_sv and cond in ("<", "<=", ">=", ">"):
+        notes.append("signed overflow in the pre-shift: condition 2/3 not predictable [ACD p.5-5]")
+    cs = arith_cond(c, f, s.res, uv, sv, bool(v), sv23)
+    v_new = (s.carry ^ (r2 >> 31)) & 1
+    return Outcome(s.res, cs, s.cb, notes), v_new
+
 # ---------------------------------------------------------------------------
 # Logical: AND, ANDCM, OR, XOR [ACD pp.5-105..5-108]
 # ---------------------------------------------------------------------------
@@ -640,8 +675,11 @@ SUITES = ("alu1", "alu2", "shift", "max1")
 
 
 def parse_group(name):
-    """'addc,<=.c1' -> ('addc', '<=', 1); 'shd' -> ('shd', '', None)."""
+    """'addc,<=.c1' -> ('addc', '<=', 1); 'shd' -> ('shd', '', None);
+    'ds,<<.v1' -> ('ds', '<<', None) (the V preset is in the vector)."""
     carry = None
+    if name.startswith("ds") and (name.endswith(".v0") or name.endswith(".v1")):
+        name = name[:-3]
     if name.endswith(".c0") or name.endswith(".c1"):
         carry = int(name[-1])
         name = name[:-3]
@@ -683,6 +721,12 @@ def execute(group, v):
             return shift_op(m, c, a, b, v["sar"], p=v["pos"], ln=v["len"],
                             imm=v["imm"]), cb
         return shift_op(m, c, a, b, v["sar"], ln=v.get("vlen"), imm=v["imm"]), cb
+    if m == "ds":
+        # alu2 ds groups: V forced by a preceding DS (gen_tests.py gen_ds),
+        # then C/B preset; the fourth word is the V bit after the DS
+        o, v_new = ds(c, a, b, cb, v["v"])
+        o.v = v_new
+        return o, cb
     if group == "mtsar/mfctl":
         return mtsar_mfctl(a), cb
     if m in MAX1:
@@ -716,7 +760,10 @@ def predict(suite, group, v):
         cbw = cb_map(cb_before)
     else:
         cbw = INHERIT       # no preset in this group: C/B from the C code
-    return Prediction([o.t, executed, cbw], o.notes)
+    words = [o.t, executed, cbw]
+    if hasattr(o, "v"):
+        words.append(o.v)       # divide step: PSW[V] afterwards
+    return Prediction(words, o.notes)
 
 
 # ---------------------------------------------------------------------------
@@ -749,7 +796,42 @@ def _qemu_shadd_uv(group, v):
                       ["QEMU bug shadd-uv"])
 
 
+def _qemu_ds_uv(group, v):
+    """QEMU's DIVIDE STEP conditions 4/5 use the same do_add_uv(in1, 1):
+    the bit tested as 'shifted out' is GR r1{1} (bit 30) instead of
+    GR r1{0}, and the condition is always read the add way (no unsigned
+    overflow), whatever PSW[V] says [ACD p.5-102/5-103, Table 5-1]."""
+    m, c, _ = parse_group(group)
+    a, b = v["a"] & M32, v["b"] & M32
+    cb = Sum(0, 0, 0).cb if v.get("carry", 0) == 0 else Sum(0, ~0, 1).cb
+    shifted = ((a << 1) | (cb >> 7 & 1)) & M32
+    s = Sum(shifted, ~b, 1) if v["v"] else Sum(shifted, b, 0)
+    uv = bool(a >> 30 & 1) or bool(s.carry)
+    cc, f = COND_CMP[c]
+    cs = arith_cond(cc, f, s.res, uv, False, False)
+    p = predict("alu2", group, v)
+    return Prediction([p.words[0], 0 if cs else 1] + p.words[2:], ["QEMU bug ds-uv"])
+
+
+def expected_traps(suite, group, vectors):
+    """Interruptions a group takes by design: the alu2 divide-step groups
+    read PSW[V] through the IPSW of one BREAK per vector."""
+    if suite == "alu2" and group.startswith("ds"):
+        return vectors
+    return 0
+
+
 QEMU_BUGS = [
+    {"id": "ds-uv",
+     "suite": "alu2",
+     "groups": r"^ds,(<<|<<=|>>=|>>)\.v[01]$",
+     "summary": "DS conditions 4/5 (<<, <<=, >>=, >>): QEMU tests GR r1 bit 30 as "
+                "the shifted-out bit (same do_add_uv off-by-one as shadd-uv) and "
+                "reads the condition as an add whatever PSW[V] is",
+     "manual": "ACD p.5-102/5-103 (DS: 'Unsigned overflow means that the bit "
+               "shifted out is 1 or ...'), Table 5-1 p.5-3",
+     "qemu": "target/hppa/translate.c trans_ds(): do_add_uv(ctx, cpu_psw_cb, NULL, in1, 1, false)",
+     "predict": _qemu_ds_uv},
     {"id": "shadd-uv",
      "suite": "alu1",
      "groups": r"^sh[123]addl?,(nuv|znv|uv|vnz)$",

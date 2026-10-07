@@ -18,25 +18,25 @@ int main(int argc, char** argv) {
 	long n = 0, bad = 0;
 	std::map<std::string, std::pair<long, long>> per;   // group -> (n, bad)
 	while (fgets(line, sizeof line, f)) {
-		unsigned a, b, cbin, ash, lo, lop, inv, cin, dc, cls, cc, cf, cbwe, chk, er, ec, ecb;
+		unsigned a, b, cbin, ash, lo, lop, inv, cin, dc, cls, cc, cf, cbwe, chk, ds, pv, er, ec, ecb, ev;
 		char name[128] = "";
-		if (sscanf(line, "%x %x %x %x %x %x %x %x %x %x %x %x %x %x | %x %x %x # %127s",
+		if (sscanf(line, "%x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x | %x %x %x %x # %127s",
 		           &a, &b, &cbin, &ash, &lo, &lop, &inv, &cin, &dc, &cls, &cc, &cf, &cbwe, &chk,
-		           &er, &ec, &ecb, name) < 17) continue;
+		           &ds, &pv, &er, &ec, &ecb, &ev, name) < 20) continue;
 		m->a = a; m->b = b; m->cb_in = cbin; m->a_shift = ash; m->logic_op = lo; m->lop = lop;
 		m->inv_b = inv; m->cin_sel = cin; m->dcor = dc; m->cond_class = cls;
-		m->cond_c = cc; m->cond_f = cf;
+		m->cond_c = cc; m->cond_f = cf; m->ds = ds; m->psw_v = pv;
 		m->eval();
 		unsigned cb = cbwe ? m->cb_out : cbin;
 		bool ok = (!(chk & 1) || m->result == er) && (!(chk & 2) || m->cond_sat == ec) &&
-		          (!(chk & 4) || cb == ecb);
+		          (!(chk & 4) || cb == ecb) && (!(chk & 8) || m->v_out == ev);
 		n++;
 		per[name].first++;
 		if (!ok) {
 			bad++;
 			if (per[name].second++ < 3)
-				printf("FAIL %-14s a=%08x b=%08x cb_in=%02x  result %08x/%08x cond %u/%u cb %02x/%02x\n",
-				       name, a, b, cbin, m->result, er, m->cond_sat, ec, cb, ecb);
+				printf("FAIL %-14s a=%08x b=%08x cb_in=%02x v=%u  result %08x/%08x cond %u/%u cb %02x/%02x v %u/%u\n",
+				       name, a, b, cbin, pv, m->result, er, m->cond_sat, ec, cb, ecb, m->v_out, ev);
 		}
 	}
 	long gbad = 0;

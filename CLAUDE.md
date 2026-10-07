@@ -43,7 +43,7 @@ skeleton laid down from Template_MiSTer. **No RTL yet** --
 | `docs/review/01..05` | the 2026-10-07 reviews: system docs, chip docs, QEMU/SeaBIOS, ROM and prior art, firmware (PDC/IODC/STI) requirements |
 | `docs/review/06*.md` | what HP-UX 10.20 and Linux need from the hardware: 06 by block, with sub-reports 06a audio, 06b PS/2/serial/parallel, 06c graphics/STI, 06d SCSI (c720 driver, SCRIPTS) |
 | `docs/reference/rom/` | the ROM analysis: README (index + headline FPGA demands), BOOTFLOW, HARDWARE (incl. the reconstructed MIOC), FIRMWARE |
-| `rtl/cpu/` | the PA-7100LC core, being built: `pa_alu.sv` (adds/compares/logical/unit/DCOR + conditions), `pa_shift.sv` (shift/extract/deposit) -- unit-tested against every suite vector (`make -C verilator tb_alu tb_shift`) |
+| `rtl/cpu/` | the PA-7100LC core, being built: `pa_alu.sv` (adds/compares/logical/unit/DCOR/DS + conditions), `pa_shift.sv` (shift/extract/deposit), `pa_max1.sv` (MAX-1) -- unit-tested against every suite vector, expectations from the model (`make -C verilator tb_alu tb_shift tb_max1`) |
 | `tests/cpu/` | **pacputest**: bare-metal CPU test ROMs (gen_tests.py, 9 suites), QEMU reference logs (`ref/qemu`), the independent reference model (`model.py`) and `compare.py`; see its README |
 | `verilator/` | the GUI simulator (`make && ./obj_dir/Vemu`) and unit benches (`tb/`, `make tb_alu` ...) |
 | `tools/rom/` | ROM analysis tools (`annotate.py` -> `roms/disasm/`, `romlib.py`, `firmware_map.py check`, symbols in `tools/rom/symbols/*.sym`) |
@@ -104,7 +104,8 @@ Checked in the 11.1.1 source on 2026-10-07:
 - SH1ADD/SH2ADD/SH3ADD(L) conditions NUV/ZNV/UV/VNZ are wrong: `do_add_uv()`
   (`translate.c:1140`) tests GR r1 bits 31-n..30 instead of the shifted-out
   bits 32-n..31 (Pa11_acd Table 5-2; found by the ALU unit bench and the
-  reference model, `tests/cpu/model.py` `QEMU_BUGS`).
+  reference model, `tests/cpu/model.py` `QEMU_BUGS`). DS conditions 4/5
+  share the bug and also ignore PSW[V]'s subtract reading.
 - Its 53C710 also clears DSTAT.DFE when raising an interrupt, which HP-UX
   treats as fatal (`06d`); its Artist MISC_VIDEO read overwrites bits HP's
   STI and HP-UX use as the monitor index (`06c`); its 82596 reads the PORT
