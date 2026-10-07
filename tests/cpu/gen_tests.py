@@ -653,8 +653,11 @@ def gen_trap(rng):
         return (["\tbreak\t%d, %d" % (i5, i13)], (), {"im5": i5, "im13": i13})
     group("break", mkbrk, 4)
     # illegal instructions (trap 8): major opcodes PA 1.1 does not define
+    # 0x16, 0x17, 0x1E, 0x1F are PA 2.0 long-displacement FP loads/stores that
+    # QEMU executes on a PA 1.1 CPU (model.QEMU_REF_BUGS "pa20-majors")
     illegal = [0x07 << 26, 0x1D << 26 | 0x1234, 0x1F << 26, 0x14 << 26 | 0x00210000,
-               0x1C << 26 | 0x00210000, 0x3C << 26, 0x3D << 26, 0x3F << 26]
+               0x1C << 26 | 0x00210000, 0x3C << 26, 0x3D << 26, 0x3F << 26,
+               0x16 << 26, 0x17 << 26, 0x1E << 26]
     def mkill(v):
         w = illegal[v]
         return (["\t.word\t0x%08x" % w], (), {"word": w})
@@ -678,13 +681,15 @@ def gen_trap(rng):
     vals = {1: 0x11111111, 8: 0x88888888, 16: 0x16161616, 17: 0x17171717,
             24: 0x24242424, 25: 0x25252525}
     body += li(12, TRAPLOG)
+    body += ["\tldw\t28(%r12), %r13"]                 # trap count before
     for r, v in vals.items():
         body += li(r, v)
     body += ["\tbreak\t1, 2"]
     for r in vals:
         body.append("\tstw,ma\t%%r%d, 4(%%r9)" % r)
     body += ["\tldw\t0(%r12), %r11", "\tstw,ma\t%r11, 4(%r9)",
-             "\tldw\t28(%r12), %r11", "\tstw,ma\t%r11, 4(%r9)"]
+             "\tldw\t28(%r12), %r11", "\tsub\t%r11, %r13, %r11",
+             "\tstw,ma\t%r11, 4(%r9)"]                # traps taken by this vector
     suite.add("shadow-regs", 1, TRAP_WORDS, body, [{}])
     return suite
 

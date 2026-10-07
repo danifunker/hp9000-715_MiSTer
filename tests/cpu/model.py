@@ -856,6 +856,31 @@ QEMU_BUGS = [
 ]
 
 
+# Known QEMU bugs in suites whose reference is QEMU's log (no model): the
+# listed vectors are not compared and the group's trap count may differ by
+# "traps_delta" per such vector. compare.py --ref ... --known-qemu.
+QEMU_REF_BUGS = [
+    {"id": "pa20-majors",
+     "suite": "trap",
+     "groups": r"^illegal$",
+     "vector": lambda v: (v["word"] >> 26) in (0x16, 0x17, 0x1E, 0x1F),
+     "traps_delta": 1,
+     "summary": "major opcodes 0x16/0x17/0x1E/0x1F are undefined in PA 1.1 (illegal "
+                "instruction trap 8); QEMU executes them as PA 2.0 long-displacement "
+                "FP loads/stores and takes no trap",
+     "manual": "ACD table D-1, p.5-1; docs/design/cpu.md 8.3",
+     "qemu": "target/hppa/insns.decode fldw/fstw/fldd/fstd long forms, no PA 2.0 check"},
+]
+
+
+def qemu_ref_bug_for(suite, group):
+    import re
+    for bug in QEMU_REF_BUGS:
+        if bug["suite"] == suite and re.search(bug["groups"], group):
+            return bug
+    return None
+
+
 def qemu_bug_for(suite, group):
     """The QEMU_BUGS entry covering this group, or None. An entry whose
     "predict" is None makes QEMU's whole group meaningless (any output and

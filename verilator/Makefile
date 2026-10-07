@@ -120,3 +120,26 @@ tb_ldst: obj_dir_tb/mem_vectors.txt
 	./obj_dir_tb/tb_ldst obj_dir_tb/mem_vectors.txt
 
 .PHONY: tb_ldst
+
+# ---------------------------------------------------------------------------
+# CPU test ROMs on the RTL core (verilator/cputest): `make cputest SUITE=alu1`
+# runs tests/cpu/build/<suite>.bin and checks the log with compare.py.
+CT_RTL = $(RTL)/cpu/pa_pkg.sv $(RTL)/cpu/pa_decode.sv $(RTL)/cpu/pa_alu.sv $(RTL)/cpu/pa_shift.sv \
+	$(RTL)/cpu/pa_max1.sv $(RTL)/cpu/pa_ldst.sv $(RTL)/cpu/pa_core_seq.sv cputest/cputest_top.sv
+CT_EXE = obj_dir_ct/Vcputest_top
+SUITE ?= alu1
+
+$(CT_EXE): $(CT_RTL) cputest/tb_cputest.cpp
+	$(V) --cc --exe --build -j 0 -O3 -Wno-fatal -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL \
+		-Wno-UNUSEDPARAM -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC --x-assign fast --x-initial fast \
+		--Mdir obj_dir_ct --top-module cputest_top -o Vcputest_top $(CT_RTL) cputest/tb_cputest.cpp
+
+obj_dir_ct/%.hex: $(CPUT)/build/%.bin
+	@mkdir -p obj_dir_ct
+	python3 -c "import sys;d=open(sys.argv[1],'rb').read();d+=bytes(-len(d)%8);open(sys.argv[2],'w').write('\n'.join(d[i:i+8].hex() for i in range(0,len(d),8))+'\n')" $< $@
+
+cputest: $(CT_EXE) obj_dir_ct/$(SUITE).hex
+	$(CT_EXE) +rom=obj_dir_ct/$(SUITE).hex --log obj_dir_ct/$(SUITE).log
+	python3 $(CPUT)/compare.py $(SUITE) obj_dir_ct/$(SUITE).log $(if $(filter alu1 alu2 shift max1,$(SUITE)),--model,--ref $(CPUT)/ref/qemu/$(SUITE).log)
+
+.PHONY: cputest

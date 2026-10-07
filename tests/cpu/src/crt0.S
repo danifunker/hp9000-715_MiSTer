@@ -21,6 +21,24 @@ _start:
 	ldil	L%_ivt, %r1		/* IVA = our vector table (src/ivt.S) */
 	ldo	R%_ivt(%r1), %r1
 	mtctl	%r1, %cr14
+	/* Normalise the PSW with an RFI, as firmware does: IPSW = Q only.
+	 * Q = 1 makes interruptions record IIAOQ/IIASQ/IIR/ISR/IOR (ACD p.4-16;
+	 * QEMU records them regardless, a real CPU does not), and the RFI also
+	 * clears PSW.M, which a PA7100LC resets to 1 and only an RFI or an
+	 * interruption can clear (QEMU resets it to 0). The CR17/18 writes
+	 * fill the IIA queues (PSW.Q is 0 here). */
+	mtctl	%r0, %cr17
+	mtctl	%r0, %cr17
+	ldil	L%1f, %r1
+	ldo	R%1f(%r1), %r1
+	mtctl	%r1, %cr18
+	ldo	4(%r1), %r1
+	mtctl	%r1, %cr18
+	ldi	8, %r1
+	mtctl	%r1, %cr22
+	rfi
+	nop
+1:
 
 	/* stack and data pointer */
 	ldil	L%_stack_base, %sp

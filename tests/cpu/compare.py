@@ -249,11 +249,18 @@ def compare_group(suite, name, got, ref, inputs, use_model, nmax, known_qemu):
     r.problems += got.problems
     # Interruption count: the model's suites never trap; a reference log's
     # count must be matched exactly.
+    refbug = model.qemu_ref_bug_for(suite, name) if (known_qemu and not use_model) else None
+    skip = set()
+    if refbug is not None and inputs is not None:
+        skip = {i for i, v in enumerate(inputs) if refbug["vector"](v)}
     if ref is not None and ref.traps is not None:
+        want = ref.traps + len(skip) * (refbug["traps_delta"] if refbug else 0)
         if got.traps is None:
             r.problems.append("no trap count (reference: %d)" % ref.traps)
-        elif got.traps != ref.traps:
-            r.problems.append("took %d traps, reference %d" % (got.traps, ref.traps))
+        elif got.traps != want:
+            r.problems.append("took %d traps, reference %d" % (got.traps, want))
+        elif skip:
+            r.warnings.append("trap count adjusted for known QEMU bug %s" % refbug["id"])
     bug = model.qemu_bug_for(suite, name) if use_model else None
     whole_bug = bug is not None and bug["predict"] is None
     want_traps = model.expected_traps(suite, name, len(got.vectors)) if use_model else 0
@@ -340,6 +347,9 @@ def compare_group(suite, name, got, ref, inputs, use_model, nmax, known_qemu):
             r.refbad += 1
             if matches_bug(i, rv):
                 r.refknown += 1
+        if bad_words and i in skip:
+            r.known += 1
+            continue
         if bad_words and known_qemu and matches_bug(i, g):
             r.known += 1
             continue
@@ -406,8 +416,7 @@ def main(argv):
         ap.error("give --model, --ref REFLOG, or both")
     if a.model and a.suite not in model.SUITES:
         ap.error("the model covers suites %s, not %r" % (", ".join(model.SUITES), a.suite))
-    if a.known_qemu and not a.model:
-        ap.error("--known-qemu needs --model")
+    # --known-qemu with --model: QEMU_BUGS; with --ref alone: QEMU_REF_BUGS
 
     log = Log(a.log)
     ref = Log(a.ref) if a.ref else None

@@ -43,9 +43,10 @@ skeleton laid down from Template_MiSTer. **No RTL yet** --
 | `docs/review/01..05` | the 2026-10-07 reviews: system docs, chip docs, QEMU/SeaBIOS, ROM and prior art, firmware (PDC/IODC/STI) requirements |
 | `docs/review/06*.md` | what HP-UX 10.20 and Linux need from the hardware: 06 by block, with sub-reports 06a audio, 06b PS/2/serial/parallel, 06c graphics/STI, 06d SCSI (c720 driver, SCRIPTS) |
 | `docs/reference/rom/` | the ROM analysis: README (index + headline FPGA demands), BOOTFLOW, HARDWARE (incl. the reconstructed MIOC), FIRMWARE |
-| `rtl/cpu/` | the PA-7100LC core, being built: `pa_alu.sv` (adds/compares/logical/unit/DCOR/DS + conditions), `pa_shift.sv` (shift/extract/deposit), `pa_max1.sv` (MAX-1), `pa_ldst.sv` (address generation, store byte lanes, load extraction) -- unit-tested against every suite vector, expectations from the model (`make -C verilator tb_alu tb_shift tb_max1 tb_ldst`) |
+| `rtl/cpu/` | the PA-7100LC core, being built: `pa_pkg.sv` (control word), `pa_decode.sv`, `pa_core_seq.sv` (milestone-A sequential core: real mode, integer/branch/memory/system/diag, interruptions; STUBS S-005) and the units `pa_alu.sv` (adds/compares/logical/unit/DCOR/DS + conditions), `pa_shift.sv` (shift/extract/deposit), `pa_max1.sv` (MAX-1), `pa_ldst.sv` (address generation, store byte lanes, load extraction) -- unit-tested against every suite vector, expectations from the model (`make -C verilator tb_alu tb_shift tb_max1 tb_ldst`) |
 | `tests/cpu/` | **pacputest**: bare-metal CPU test ROMs (gen_tests.py, 9 suites), QEMU reference logs (`ref/qemu`), the independent reference model (`model.py`) and `compare.py`; see its README |
-| `verilator/` | the GUI simulator (`make && ./obj_dir/Vemu`) and unit benches (`tb/`, `make tb_alu` ...) |
+| `verilator/` | the GUI simulator (`make && ./obj_dir/Vemu`), unit benches (`tb/`, `make tb_alu` ...) and the CPU test harness (`cputest/`: core + ROM/RAM/UART, runs a suite ROM) |
+| `tests/run-cputest.sh` | **CPU regression**: every suite ROM on the RTL core, checked against the model or QEMU (known QEMU bugs excused) |
 | `tools/rom/` | ROM analysis tools (`annotate.py` -> `roms/disasm/`, `romlib.py`, `firmware_map.py check`, symbols in `tools/rom/symbols/*.sym`) |
 | `tools/hpux/` | `qcow2.py` (read qcow2 without converting), `hpdisk.py` (LIF, LVM, HFS), `som.py` (SOM objects -> symbol-annotated disassembly) |
 | `roms/disasm/`, `roms/hpux/` | generated listings, and HP-UX files pulled from the 10.20 image (`vmunix`, `system`, ISL ...) -- not committed |
