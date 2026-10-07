@@ -203,12 +203,15 @@ def gen_alu(rng, name, want, longimm):
              and not (v[0][0] == "uaddcmt" and v[0][1])]
     for (m, c), _ in valid:
         n = N_PLAIN if c == "" else N_COND
-        carry_variants = [("", CARRY_CLEAR)]
+        # ops with a carry-in get a group per preset; the rest get a random
+        # preset per vector, so an op that must leave C/B alone is seen to
+        carry_variants = [("", None)]
         if m in ("addc", "subb", "dcor", "idcor"):
             carry_variants = [(".c0", CARRY_CLEAR), (".c1", CARRY_SET)]
-        for suffix, carry in carry_variants:
+        for suffix, fixed_carry in carry_variants:
             body, ins = [], []
             for a, b in operand_pairs(rng, n):
+                carry = fixed_carry or rng.choice([CARRY_CLEAR, CARRY_SET])
                 vin = {"a": a, "b": b, "carry": 1 if carry is CARRY_SET else 0}
                 ins.append(vin)
                 body += li(3, a) + li(4, b)
@@ -229,10 +232,11 @@ def gen_alu(rng, name, want, longimm):
     for m in (("ldil", "addil", "ldo") if longimm else ()):
         body, ins = [], []
         for a, _b in operand_pairs(rng, N_PLAIN):
-            body += li(3, a)
+            carry = rng.choice([CARRY_CLEAR, CARRY_SET])
+            body += li(3, a) + carry
             body.append("\tldi\t0, %r6")
             imm = rng.getrandbits(32)
-            vin = {"a": a, "imm": imm}
+            vin = {"a": a, "imm": imm, "carry": 1 if carry is CARRY_SET else 0}
             ins.append(vin)
             if m == "ldil":
                 body.append("\tldil\tL%%0x%08x, %%r5" % imm)
@@ -278,9 +282,11 @@ def gen_shift(rng):
             sar = rng.randint(0, 31)
             vln = rng.randint(1, 32)
             imm = rng.randint(-16, 15)
+            carry = rng.choice([CARRY_CLEAR, CARRY_SET])
             ins.append({"a": a, "b": b, "pos": pos, "len": ln, "sar": sar,
-                        "vlen": vln, "imm": imm})
+                        "vlen": vln, "imm": imm, "carry": 1 if carry is CARRY_SET else 0})
             body += li(3, a) + li(4, b) + li(5, b)      # r5 = b for deposits
+            body += carry
             body += li(10, sar)
             body.append("\tmtsar\t%r10")
             body.append("\tldi\t0, %r6")
@@ -301,8 +307,9 @@ def gen_shift(rng):
     # mtsar / mfctl %sar round trip
     body, ins = [], []
     for a, _b in operand_pairs(rng, N_PLAIN):
-        ins.append({"a": a})
-        body += li(3, a)
+        carry = rng.choice([CARRY_CLEAR, CARRY_SET])
+        ins.append({"a": a, "carry": 1 if carry is CARRY_SET else 0})
+        body += li(3, a) + carry
         body.append("\tmtsar\t%r3")
         body.append("\tldi\t0, %r6")
         body.append("\tmfctl\t%sar, %r5")

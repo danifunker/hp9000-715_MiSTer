@@ -70,3 +70,31 @@ clean:
 	rm -rf obj_dir obj_dir_tb screenshot_*.png
 
 .PHONY: all smoke clean
+
+# ---------------------------------------------------------------------------
+# CPU unit benches: each replays vectors derived from the CPU test suites'
+# QEMU reference logs (tests/cpu/unit_vectors.py). Need `make -C ../tests/cpu`
+# (for build/gen_*.json); the logs are committed in tests/cpu/ref/qemu.
+CPUT = ../tests/cpu
+TB_V = $(V) --cc --exe --build -j 0 -Wno-fatal -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL \
+	--Mdir obj_dir_tb -O3
+
+obj_dir_tb/alu_vectors.txt: $(CPUT)/unit_vectors.py $(CPUT)/model.py $(CPUT)/ref/qemu/alu1.log $(CPUT)/ref/qemu/alu2.log
+	@mkdir -p obj_dir_tb
+	$(MAKE) -C $(CPUT) build/gen_alu1.json build/gen_alu2.json >/dev/null
+	python3 $(CPUT)/unit_vectors.py alu $(CPUT)/ref/qemu/alu1.log $(CPUT)/ref/qemu/alu2.log -o $@
+
+obj_dir_tb/shift_vectors.txt: $(CPUT)/unit_vectors.py $(CPUT)/model.py $(CPUT)/ref/qemu/shift.log
+	@mkdir -p obj_dir_tb
+	$(MAKE) -C $(CPUT) build/gen_shift.json >/dev/null
+	python3 $(CPUT)/unit_vectors.py shift $(CPUT)/ref/qemu/shift.log -o $@
+
+tb_alu: obj_dir_tb/alu_vectors.txt
+	$(TB_V) --top-module pa_alu -o tb_alu $(RTL)/cpu/pa_alu.sv tb/tb_alu.cpp
+	./obj_dir_tb/tb_alu obj_dir_tb/alu_vectors.txt
+
+tb_shift: obj_dir_tb/shift_vectors.txt
+	$(TB_V) --top-module pa_shift -o tb_shift $(RTL)/cpu/pa_shift.sv tb/tb_shift.cpp
+	./obj_dir_tb/tb_shift obj_dir_tb/shift_vectors.txt
+
+.PHONY: tb_alu tb_shift

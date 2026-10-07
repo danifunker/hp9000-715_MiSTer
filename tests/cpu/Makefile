@@ -17,7 +17,7 @@ COMMON = src/crt0.S src/ivt.S src/main.c src/uart.c
 
 all: $(SUITES:%=build/%.bin)
 
-build/gen_%.S build/gen_%.c: gen_tests.py
+build/gen_%.S build/gen_%.c build/gen_%.json: gen_tests.py
 	@mkdir -p build
 	python3 gen_tests.py $* build
 
@@ -38,4 +38,4 @@ clean:
 	rm -rf build
 
 .PHONY: all qemu clean
-.PRECIOUS: build/gen_%.S build/gen_%.c build/%.elf
+.PRECIOUS: build/gen_%.S build/gen_%.c build/gen_%.json build/%.elf
