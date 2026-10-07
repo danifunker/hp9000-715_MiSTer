@@ -14,6 +14,7 @@ this file says where they came from.
   - `pdf/hp/pa-risc/5960-3149_Support_Tools_Manual_PA-RISC_Vol_1_SPU_Vol_2_Device_Adapters_Dec92.pdf`
   - `pdf/hp/pa-risc/OpenPA_PA-RISC_Print_2024.pdf`
   - `pdf/hp/9000_hpux/1991-200x/199304_B2355-9V155/9V255_HP-UX_Starbase_Device_Drivers_Manual_Volume_1/2_Series_700.pdf`
+  - under `pdf/hp/9000_hpux/` (for docs/review/06): `199501_B2355-90053_HP-UX_10.0_Configuring_HP-UX_for_Peripherals.pdf` (Series 700 driver names, `/stand/system`), `199704_5965-4641_HP-UX_Memory_Management_White_Paper_Version_1.3.pdf` (HTBL / TLB-miss / BTLB use)
 - `txt/` -- `pdftotext -layout` of every PDF (same base name), for grep:
 
   ```bash

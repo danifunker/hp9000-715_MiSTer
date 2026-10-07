@@ -1,0 +1,183 @@
+# Boot flow / self-test names (bootflow agent, 2026-10-07). See docs/reference/rom/BOOTFLOW.md.
+# Entry points
+f0000014 soft_reset_entry       # enters with r17=1 (soft boot); f0000010 nullifies this insn and sets r17=0
+f0000338 early_init             # stable-storage check/defaults, CPU+cache selftest, I/O probes, PS/2 reset
+f00006b4 selftest_fail_blink    # CPU selftest failed: toggle LASI.PCR 0/2 every 375 ms forever
+f00006f0 run_selftest2          # calls selftest2 (f000b750) with IVA swap, then error report
+f00007e4 probe_eisa             # DR0 bit 13 + read EISA+0xc80 (bus-error probe)
+f0000850 probe_io2              # probes 0xF041FFFE / 0xF0500000 second-LASI style I/O, WAX, 0xF1000000
+f0000ac0 mem_init               # memory sizing + test, then page-zero init, sp=0x2120
+f0000b70 page0_init             # writes PDC page zero (MEM_FREE, MEM_HPA, MEM_PDC, MEM_10MSEC, IMM_*, cons/boot paths)
+f0001ae8 halt_forever           # sync; diag TOC_EN; b . (system halted)
+f00023b0 iva_unexpected         # common target of ROM IVA vectors 1..28: chassis 0x21000+vector, halt
+f0004e50 selftest1              # CPU + cache power-on selftest dispatcher (DR0 setup, tests 0x410xx/0x420xx)
+f000b750 selftest2              # cache/TLB/IRQ/memctl/FP selftest dispatcher (tests 0x4209x,0x4109x,0x410Dx,0x4408x)
+f00122e0 chassis_code           # r3=code, link r22: LED latch 0xF00EFFFF <- ~(code>>12); prints code on RS-232 if EEPROM[0x1694] in {B0,B1}
+f0012870 pdc_entry              # PDC entry point (written to page-zero MEM_PDC 0x388)
+f0013208 ee_read_word           # r20=base (0xF00C0000), r4=offset -> r5; link r22
+f0013220 ee_write_word          # byte-wise program + poll with timeout; link r22
+f0015a98 uart_init_test         # LASI UART init + scratch/loopback check; ret0=0 ok / -1 fail; link r31
+f0015b78 uart_putc_raw          # r26=char, honours XON/XOFF; link r31
+f0015c5c uart_spin_delay        # ~976-iteration spin; link ret1
+f0015ca0 set_psw                # r26 -> PSW via rfi (rsm/mtctl ipsw/pcoq)
+f0015cdc set_dr0                # r19 -> DR0 with model-dependent fixups (DR0 bits 0..5 = CPU rev?); link sp
+f0015d20 save_r3_r18            # push r3..r18; link r31
+f0015d64 restore_r3_r18         # pop r18..r3; link r31
+f0015da8 read_itmr              # ret0 = CR16
+f0015dc0 delay_us               # r26 microseconds busy-wait on CR16 (64/80/96 ticks per us)
+f0015e24 get_cpu_speed          # (word@0xF00FFFFC >> 4)&0xF: 7 -> 1 (64 MHz), 0xB -> 2 (80 MHz), else 3 (100 MHz)
+# --- boot flow (main path, in call order) ---
+f00026b0 hpmc_toc_entry         # target of word 0 (0xF0000000): PA7100LC vectors HPMC *and* TOC here
+f00028d8 hpmc_probe_forward     # DR0 bit 18 set (bus-error probe in progress): SHDW_GR, jump to current IVA+0x20
+f000270c mioc_status_clear      # r25 <- MEM_HPA+0x84, write back (clears); bit 27 = TOC, 28..30 bus-error class
+f00027a0 hpmc_after_pim         # chassis 0x2CBF0, classify (0x2204x cache / 0x2503F bus / 0x27000 memory), dump PIM to RS-232, try OS handler, halt
+f00028a0 toc_after_pim          # chassis 0x6CB00, try OS TOC handler, else soft reset (b f0000014)
+f00028fc pim_dump_uart          # prints GRs/CRs/SRs/OTHER from EEPROM PIM area over raw UART
+f0002af4 uart_put_hex32
+f0002b4c hpmc_call_os           # validates OS HPMC vector at IVA+0x20 (checksum of IVA+0x20..0x3F + handler [IVA+0x38],len [IVA+0x3C]); chassis 0x2CBFB; jumps IVA+0x24
+f0002c18 toc_call_os            # PSW=Q, st41090 (TLB purge), cache flush; validates page0 VEC_TOC (0x08/0x0C) checksum; chassis 0x6CB0B; jumps VEC_TOC
+f0002cc0 mioc_status_check_toc_en
+f00043c8 pim_save_eeprom        # r1=0 HPMC (EEPROM 0x1400..), r1=1 TOC (EEPROM 0x1564..) via f001335c
+f0002cf0 cache_as_ram_init      # WDD/WDT loop: makes D-cache lines valid so a stack at 0x100 works with broken RAM
+f001e78c mem_fail_report        # C: memory failure report (stack in cache), 'SYSTEM HALTED', or LED blink
+f0004b68 io_module_table_init   # page0 0x66C: candidate HPAs (LASI, LASI2, WAX, EISA slots, FWSCSI, graphics) pruned with PDC_ADD_VALID
+f0004360 ss_defaults_check      # EEPROM 0x16D8 != 'G' -> f00202d0 (write stable-storage defaults)
+f0000a40 console_init_call      # -> console_init(0)
+f001f1b8 console_init           # C: console path (SS 0x60) / keyboard path (SS 0xA0), IODC init, graphics monitor type, Tab monitor cycling
+f000328c no_console_blink       # all LEDs on/off 3x at 125 ms, 375 ms pause, forever
+f00032ec eisa_config            # chassis 0x6C2EA..0x6C2F0, 0x6C2E0
+f00031e8 selftest_fail_report   # prints failed-items list + 'SYSTEM HALTED'
+f0010c4c io_selftest            # fastboot OFF only: LASI device tests via IODC, RTC-advances-in-1s check; chassis 0x48300/0x48301/0x284xx/0x48410
+f0011694 rtc_read
+f0000c34 boot_select            # autoboot/autosearch state machine (secure/manufacturing/ESC handling)
+f00011e8 try_boot_device        # (kind r26, option r25, secure r24): ESC check, build path, IODC init, load IPL
+f000141c boot_path_build        # kind 0=primary(SS 0x00) 1=alternate(SS 0x80) 2..0x16 built-in devices -> page0 MEM_BOOT 0x3D0
+f0001af8 boot_iodc_init         # IODC ENTRY_INIT of boot device (chassis 0x48004..6 on failure)
+f0001374 ipl_load_and_report
+f0001778 ipl_load               # LIF header at 0x10000: IPL addr/size/entry (0xF0/0xF4/0xF8); load to 0x10000; word checksum must be 0; 3 retries
+f0001938 boot_iodc_read
+f0002434 boot_dev_release
+f00015a0 interactive_boot       # BOOT_ADMIN loop -> 'Attempting to boot' (0x6C740) -> IPL load
+f000171c boot_failed_wait_esc   # 'Boot process failed. press <ESCAPE> to Continue.'
+f0000a6c console_key_is         # r26=char: nonblocking getc on console, ret -1 if equal
+f0003c3c eisa_boot_fixup        # boot device HPA in EISA space (0xFCxxxxxx): EISA-specific setup
+f00019f0 ipl_launch             # 'Booting', clear CRs/SRs, chassis 0x6C7FF/0x6C5FF, flush caches, jump [page0 0x50] with r26=page0[0x602], r25=end of IPL
+f0016468 boot_admin             # C: BOOT_ADMIN> command loop (arg3=1: LAN-address check only unless manufacturing mode)
+f0016db8 in_mfg_mode            # EEPROM 0x1694 == 0xB1
+f0016f38 lan_addr_check_prompt  # EEPROM 0x16B7..0x16B9 == 0xEE (unprogrammed) -> prompt for station addresses
+f001794c read_cmd_line
+f001916c cmd_lookup             # (line, allowed-code list) -> keyword code; keyword table at 0xF00230B0
+f00190d0 kw_match
+f00170a8 cmd_auto
+f00172c0 cmd_boot
+f001b494 cmd_chassis
+f001b77c cmd_information
+f001b60c cmd_onoff_flag         # generic on/off EEPROM byte: fastboot 0x1695, diagnostic 0x1699, secure 0x1696
+f0017e0c cmd_lanaddress
+f001d384 cmd_monitor
+f00193f4 cmd_path
+f0018230 cmd_peek
+f001ced0 cmd_pim_info
+f001846c cmd_poke
+f001c238 cmd_search
+f001bbec cmd_date
+f001da68 cmd_serial_num
+f0017650 cmd_manufactureoff
+f001b178 pdc_call               # C wrapper: be,l through page0 MEM_PDC (0x388)
+f001b1e8 call_fptr
+f001b25c call_fptr2
+f00163dc load_rom_dp            # dp = 0xF0024000
+f00163c0 get_cpu_speed_c
+f00163e8 get_cpu_rev            # DR0 bits 0..5
+f0010bf8 chassis                # C-callable: r26=code -> chassis_code
+f0017b04 printf
+f0017b44 puts
+f0017d54 getc_nb
+f0015920 flush_caches           # fice + fdce over 0x20000 bytes, 32-byte lines
+f0015938 flush_icache
+f0015964 flush_dcache
+f00158e0 cache_size             # constant 0x20000 (128 KB per cache)
+f0015860 mem_timing_word        # speed-dependent MEM_HPA+0xC0 value (same constants as reset_entry)
+f0015e50 elapsed_10ms           # (start CR16, n): 1 if >= n*10 ms elapsed (64/80/100 MHz from strap)
+f00157a4 timeout_us             # dp=start, ret1=us: ret0 0 while not expired
+f0016414 uart_puts_raw
+# --- self-tests (merged from the CPU, cache, TLB/FP and memory analyses, 2026-10-07; see BOOTFLOW.md section 4) ---
+f0004fb0 st41080_dr0_rw               # DR0 MTCPU/MFCPU_C, 4 patterns, mask 0x0150EFFC
+f000502c st41080_dr0_patterns         # data: ABFAAAAA 55555555 01500000 FFFFFFFF
+f0005040 st41081_gr_tr_basic          # r0, branch in delay slot, GR ripple/sum (0x1B2), TR4-7
+f000513c st41081_gr_ripple
+f0005360 st41082_alu_branch           # ALU identities; B,L in delay slot (link IAOQ_Back+4), BLR -3, ADDB, MOVB
+f0005670 st41086_shift_extract_bb     # SHRPW, EXTRU/S, DEP, SAR, BB/BVB incl. c=101 words at f00058f0/f000595c
+f00059b8 st41087_cond_nullify         # all condition/nullify cases, DCOR
+f0005d84 st41087_fail
+f0005d98 st4108a_carry_imm_traps      # ADDC/SUBB, ADDIL, COMCLR, ADDIO (trap 12), SUBT (trap 13)
+f0005f10 st4108b_cr_rctr_iiaq_rfi     # CCR/RCTR/IVA/IPSW, RCTR -4 rule, BREAK IIR, RFI with PSW.N
+f0006128 st4108c_eir_itimer           # EIR at CPU HPA, EIRR exact, DR1 + CR16 compare interrupts
+f0006328 st41083_shadow_regs          # BREAK 3 + RFIR, GR_SHDW/SHDW_GR
+f0006524 st41083_patterns
+f0006540 st4108d_dual_issue_timing    # selftest2, only if CPU rev != 0; CR16 deltas 11/9/7/6
+f0006694 st4108d_timed_kernel         # runs at phys 0xB4 from the I-cache
+f00066d0 st42091_cache_addr_lines     # address lines / aliasing, I/D separation
+f0006de0 st4209f_cache_ram_patterns   # fails report 0x42092 (I) / 0x42093 (D)
+f0006d5c cache_err_fmt10
+f0007100 st4209f_resident_l2          # runs from I-cache at 0
+f0007458 st4209f_tag_patterns         # data; complement at f0007484
+f00074b0 st4209f_data_patterns        # data; complement at f0007508
+f0007560 st4209f_resident_l1          # runs from I-cache at 0: L1 LFSR test
+f000786c l2ic_load                    # copy [r26,r25) into L2 I-cache at phys r24 (WI2D, SET_TAG, WI2T); link r31
+f00078a8 l2ic_load_loop
+f0007894 l2ic_purge                   # fice over the loaded lines; link r31
+f0007934 cache_err_dump               # chassis codes r10..r21 (count r9), 0.75 s apart
+f0007a3c cache_err_fmt8
+f0007a8c l2ic_load_bytes              # byte-lane variant (ldb stride 4), link rp
+f0007af0 st42090_cache_datapath_walk  # walking 1/0 through L2-D tag/data and L1
+f0007e68 cache_err_fmt12
+f0007ef8 st42096_cache_init           # all L2 lines tag 0xF0000400, L1 cleared
+f0007f3c cache_invalidate_all
+f0008080 st42095_cache_parity_detect  # flipped bits with stale parity -> DR0 bits 6/8, PARERR
+f00084c0 st42094_cache_hit_compare    # real ldw/fetch hits per RPN bit, L1 over L2
+f0009000 test_ivt                     # test-time IVA (dp ^= 1<<(31-n))
+f00093a0 tivt_skip_rfi                # IIAOQ <- front+4/front+8, rfi
+f00093b4 tivt_restore_rfi
+f0009414 tivt_clr_ipsw_i
+f0009428 tivt_break_svc               # BREAK im5: 1 IPSW=r25, 2 r26=IIR, 3 shadow/RFIR
+f00094a8 tivt_rctr_rearm
+f00094b8 tivt_itlb_escape             # TR3 == 0x0900DEEE -> resume at r31
+f00094f4 tivt_fp_assist               # vector 14: r18=0xF, FP status := 0x1F
+f0009548 st41090_tlb_init             # 64 DR8 inserts, pdtlbe (also TOC path)
+f00095c0 st41095_htlb_walker          # hardware TLB walker, CR28, PDIR via planted D-cache lines
+f0009ccc htlb_pdir_hash
+f0009cf4 dcache_plant_zero_line       # WDD/SET_TAG/WDT
+f0009d40 htlb_pdir_write_entry
+f0009d78 htlb_code_blob               # data copied to PA 0x1000 (0xC2239ABC + stub)
+f0009dc0 htlb_va_table                # data: 98 x {space, offset}
+f000a0d8 st41091_tlb_lpa
+f000a388 st41094_tlb_probe            # body f000a408 runs from I-cache
+f000a408 st41094_body
+f000a690 st41092_tlb_patterns         # body f000a710 runs from I-cache
+f000a710 st41092_body
+f000a918 st41093_tlb_replace_lock
+f000ad88 tlb_fill_all
+f000adc8 btlb_insert
+f000ae10 expected_access              # PA 1.1 Table 3-1 predictor
+f000aed8 st41096_tlb_tdb_traps        # B/D/T -> traps 19/20/21
+f000b118 st410d1_eir_eirr_eiem
+f000b218 st410d2_hpmc_toc             # ldw 0xFFFBB000 -> HPMC 0x02; stw 5 -> CPU_HPA+0x30 -> TOC 0x10
+f000b3e0 st410d9_dio_parity_hpmc      # MIOC +0x80 bits 17/18 parity injection
+f000b520 st410d9_payload              # runs from I-cache at 0
+f000b868 st410d4_ldcw_coherence
+f000b940 st42097_icache_smc_flush
+f000ba28 st42098_dcache_partial_store
+f000bbc0 st42099_icache_fill_tag
+f000bc50 st4209a_dcache_writeback
+f000bdb0 st4209b_cache_enable_flush
+f000bdf8 mem_size_and_test            # 0x410DA fastboot on / 0x410DB fastboot off
+f000be78 mem_softboot_check           # 0x4707E -> f000d0f8
+f000c160 mem_bank_test_done
+f000c800 st_mem_lfsr_icode            # fastboot off; runs from I-cache at 0
+f000cb90 st_mem_ones_zeros_icode      # fastboot on; runs from I-cache at 0
+f000d0f8 mem_softboot_scan
+f000dda0 st4408x_fp_dispatch          # result -> page0 byte 0x40 (3 pass / 2 fail), non-fatal
+f000de50 st44081_fp_ops
+f000e448 st44080_fp_regfile
+f000ed40 st44082_fp_exceptions        # delayed assist-exception traps

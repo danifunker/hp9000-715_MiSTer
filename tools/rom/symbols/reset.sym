@@ -1,0 +1,4 @@
+# Names given while reading the reset path (tools/rom/annotate.py loads every *.sym here)
+f0000000 vec_f0000000          # first word: b,l,n to f00026b0 (TOC/soft-reset entry? not yet known)
+f0000004 vec_reset             # CPU reset vector
+f0000010 reset_entry

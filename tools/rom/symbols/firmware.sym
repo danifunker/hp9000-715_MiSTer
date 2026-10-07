@@ -1,0 +1,120 @@
+# Firmware-structure names: PDC, EEPROM/stable storage, IODC, STI (docs/reference/rom/FIRMWARE.md)
+# Region map and parsers: tools/rom/firmware_map.py
+# Addresses already named in bootflow.sym/reset.sym are left to those files (e.g. pdc_entry f0012870,
+# chassis_code f00122e0, ee_read_word f0013208, ee_write_word f0013220, pdc_call f001b178, console_init f001f1b8).
+f0000008 rom_fw_revision               # data word 0x16 = revision 1.6
+f0011800 pdc_probe_iva                 # IVA used while PDC probes addresses/FPU
+f0011b40 pdc_probe_hpmc                # probe IVA HPMC handler: reads MEM_HPA+0x84, returns -1/-3
+f0011ba0 pdc_add_valid                 # PDC 12
+f0011be0 add_valid_probe_word
+f0011c84 add_valid_probe_byte          # option 1000
+f0011d38 pdc_block_tlb                 # PDC 18
+f0011db0 btlb_info
+f0011de8 btlb_insert
+f0011f38 btlb_purge
+f0011fa0 btlb_purge_all
+f0011fec btlb_clear_slots
+f0012040 pdc_broadcast_reset           # PDC 136
+f0012058 do_broadcast_reset
+f00120a0 pdc_cache                     # PDC 5
+f00120d0 pdc_cache_info
+f00122b8 pdc_chassis                   # PDC 2
+f00123b8 pdc_coproc                    # PDC 7
+f00123d8 pdc_coproc_cfg
+f00124a0 pdc_130_eisa                  # PDC 130 (HV): EISA support
+f00128ac pdc_jump_table                # 24 x {b,l handler,r0 ; delay}
+f0012978 pdc_dispatch_hv               # procedures >= 24: 128,129,130,136,137,138
+f00129d0 pdc_stable                    # PDC 10
+f0012a54 ss_setup                      # r19 = 0x100 (size), r20 = 0xF00C1000
+f0012a74 ss_read
+f0012abc ss_copy_out
+f0012b04 ss_write
+f0012ba0 ss_verify                     # checks both copies, repairs from the good one
+f0012c80 ss_check_copy
+f0012d7c ss_find_rings                 # locate the active {checksum,count} record of each block
+f0012e3c ss_ring_select
+f0012ebc ss_update_checksum
+f0012f68 ss_initialize                 # option 4
+f0012fe0 ss_hv_ops                     # options 1000-1004 (ARG4 must be -1000)
+f0013084 ss_hv_read
+f00130c8 ss_hv_write
+f0013194 ss_check_args
+f0013314 eeprom_rd_byte
+f0013320 eeprom_wr_byte
+f001335c eeprom_wr_word_abs            # word at 0xF00C0000+r4
+f00134b8 pdc_eeprom                    # PDC 129
+f0013580 pdc_lan_station_id            # PDC 138
+f00135a0 lan_station_id_lookup
+f0013650 pdc_mem_map                   # PDC 128
+f0013680 mem_map_lookup                # device path -> HPA
+f0013b00 pdc_soft_power                # PDC 23
+f0013b50 soft_power_enable
+f0013bc0 pdc_hpa                       # PDC 6
+f0013bf8 pdc_iodc                      # PDC 8
+f0013c44 iodc_read
+f0013c90 iodc_read_body
+f00141f8 iodc_probe_device             # per-HPA presence checks
+f00148ec iodc_fetch_word               # bytewise for 0xF1xxxxxx / 0xFCxxxxxx IODC, else word
+f0014964 iodc_copy_header              # patches HVERSION by board model (board_model)
+f0014a5c iodc_sum_block
+f0014b64 iodc_read_card_byte           # IO_DC_ADDRESS/DATA style read from a card
+f0014d00 pdc_model                     # PDC 4
+f0014d80 pdc_model_info
+f0014dec pdc_model_versions
+f0014e1c pdc_model_sysmodel
+f0014ee0 pdc_pim                       # PDC 3
+f0014f50 pim_hpmc
+f0014f90 pim_copy_from_eeprom
+f0015028 pim_return_size
+f0015048 pim_lpmc
+f001506c pim_toc
+f0015150 pdc_psw                       # PDC 21
+f00151f0 pdc_tlb                       # PDC 19
+f0015228 pdc_tlb_info
+f0015248 pdc_tlb_setup
+f00153a8 pdc_tod                       # PDC 9
+f00153e8 pdc_tod_read
+f001540c rtc_read_stable
+f0015440 pdc_tod_calibrate
+f001549c pdc_tod_write
+f0015510 pdc_exit                      # restore registers, return
+f0015520 pdc_save_regs
+f0015600 pdc_restore_regs
+f00156e8 pdc_clear_ret_buffer          # also checks R_addr alignment
+f001581c gfx_slot_iodc_probe
+f00158a8 board_model                   # 0xF00FFFFC[7:4]: 7->3 (715/64), B->4 (715/80), F->2 (715/100), else 1 (725)
+f001b2d0 iodc_call_c
+f001fdf8 build_default_ss_identity     # default stable storage + HV-area identity from the board ID
+f00202d0 identity_init
+f0024000 sti_rom                       # STI image (data)
+f0024808 sti_init_graph
+f0025fc4 sti_state_mgmt
+f0026248 sti_font_unpmv
+f00267d4 sti_block_move
+f0026b20 sti_self_test
+f002729c sti_excep_hdlr
+f00273a8 sti_inq_conf
+f002762c sti_set_cm_entry
+f00277c0 sti_region_list               # data
+f00277d4 sti_font_8x16                 # data
+f0028800 iodc_directory                # data
+f002894c iodc_rs232_init
+f0029ce0 iodc_rs232_io
+f002a1e4 iodc_gfx_init
+f002b22c iodc_gfx_io
+f002c88c iodc_scsi_init
+f002ed90 iodc_scsi_init_scripts        # data: 53C710 SCRIPTS
+f002f168 iodc_scsi_io
+f0030aa4 iodc_scsi_io_scripts          # data
+f0030e94 iodc_lan_init
+f0034dac iodc_lan_io
+f0037be4 iodc_ps2_init
+f0038850 iodc_ps2_io
+f00390e0 iodc_ps2_keymaps              # data
+f0039340 iodc_hil_init
+f0039a84 iodc_hil_io
+f0039e30 iodc_hil_keymaps              # data
+f0039f28 iodc_fwscsi_init
+f003ca3c iodc_fwscsi_init_scripts      # data
+f003cdf4 iodc_fwscsi_io
+f003e6d0 iodc_fwscsi_io_scripts        # data

@@ -46,9 +46,14 @@ docs/reference/txt/
 # HP's firmware is not ours to redistribute; roms/README.md says how to fetch it
 roms/hp-firmware/
 roms/*.bin
+# HP-UX binaries extracted from disk images (tools/hpux/), and their disassembly
+roms/hpux/
 # Scratch Quartus projects and experiments
 scratch/
 # Simulation output
 obj_dir/
 *.vcd
 *.fst
+roms/disasm/
+# Python bytecode
+__pycache__/

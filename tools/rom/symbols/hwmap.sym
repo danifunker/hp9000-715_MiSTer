@@ -1,0 +1,21 @@
+# Names from the hardware-register-map pass (docs/reference/rom/HARDWARE.md)
+f00093c8 st_hpmc_expected        # self-test HPMC handler: clear DR0.18, tr7 = MIOC_STATUS, skip insn
+f0006140 st_eir_itimer           # EIR (CPU_HPA+0) bit test, CR16/ITMR compare + DR1 ITIMER test
+f0009c7c dr24_set_htlb           # DR24 = table base | DCACHE_SIZE (0xF8 for 32K, else 0xE0)
+f000b130 st_eir_eirr             # EIR write -> EIRR bits, EIEM/I-bit delivery
+f000b230 st_hpmc_toc             # load 0xFFFBB000 -> HPMC pioae; CPU_HPA+0x30 = 5 -> TOC
+f000b3f8 st_gsc_parity           # MIOC_CONTROL pgape/pgdpe vs MEM_HPA+0xD0 and LASI UART scratch
+f000bea8 mem_disable_blocks      # MEMMASK[0..15] = 0x00400000 (emptyh)
+f000bf10 mem_size_all            # MTCV, probe 16 blocks, allocate largest-first
+f000c210 mem_probe_block         # alias probe of one comparator block, returns size or <0
+f000c450 mem_fill_line           # 8 words of r3 at r16, fdc
+f000c478 mem_chk_aaaa            # 0xAAAAAAAA present at 0/4 ?
+f000c504 mem_chk_alias           # classify words 0/4 after writing 0x55555555 higher up
+f000c5ec mem_program_block       # MEMCOMP[r6]=base, MEMMASK[r6]=tech/mask for size r5
+f000c65c mem_block_to_slot       # comparator block -> SIMM slot number (per system ID)
+f000c6e8 mem_report_errors       # chassis codes for probe errors
+f000cea0 mem_slot_table          # build page-zero table at 0x54..0xD3
+f000d1d8 mem_scrub_read          # (copied to RAM) read every line, check MIOC_STATUS
+f000d2d0 mem_ecc_multibit        # ECC test: double/triple errors -> dedc HPMC
+f000d870 mem_ecc_singlebit       # ECC test: single data/check bit -> corrected, sedc, LPMC
+f0014bd0 lpmc_pim_save           # LPMC: MIOC_STATUS dml/sedc -> PIM at 0x1A0, regs E0/D8/D0/D4
