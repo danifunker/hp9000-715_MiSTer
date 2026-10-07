@@ -1,0 +1,54 @@
+db
+greybox_tmp
+incremental_db
+output_files
+simulation
+hc_output
+scaler
+hps_isw_handoff
+vip
+*_sim
+.qsys_edit
+PLLJ_PLLSPE_INFO.txt
+*.bak
+*.orig
+*.rej
+*.qdf
+*.rpt
+*.smsg
+*.summary
+*.done
+*.jdi
+*.pin
+*.sof
+*.qws
+*.ppf
+*.ddb
+build_id.v
+c5_pin_model_dump.txt
+*.sopcinfo
+*.csv
+*.f
+*.cmp
+*.sip
+*.spd
+*.bsf
+*~
+*.xml
+*_netlist
+*.cdf
+**/.DS_Store
+# --- HP 9000/715 core ---
+# Reference documents (copyrighted; copied from the NAS and bitsavers --
+# docs/reference/README.md says where each came from and how to rebuild txt/)
+docs/reference/pdf/
+docs/reference/txt/
+# HP's firmware is not ours to redistribute; roms/README.md says how to fetch it
+roms/hp-firmware/
+roms/*.bin
+# Scratch Quartus projects and experiments
+scratch/
+# Simulation output
+obj_dir/
+*.vcd
+*.fst
