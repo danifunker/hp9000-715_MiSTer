@@ -18,6 +18,9 @@ alu line:   a b cb_in a_shift logic_op lop inv_b cin_sel dcor cond_class
 shift line: r1 r2 t_old imm5 op sign zero_fill use_imm amount len cond_c check
             | exp_result exp_cond                                     (hex)
 max1 line:  a b op sat sa | exp_result                                (hex)
+mem line:   base index disp use_index scale ea_is_base base_trunc size stbys
+            st_src kind base_we | 16 window words before | exp_r5 exp_r3off
+            | 16 window words after   (hex; kind 0 load, 1 store, 2 ldcw)
 """
 import json
 import os
@@ -192,7 +195,78 @@ def max1_lines():
     return out
 
 
+AREA = 0x00100000
+
+
+def mem_window(seed):
+    """gen_tests.py mem_fill: 16 words, w <- rotr(w, 25) + 0x5b each step."""
+    w, out = seed & 0xFFFFFFFF, []
+    for _ in range(16):
+        out.append(w)
+        w = (((w >> 25) | (w << 7)) & 0xFFFFFFFF)
+        w = (w + 0x5B) & 0xFFFFFFFF
+    return out
+
+
+def mem_lines(groups):
+    """Port vectors for rtl/cpu/pa_ldst.sv from the mem suite and its log
+    (QEMU is the reference here: the model does not cover memory)."""
+    js = json.load(open(os.path.join(HERE, "build", "gen_mem.json")))
+    out = []
+    for g in js:
+        name = g["group"]
+        mn, _, cmpl = name.partition(",")
+        cmpl = "," + cmpl if cmpl else ""
+        if mn.startswith("ldcw") or mn == "ldwax":
+            size = 2
+        elif mn == "stbys":
+            size = 0
+        else:
+            size = {"w": 2, "h": 1, "b": 0}[mn[2]]
+        kind = 2 if mn.startswith("ldcw") else (0 if mn.startswith("ld") else 1)
+        stbys = 0
+        use_index = int(mn in ("ldwx", "ldhx", "ldbx", "ldcwx", "ldwax"))
+        scale = int("s" in cmpl.replace(",", ""))
+        ea_is_base = base_we = base_trunc = 0
+        if mn in ("ldwm", "stwm"):
+            base_we = 1
+        elif use_index and "m" in cmpl:
+            ea_is_base = base_we = 1
+        elif cmpl == ",ma":
+            ea_is_base = base_we = 1
+        elif cmpl == ",mb":
+            base_we = 1
+        elif mn == "stbys":
+            stbys = 2 if "e" in cmpl else 1
+            if ",m" in cmpl:
+                base_we = base_trunc = 1
+                ea_is_base = int(stbys == 1)
+        if mn.startswith("ldcw"):
+            size = 2
+        for vin, res in zip(g["inputs"], groups[name]):
+            base = AREA + vin["off"]
+            disp = vin["disp"] & 0xFFFFFFFF
+            eib = ea_is_base
+            if mn in ("ldwm", "stwm"):
+                eib = int(vin["disp"] >= 0)
+            before = mem_window(vin["seed"])
+            out.append("%08x %08x %08x %x %x %x %x %x %x %08x %x %x | %s | %08x %08x | %s  # %s" % (
+                base, vin["index"] & 0xFFFFFFFF, disp, use_index, scale, eib, base_trunc,
+                size, stbys, vin["val"], kind, base_we,
+                " ".join("%08x" % w for w in before), res[0], res[1],
+                " ".join("%08x" % w for w in res[2:18]), name))
+    return out
+
+
 def main(argv):
+    if len(argv) >= 5 and argv[1] == "mem" and "-o" in argv:
+        o = argv.index("-o")
+        groups, _ = read_log(argv[2])
+        lines = mem_lines(groups)
+        with open(argv[o + 1], "w") as f:
+            f.write("\n".join(lines) + "\n")
+        print("mem: %d vectors -> %s" % (len(lines), argv[o + 1]))
+        return
     if len(argv) >= 4 and argv[1] == "max1" and argv[2] == "-o":
         lines = max1_lines()
         with open(argv[3], "w") as f:

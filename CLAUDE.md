@@ -43,7 +43,7 @@ skeleton laid down from Template_MiSTer. **No RTL yet** --
 | `docs/review/01..05` | the 2026-10-07 reviews: system docs, chip docs, QEMU/SeaBIOS, ROM and prior art, firmware (PDC/IODC/STI) requirements |
 | `docs/review/06*.md` | what HP-UX 10.20 and Linux need from the hardware: 06 by block, with sub-reports 06a audio, 06b PS/2/serial/parallel, 06c graphics/STI, 06d SCSI (c720 driver, SCRIPTS) |
 | `docs/reference/rom/` | the ROM analysis: README (index + headline FPGA demands), BOOTFLOW, HARDWARE (incl. the reconstructed MIOC), FIRMWARE |
-| `rtl/cpu/` | the PA-7100LC core, being built: `pa_alu.sv` (adds/compares/logical/unit/DCOR/DS + conditions), `pa_shift.sv` (shift/extract/deposit), `pa_max1.sv` (MAX-1) -- unit-tested against every suite vector, expectations from the model (`make -C verilator tb_alu tb_shift tb_max1`) |
+| `rtl/cpu/` | the PA-7100LC core, being built: `pa_alu.sv` (adds/compares/logical/unit/DCOR/DS + conditions), `pa_shift.sv` (shift/extract/deposit), `pa_max1.sv` (MAX-1), `pa_ldst.sv` (address generation, store byte lanes, load extraction) -- unit-tested against every suite vector, expectations from the model (`make -C verilator tb_alu tb_shift tb_max1 tb_ldst`) |
 | `tests/cpu/` | **pacputest**: bare-metal CPU test ROMs (gen_tests.py, 9 suites), QEMU reference logs (`ref/qemu`), the independent reference model (`model.py`) and `compare.py`; see its README |
 | `verilator/` | the GUI simulator (`make && ./obj_dir/Vemu`) and unit benches (`tb/`, `make tb_alu` ...) |
 | `tools/rom/` | ROM analysis tools (`annotate.py` -> `roms/disasm/`, `romlib.py`, `firmware_map.py check`, symbols in `tools/rom/symbols/*.sym`) |

@@ -109,3 +109,14 @@ tb_max1: obj_dir_tb/max1_vectors.txt
 	./obj_dir_tb/tb_max1 obj_dir_tb/max1_vectors.txt
 
 .PHONY: tb_max1
+
+obj_dir_tb/mem_vectors.txt: $(CPUT)/unit_vectors.py $(CPUT)/ref/qemu/mem.log
+	@mkdir -p obj_dir_tb
+	$(MAKE) -C $(CPUT) build/gen_mem.json >/dev/null
+	python3 $(CPUT)/unit_vectors.py mem $(CPUT)/ref/qemu/mem.log -o $@
+
+tb_ldst: obj_dir_tb/mem_vectors.txt
+	$(TB_V) --top-module pa_ldst -o tb_ldst $(RTL)/cpu/pa_ldst.sv tb/tb_ldst.cpp
+	./obj_dir_tb/tb_ldst obj_dir_tb/mem_vectors.txt
+
+.PHONY: tb_ldst
