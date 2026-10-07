@@ -49,6 +49,7 @@ skeleton laid down from Template_MiSTer. **No RTL yet** --
 | `docs/reference/` | PDFs and their text extracts (not committed; `README.md` there has the sources) |
 | `roms/` | firmware (not committed; `README.md` there has the recipe and hashes) |
 | `tools/hpfw/hpfw.py` | unpacks HP firmware tapes (LIF) and checks the image header checksum |
+| `docs/STUBS.md` | **the stub register**: every stub/simplification, active or planned |
 | `scratch/` | scratch Quartus projects / experiments (ignored) |
 
 ## Tools on this box
@@ -105,6 +106,11 @@ Checked in the 11.1.1 source on 2026-10-07:
 
 ## Rules
 
+- **Every stub goes in `docs/STUBS.md`** (user, 2026-10-07): anything
+  stubbed, simplified, faked or left out -- RTL, simulator, firmware path,
+  tools -- gets an entry in the same change (what, where, what the real
+  thing does, the risk, what doing it properly takes), and the entry moves
+  to "Retired" when the real thing replaces it.
 - **Never delete anything without asking** -- project files or scratch.
   Reusable scratch goes in the session scratchpad's `keep/`, listed in
   `keep/INDEX.md`. Clean up temporary output when done (disk space is
