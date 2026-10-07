@@ -17,6 +17,8 @@ same device); the paths are what to judge by.
 |---|---|---|---|---:|---:|---:|---:|---:|---:|---|
 | 1 | 2026-10-07 | 2950b41 `pa_core_seq` (sequential bring-up core) | `top_seq` | **51.6 MHz** | -3.77 ns | 7,314 | 7,511 | 0 | 0 | baseline, section 1 |
 | 2 | 2026-10-07 | pipelined `pa_cpu` (uncached fetch and data, no caches/TLB/FPU) | `top_pipe` | **72.5 MHz** | +1.83 ns | 4,849 | 6,179 | 0 | 0 | 64 MHz met; section 2.2 |
+| 3 | 2026-10-07 | + 128 KB L2-I, 1 KB L1-I, 128 KB L2-D with diagnose access, fills/write-backs on the line port | `top_pipe` | **71.0 MHz** | +1.53 ns | 6,507 | 7,862 | 291 | 0 | 64 MHz met; section 3.2 |
+| 4 | 2026-10-07 | + UTLB (64 page + 8 block entries, DR8), virtual mode in both caches (space hash), protection checks, PROBE/LPA, the hardware walker, the I-LAB | `top_pipe` | **56.3 MHz** | -2.13 ns | 10,385 | 11,723 | 291 | 0 | 64 MHz **missed**; section 4.2 |
 
 ## 1. Baseline: the sequential core (fit 1)
 
@@ -95,7 +97,119 @@ file MLAB read on the way (the D path) and ~1 ns of routing per hop. This
 is the ceiling of the E stage; the caches must not lengthen it (their hit
 logic lands in F2 and M, and misses act in W).
 
-## 3. Open items
+## 3. The caches (fit 3)
+
+### 3.1 Structure
+
+| Item | Ours |
+|---|---|
+| Arrays | L2-I and L2-D each: data 16K x 66 (two words + two even-parity bits), tag 4K x 23 ({RPN, dirty, odd dirty parity, even tag parity}); L1-I 128 x 96 ({parities, STEER, RPN, QPAGE, doubleword}). `pa_cache_ram`: the read address register loads on an enable and holds, the output is unregistered |
+| I side | the lookup is issued with the address of the instruction entering F1; during F1 the RAMs read, the tags compare (real mode: PA = VA), L1 wins over L2, parity is checked, and the word is registered into F2. An L1 miss with an L2 hit copies the doubleword into L1 when DR0.L1ICACHE_EN. Fills are non-speculative (pipeline drained) through the engine; `lk_valid` makes the fetch unit re-issue a lookup the engine disturbed |
+| D side | the RAM address register loads from the AGU sum at the E -> M move and holds while W stalls, so the outputs stay the M instruction's; hit/dirty/parity and the doubleword (with forwarding from the store in W and the one before it) are registered into W; a store hit writes the merged doubleword and the dirty tag in W (one cycle); a miss runs the engine from W (re-read the tag, write back the victim if dirty, fill, then **replay** the instruction: flush and refetch it) |
+| W engine ops | FDC/FDCE/PDC, FIC/FICE (+ the four L1 entries), LDCW without a hint (re-check: in the cache if dirty, else invalidate and read-and-clear memory), RDD/RDT/WDD/WDT, RI2D/RI2T/WI2D/WI2T, RI1/WI1 with DR27-29, SET_TAG latch; every younger instruction is flushed afterwards |
+| Costs | D-miss: tag re-read 2 + write-back (4 reads + 4 beats) + fill (4 beats) + replay 6 bubbles; I-miss: drain + fill + re-lookup; LDCW (no hint) 3 cycles + flush |
+
+### 3.2 Result
+
+**71.0 MHz, 6,507 ALMs, 7,862 registers, 291 M10K.** Every suite passes
+(`tests/run-cputest.sh`, now including the `cache` suite: 137 vectors of
+diagnose walks, planted lines, L1-over-L2, dirty/FDC, SMC) and the lockstep
+co-simulation against the uncached sequential core is identical.
+
+| Module | ALMs | Note |
+|---|---:|---|
+| `pa_core` own logic | 2,954 | + the cache engine control, store merge, replay |
+| `pa_fetch` | 757 | + I-fill control |
+| `pa_icache` | 503 | engine, L1 fill, parity (RAMs: 132 + 12 + 3 M10K) |
+| `pa_dcache` | 424 | engine, forwarding, parity (RAMs: 132 + 12 M10K) |
+| `pa_shift` | 437 | |
+| `pa_regfile` | 314 | |
+| `pa_alu` / `pa_max1` / `pa_decode` / `pa_ldst` / `pa_cr16` / `pa_biu` | 183 / 164 / 131 / 79 / 64 / 67 | |
+
+The 16K x 66 data arrays were packed by Quartus as 4K x 2 slices (132
+M10K each) rather than the 2K x 5 packing the spec assumed (112): 291 M10K
+in all against the ~247 estimate. A `max_depth = 2048` attribute on the
+arrays is the next thing to try (-40 M10K; the output mux grows from 4:1
+to 8:1).
+
+Slowest paths (1.5-1.8 ns slack): the W-stage decision whether the
+instruction in W commits (`hpmc_req`, the trap select) feeding the
+store-to-load forwarding select of the D-cache and from there the M-stage
+load word into the forwarded operand of E -- i.e. W's commit gate is now
+in series with M's data path through `dc_st_we` -> `fwd1`. Registering
+the forwarding decision (deciding `fwd1` from W's registered state, not
+from the commit gate) is the cut to make when the TLB lookup lands in the
+same stage.
+
+## 4. The TLB (fit 4)
+
+### 4.1 Structure
+
+| Item | Ours |
+|---|---|
+| `pa_tlb` | 64 page entries: tag {space, vpn} + lock-out/lock-in/E/used in flip-flops compared every cycle, the 46-bit payload in an MLAB at the encoded hit; 8 block entries in flip-flops with the mask compare and the assembled RPN; a page hit wins. One combinational lookup port; the W-stage operations (inserts, purges, the walker's inserts) walk their target set one entry per cycle |
+| Lookup port | shared: the instruction in M when it translates (loads/stores with PSW.D, PROBE/LPA always, FDC/PDC/FIC with PSW.D, RDTLB) else the fetch unit's I-LAB refill. The space register is read in E (the s/sr rule or IIASQ / ISR for the fast inserts) and registered with the VA, so the M cycle starts at the CAM |
+| M stage | CAM -> encode -> payload MLAB -> RPN -> D-cache tag compare (the cpu.md 6.9 path), with the access-rights, PID, B/D/T checks on the payload in parallel; trap 15/17/26/27/19/20/21 flags merged with E's; the U bit and the PA decide cached vs uncached; PROBE's result and LPA's PA are late results (load-use interlock) |
+| Hashed index | the space hash of the cache index (DR0 DHASH_EN / IHASH_EN with PSW.D / PSW.C) is applied in E on the way to the RAM address register (5 XORs); every cache operation carries its hash and its RPN |
+| Walker | in the W state machine: the hashed PDIR address, one 16-byte read through the D-cache engine (filling on a miss, as the ROM's planted lines need), the V/tag/R checks, IxTLBA + IxTLBP through the TLB port, then replay; failures take 15/17/6 with CR28 per the ERS table (U/N), never when the walker is off |
+| I-LAB | one entry in the fetch unit {space, vpn, rpn, execute-ok per PL, AR type}; a miss asks the TLB through the core (M first), an absent page tags the instruction ITLB-miss (it travels as a NOP); IMP and the GATE's page type travel with the instruction |
+| Costs | I-LAB refill 1-2 bubbles; walk: ~10 cycles + the PDIR read + 2 TLB ops + replay; TLB ops: 2-3 cycles + flush |
+
+### 4.2 Result
+
+56.3 MHz, -2.13 ns: the TLB in M costs 14.7 MHz against fit 3 and misses
+64 MHz by 2.1 ns. Area 10,385 ALMs / 11,723 registers, of which `pa_tlb`
+alone is 3,869 ALMs / 4,140 registers (`pa_core` 4,322 incl. the walker
+and the hash, `pa_fetch` 734 with the I-LAB, both caches ~950 together).
+The M10K count is unchanged (291); the TLB payload is two MLABs.
+
+The 40 worst paths are all the same chain, launched from the registered
+M-stage lookup operands (`tlb_lk_space`, `tlb_lk_vpn`) and landing on a
+register Quartus retimed into the ALU operand (`opa_sh`), 17.0 ns of data
+delay against the 15.6 ns budget:
+
+| ns | segment |
+|---|---|
+| 4.6 -> 10.2 | the 64-entry CAM compare and its hit encode into the payload MLAB address (`comb~113/122` -> `prot_mem.raddr_a`) |
+| 10.2 -> 13.5 | MLAB read (1.6 ns of routing to it, 0.65 ns in it) and the page/block RPN select (`lk_rpn`) |
+| 13.5 -> 17.5 | the RPN into the core (`dc_m_rpn`) and the cached/uncached decision from the PA for the load in M (`w_ld`, `w_cached`) |
+| 17.5 -> 21.7 | that decision selects the W-stage load data (`wd0`) that is forwarded into E's operand mux and the ALU (`Mux30` -> `opa` -> `opa_sh`) |
+
+So the lookup itself (CAM + encode + payload) takes 9 ns of the cycle and
+the load-data forwarding path that consumes its result takes another 8:
+the two are in series because the cached/uncached decision for the load in
+M is made from the translated PA in the same cycle, and the forwarding
+select for E depends on it. The entity report also shows why the TLB is
+3.9k ALMs: the W-stage operations (IxTLBA/IxTLBP, the purges, the walker's
+inserts, DR8 access) have their own 36-bit comparators over the same 64 page entries
+(`op_match`), duplicating the lookup CAM (`match`).
+
+Cuts, cheapest first (none applied yet; the lockstep co-simulation and all
+ten suites pass on this RTL):
+
+1. **Register the cached/uncached decision and the forwarding select**:
+   decide `w_cached` from the registered PA at the start of W (one more
+   bubble only for an uncached load followed by a dependent use, the case
+   that already waits for the bus), and take the E forwarding select from
+   W's registered state rather than from M's translation. This is the
+   fit-3 cut of section 3.2 restated; it removes the 13.5 -> 21.7 tail,
+   worth up to 8 ns, i.e. it alone should recover 64 MHz.
+2. **Share the comparators**: one CAM, time-multiplexed -- the W-stage
+   operations walk entries one per cycle anyway, so they can use the
+   lookup port's compare while the pipeline is held. Area only (-1.5k
+   ALMs expected), no timing gain, but it is what makes the next cut cheap.
+3. **Space compare in E**: the space half of the tag compare (16 bits of
+   the 36-bit tag) can be done in E on the registered space and ANDed in M, taking
+   ~1.5 ns out of the CAM. Costs one 72-bit register.
+4. **One-hot payload**: read the payload from flip-flops through an AND-OR
+   over the one-hot hit vector instead of encoding the hit into an MLAB
+   address (removes the encode and the 1.6 ns of routing to the MLAB,
+   ~2.5 ns; the payload moves from the two MLABs into 64 x 46 flip-flops, so only if 2 and 3 are not enough).
+5. **A registered translation** (translate in E for the common case, M
+   only checks): the real PCX-L way, but it moves the address generation
+   earlier and costs a bubble on every base-register forward; last resort.
+
+## 5. Open items
 
 - Prediction in F2 instead of D (see 2.1) once the real F2 (tag compare +
   select) exists and its slack is known.

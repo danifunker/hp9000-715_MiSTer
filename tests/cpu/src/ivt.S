@@ -8,6 +8,9 @@
  *   +4  IIR                      +20 IIAOQ front (the trapping insn)
  *   +8  ISR (data traps, else 0) +24 IIAOQ back
  *   +12 IOR (data traps, else 0) +28 count of interruptions taken
+ *   +32 escape address: if non-zero, resume there instead (and clear it);
+ *       for traps the next instruction would take again (a fetch from an
+ *       unmapped or non-executable page)
  *
  * The handler works only in the shadowed registers (r1, r8, r9, r16, r17,
  * r24, r25), deliberately clobbers them, and returns with RFIR, so every
@@ -63,7 +66,13 @@ trap_common:
 	ldi	-1, %r24
 	mtctl	%r24, %cr23
 1:
-	/* resume after the trapping insn: queue = (back, back + 4) */
+	/* resume after the trapping insn: queue = (back, back + 4), or at the
+	 * escape address a test left at +32 */
+	ldw	32(%r8), %r24
+	comib,=,n	0, %r24, 1f
+	copy	%r24, %r17
+	stw	%r0, 32(%r8)
+1:
 	mtctl	%r17, %cr18
 	ldo	4(%r17), %r17
 	mtctl	%r17, %cr18

@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
 	std::vector<Ev> hist;             // last matched events
 	std::string ua, ub, tail;
 	unsigned long long cyc = 0, matched = 0;
-	bool a_done = false, b_done = false, mismatch = false;
+	bool a_done = false, b_done = false, mismatch = false, timer_end = false;
 	top->clk_a = 0; top->clk_b = 0; top->rst_n = 0;
 	unsigned long long cyc_a = 0, cyc_b = 0, last_a = 0, last_b = 0;
 	const size_t LEAD = 2000;          // events one core may be ahead before it is paused
@@ -87,6 +87,15 @@ int main(int argc, char** argv) {
 		}
 		while (!qa.empty() && !qb.empty()) {
 			std::string why;
+			// MFCTL CR16 reads the interval timer, whose value depends on each
+			// core's own cycle count: from here on the programs legitimately
+			// diverge (the sys suite's timer groups), so the comparison ends
+			if (!qa.front().trap && (qa.front().insn & 0xFFFFFFE0) == 0x020008A0) {
+				fprintf(stderr, "cosim: MFCTL CR16 at %08x after %llu matched events: timer-dependent code, comparison ends here\n",
+				        qa.front().iaoq, matched);
+				a_done = b_done = true; timer_end = true; qa.clear(); qb.clear();
+				break;
+			}
 			if (!same(qa.front(), qb.front(), why)) {
 				fprintf(stderr, "cosim: MISMATCH after %llu matched events: %s\n", matched, why.c_str());
 				fprintf(stderr, " recent matched events (seq core cycle):\n");
@@ -117,8 +126,20 @@ int main(int argc, char** argv) {
 		}
 		if (!a_done && (ua.find("== end") != std::string::npos || ua.find("!! ") != std::string::npos)) a_done = true;
 		if (!b_done && (ub.find("== end") != std::string::npos || ub.find("!! ") != std::string::npos)) b_done = true;
-		if (a_done && b_done && qa.empty() && qb.empty()) break;
+		// both ROMs printed their end marker (they then spin in a halt loop)
+		if (a_done && b_done) break;
 		top->clk_a = 0; top->clk_b = 0; top->eval();
+	}
+	// compare the serial output up to the end marker (the run stops as soon as
+	// both cores printed it, one may have printed a character more)
+	auto cut = [](std::string& u) {
+		size_t p = u.find("== end"); if (p == std::string::npos) p = u.find("!! ");
+		if (p != std::string::npos) u.erase(p);
+	};
+	cut(ua); cut(ub);
+	if (timer_end) {                   // stopped early: only the common prefix is comparable
+		size_t n = std::min(ua.size(), ub.size());
+		ua.erase(n); ub.erase(n);
 	}
 	if (ua != ub && !mismatch) {
 		fprintf(stderr, "cosim: UART output differs (A %zu bytes, B %zu bytes)\n", ua.size(), ub.size());

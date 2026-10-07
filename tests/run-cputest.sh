@@ -9,7 +9,7 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 V=$HERE/../verilator
 CPUT=$HERE/cpu
-SUITES=${*:-alu1 alu2 shift max1 mem branch trap sys}
+SUITES=${*:-alu1 alu2 shift max1 mem branch trap sys cache tlbx}
 CORE=${CORE:-pipe}
 export CORE
 make -s -C "$CPUT" >/dev/null || exit 1
@@ -21,7 +21,7 @@ for s in $SUITES; do
     run=$("$V/obj_dir_ct/$CORE/Vcputest_top" +rom="$V/obj_dir_ct/$s.hex" --log "$V/obj_dir_ct/$s.log" \
           --max-cycles 200000000 2>&1 | tail -1)
     case $s in
-        alu1|alu2|shift|max1) ref="--model" ;;
+        alu1|alu2|shift|max1|cache|tlbx) ref="--model" ;;
         *)                    ref="--ref $CPUT/ref/qemu/$s.log --known-qemu" ;;
     esac
     res=$(python3 "$CPUT/compare.py" $s "$V/obj_dir_ct/$s.log" $ref 2>&1)

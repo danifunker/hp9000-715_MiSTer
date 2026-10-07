@@ -5,7 +5,7 @@ group, each running a list of vectors and storing per vector:
     alu/shift suites: result, nullify flag (1 = next insn executed), the
                       PSW carry/borrow bits as a nibble map (idcor %r0)
 
-usage: gen_tests.py SUITE OUTDIR      (suites: alu1, alu2, shift, mem, branch, trap, fp, fpedge, max1, sys)
+usage: gen_tests.py SUITE OUTDIR      (suites: alu1, alu2, shift, mem, branch, trap, fp, fpedge, max1, sys, cache)
 
 Writes OUTDIR/gen_SUITE.S and OUTDIR/gen_SUITE.c. Candidate instructions
 are assembled once on their own first; any (mnemonic, condition) GNU as
@@ -1102,15 +1102,609 @@ def gen_sys(rng):
     return suite
 
 
+# ---------------------------------------------------------------------------
+# cache: the PCX-L cache diagnose path and the behaviours the ROM's cache
+# self-tests check (BOOTFLOW.md 4.3/4.4, cpu.md 5.4/5.5): tag and data bits
+# through WDD/SET_TAG/WDT and RDD/RDT (and the I side), parity generation
+# and Arb parity with DR0 HIT/PARERR/L2PARERR, the L1 entry through
+# DR27-29 with WI1/RI1, real loads served by a planted D-line with no memory
+# behind it, planted I-lines executed (L1 over L2), the dirty bit and FDC
+# write-back, self-modifying code through FDC + FIC. QEMU has no cache
+# model: every vector's expected words are computed here and stored in the
+# JSON sidecar ("expect"); model.predict returns them.
+# ---------------------------------------------------------------------------
+CACHE_WORDS = 8
+DIAG = {"MTCPU": 0x14000240, "MFCPU_C": 0x14000600, "MFCPU_T": 0x14001400,
+        "RDD": 0x14001C40, "RDT": 0x14001D40, "RI2D": 0x14000C40, "RI2T": 0x14000D40,
+        "RI1": 0x14000800, "WDD": 0x14001E40, "WDT": 0x14001F40, "WI2D": 0x14000E40,
+        "WI2T": 0x14000F40, "WI1": 0x14000E00, "SET_TAG": 0x14000840}
+
+
+def diag(name, b=0, x=0, t=0, dr=0):
+    """One PCX-L diagnose word (ERS s.8.3): b/dr at 6:10, x at 11:15, t at 27:31
+    (reads) or 11:15 (MFCPU_C)."""
+    w = DIAG[name]
+    if name == "MTCPU":   w |= dr << 21 | x << 16
+    elif name == "MFCPU_C": w |= dr << 21 | t << 16
+    elif name == "MFCPU_T": w |= dr << 21 | t
+    elif name in ("RDD", "RDT", "RI2D", "RI2T"): w |= b << 21 | t
+    elif name in ("WDD", "WI2D"): w |= b << 21 | x << 16
+    elif name in ("WDT", "WI2T", "WI1"): w |= b << 21
+    elif name == "SET_TAG": w |= x << 16
+    return "\t.word\t0x%08x\t; %s" % (w, name)
+
+
+def par(x):
+    return bin(x).count("1") & 1
+
+
+TAG_INVALID = 0xF0000400
+DR0_MASKED = 0x03FF0000        # flags cleared (W1C), HPMCs masked, L1 off
+
+
+def gen_cache(rng):
+    suite = Suite("cache")
+    uid = [0]
+    def lab():
+        uid[0] += 1
+        return "9%d" % uid[0]
+    A_D = 0x00101000                # RAM, cache index 0x80: nothing else lives there
+    A_I = 0x00301000                # beyond the 2 MB RAM: a fill would bus-error
+    B_D = 0x00301000                # idem for the D side: hits prove no memory access
+    SYNC = "\tsync"
+
+    def group(name, vectors):
+        body, ins = [], []
+        for lines, expect in vectors:
+            words = list(expect) + [0] * (CACHE_WORDS - len(expect))
+            body += ["\t.word\t0x%08x" % 0x08000240] if False else []
+            body += lines
+            ins.append({"expect": words})
+        suite.add(name, len(vectors), CACHE_WORDS, body, ins)
+
+    def store_regs(regs):
+        out = []
+        for r in regs:
+            out.append("\tstw,ma\t%%r%d, 4(%%r9)" % r)
+        for _ in range(CACHE_WORDS - len(regs)):
+            out.append("\tstw,ma\t%r0, 4(%r9)")
+        return out
+
+    def dr0_reset():
+        return li(13, DR0_MASKED) + [diag("MTCPU", x=13, dr=0)]
+
+    def tag_words(p):
+        rpn = p >> 12
+        return rpn, (p >> 11) & 1, (p >> 10) & 1, (p >> 9) & 1, (p >> 8) & 1, (p >> 7) & 1, (p >> 6) & 1
+
+    # ---- L2-D / L2-I tag and data walk: WxD A (even), WxD A+4 (odd), SET_TAG p, WxT A
+    def walk_vector(side, p, d0, d1, addr):
+        rd_d, rd_t, wr_d, wr_t = (("RDD", "RDT", "WDD", "WDT") if side == "D" else ("RI2D", "RI2T", "WI2D", "WI2T"))
+        rpn, dirty, dpar, tpar, p0, p1, arb = tag_words(p)
+        s_tpar = tpar if arb else par(rpn)
+        s_p0 = par(d0)
+        s_p1 = p1 if arb else par(d1)               # the last WxD wrote the odd word
+        rdt = rpn << 12 | dirty << 11 | dpar << 10 | s_tpar << 9 | s_p0 << 8 | s_p1 << 7
+        hit = 1 if rpn == (addr >> 12) else 0
+        perr_bits = (0x00080000 if s_p0 != par(d0) else 0) | (0x00040000 if s_p1 != par(d1) else 0) | \
+                    (0x00020000 if s_tpar != par(rpn) else 0) | (0x00010000 if dpar != (dirty ^ 1) else 0)
+        perr = 1 if perr_bits else 0
+        flag = (0x00800000 if side == "D" else 0x02000000) if perr else 0
+        dr0 = flag | perr_bits | hit << 1 | perr
+        lines = dr0_reset() + li(13, addr) + li(14, d0) + li(15, d1) + li(16, p) + \
+                [SYNC, diag(wr_d, b=13, x=14), "\tldo\t4(%r13), %r17", diag(wr_d, b=17, x=15),
+                 diag("SET_TAG", x=16), diag(wr_t, b=13), SYNC,
+                 diag(rd_t, b=13, t=3), diag("MFCPU_C", dr=0, t=4),
+                 diag(rd_d, b=13, t=5), diag(rd_d, b=17, t=6), SYNC] + \
+                li(7, 0x02AF0003) + ["\tand\t%r4, %r7, %r4"] + \
+                li(16, TAG_INVALID) + [diag("SET_TAG", x=16), diag(wr_t, b=13), SYNC] + dr0_reset() + \
+                store_regs([3, 4, 5, 6])
+        return lines, [rdt, dr0, d0, d1]
+
+    for side, addr in (("D", A_D), ("I", A_I)):
+        vecs = []
+        base_tag = (addr >> 12) << 12 | 0x400                       # RPN of addr, dirty 0, odd dirty parity
+        for bit in range(6, 26):                                     # walking 1 through dirty .. RPN
+            vecs.append(walk_vector(side, base_tag ^ (1 << (31 - bit)), rng.getrandbits(32), rng.getrandbits(32), addr))
+        for _ in range(6):                                           # random tags, random data
+            vecs.append(walk_vector(side, rng.getrandbits(32) & 0xFFFFFFC0, rng.getrandbits(32), rng.getrandbits(32), addr))
+        for d0, d1 in ((0, 0), (0xFFFFFFFF, 0xFFFFFFFF), (0x80000000, 1), (0x55555555, 0xAAAAAAAA)):
+            vecs.append(walk_vector(side, base_tag, d0, d1, addr))
+        group("l2%s-walk" % side.lower(), vecs)
+
+    # ---- L1-I entry: DR27/28/29 -> WI1 A; CR18 <- A; RI1; MFCPU_T 27/28/29
+    def l1_vector(dr27, dr28, dr29, addr):
+        tag30 = dr29 & 0x3FFFFFFF
+        fpdata = par(dr27) ^ par(dr28) ^ (dr29 >> 31)
+        fptag = par(tag30) ^ ((dr29 >> 30) & 1)
+        rd29 = fpdata << 31 | fptag << 30 | tag30
+        rpn, qpage = (dr29 >> 2) & 0xFFFFF, dr29 & 3
+        hit = 1 if (rpn == addr >> 12 and qpage == (addr >> 10) & 3) else 0
+        perr = 1 if (fpdata != par(dr27) ^ par(dr28) or fptag != par(tag30)) else 0
+        dr0 = (0x00200000 if perr else 0) | hit << 1 | perr
+        lines = dr0_reset() + li(13, addr) + li(14, dr27) + li(15, dr28) + li(16, dr29) + \
+                [SYNC, diag("MTCPU", x=14, dr=27), diag("MTCPU", x=15, dr=28), diag("MTCPU", x=16, dr=29),
+                 diag("WI1", b=13), SYNC,
+                 "\tmtctl\t%r13, %cr18", "\tmtctl\t%r13, %cr18", diag("RI1"), SYNC,
+                 diag("MFCPU_T", dr=27, t=3), diag("MFCPU_T", dr=28, t=4), diag("MFCPU_T", dr=29, t=5),
+                 diag("MFCPU_C", dr=0, t=6)] + li(7, 0x00200003) + ["\tand\t%r6, %r7, %r6"] + \
+                li(14, 0) + li(15, 0) + li(16, 0x18BC0000) + \
+                [diag("MTCPU", x=14, dr=27), diag("MTCPU", x=15, dr=28), diag("MTCPU", x=16, dr=29),
+                 diag("WI1", b=13), SYNC] + dr0_reset() + store_regs([3, 4, 5, 6])
+        return lines, [dr27, dr28, rd29, dr0]
+    vecs = []
+    for bit in range(32):
+        vecs.append(l1_vector(0, 0, 1 << bit, A_I + 0x3F8))
+    for bit in (0, 7, 15, 31):
+        vecs.append(l1_vector(1 << bit, 0, 0x18BC0000, A_I + 0x3F8))
+        vecs.append(l1_vector(0, 1 << bit, 0x18BC0000, A_I + 0x3F8))
+    for _ in range(8):
+        vecs.append(l1_vector(rng.getrandbits(32), rng.getrandbits(32), rng.getrandbits(32), A_I + 8 * rng.randint(0, 127)))
+    # the entry's own address: hit
+    good29 = (A_I >> 12) << 2 | (A_I >> 10) & 3 | 0x62 << 22
+    vecs.append(l1_vector(0x12345678, 0x9ABCDEF0, good29, A_I))
+    group("l1-walk", vecs)
+
+    # ---- a planted D-line serves real loads; a store makes it dirty (0x42094, 0x4209A)
+    def dhit_vector(k):
+        addr = B_D + 32 * k
+        data = [rng.getrandbits(32) for _ in range(8)]
+        tag = (addr >> 12) << 12 | 0x400
+        lines = dr0_reset() + li(13, addr) + li(16, tag) + [SYNC]
+        for i, d in enumerate(data):
+            lines += li(14, d) + ["\tldo\t%d(%%r13), %%r17" % (4 * i), diag("WDD", b=17, x=14)]
+        lines += [diag("SET_TAG", x=16), diag("WDT", b=13), SYNC,
+                  "\tldw\t12(%r13), %r3", "\tldw\t28(%r13), %r4", "\tldh\t2(%r13), %r5",
+                  "\tldb\t5(%r13), %r6"] + li(14, 0x55555555) + \
+                 ["\tstw\t%r14, 8(%r13)", SYNC, "\tldo\t8(%r13), %r17", diag("RDT", b=17, t=7),
+                  diag("RDD", b=17, t=8), SYNC] + \
+                 li(16, TAG_INVALID) + [diag("SET_TAG", x=16), diag("WDT", b=13), SYNC] + dr0_reset() + \
+                 store_regs([3, 4, 5, 6, 7, 8])
+        rdt = (addr >> 12) << 12 | 1 << 11 | 0 << 10 | par(addr >> 12) << 9 | par(0x55555555) << 8 | par(data[3]) << 7
+        return lines, [data[3], data[7], data[0] & 0xFFFF, (data[1] >> 16) & 0xFF, rdt, 0x55555555]
+    group("d-planted", [dhit_vector(k) for k in range(6)])
+
+    # ---- planted I-lines execute (no memory behind), L1 over L2 (0x42094)
+    def plant_i(lines, addr, words):
+        tag = (addr >> 12) << 12 | 0x400
+        lines += li(13, addr) + li(16, tag) + [SYNC]
+        for i, w in enumerate(words):
+            lines += li(14, w) + ["\tldo\t%d(%%r13), %%r17" % (4 * i), diag("WI2D", b=17, x=14),
+                                  diag("SET_TAG", x=16), diag("WI2T", b=17)]
+        lines += [SYNC]
+    def unplant_i(lines, addr):
+        lines += li(13, addr) + li(16, TAG_INVALID) + [diag("SET_TAG", x=16), diag("WI2T", b=13), SYNC]
+    LDI_R5 = lambda v: 0x34000000 | 5 << 16 | ((v & 0x1FFF) << 1 | (1 if v < 0 else 0))  # ldi v,%r5 = ldo v(%r0),%r5
+    BV_R14 = 0xE9C0C000                                               # bv %r0(%r14)
+    NOP = 0x08000240
+    def iexec_vector(k):
+        addr = A_I + 0x800 + 32 * k
+        v = rng.randint(-512, 511)
+        l2 = lab()
+        lines = dr0_reset()
+        plant_i(lines, addr, [LDI_R5(v), BV_R14, NOP, NOP, NOP, NOP, NOP, NOP])
+        lines += li(5, 0) + ["\tldil\tL%%%sf, %%r14" % l2, "\tldo\tR%%%sf(%%r14), %%r14" % l2,
+                             "\tbv\t%r0(%r13)", "\tnop", "%s:" % l2, "\tcopy\t%r5, %r3"]
+        # RI2T shows the planted tag; after FICE the line is invalid
+        lines += [SYNC, diag("RI2T", b=13, t=4), "\tfice\t%r0(%sr0, %r13)", SYNC, diag("RI2T", b=13, t=6), SYNC]
+        unplant_i(lines, addr)
+        lines += dr0_reset() + store_regs([3, 4, 6])
+        rpn = addr >> 12
+        # FICE rewrites the tag only: the data parity bits keep the planted words'
+        return lines, [v & 0xFFFFFFFF, rpn << 12 | 1 << 10 | par(rpn) << 9 | par(LDI_R5(v)) << 8 | par(BV_R14) << 7,
+                       TAG_INVALID | par(0xF0000) << 9 | par(LDI_R5(v)) << 8 | par(BV_R14) << 7]
+    group("i-planted", [iexec_vector(k) for k in range(6)])
+
+    def l1over_vector(k):
+        addr = A_I + 0xC00 + 32 * k
+        l2, l3 = lab(), lab()
+        lines = dr0_reset()
+        plant_i(lines, addr, [LDI_R5(1), BV_R14, NOP, NOP, NOP, NOP, NOP, NOP])
+        # the L1 entry for addr: ldi -1,%r5 ; bv %r0(%r14)
+        dr29 = (addr >> 12) << 2 | (addr >> 10) & 3 | 0x62 << 22
+        lines += li(13, addr) + li(14, LDI_R5(-1)) + li(15, BV_R14) + li(16, dr29) + \
+                 [SYNC, diag("MTCPU", x=14, dr=27), diag("MTCPU", x=15, dr=28), diag("MTCPU", x=16, dr=29),
+                  diag("WI1", b=13), SYNC]
+        # L1 enabled: r5 = -1; L1 entry invalidated: r5 = 1
+        lines += li(17, DR0_MASKED | 0x4) + [diag("MTCPU", x=17, dr=0), SYNC] + li(5, 0) + \
+                 ["\tldil\tL%%%sf, %%r14" % l2, "\tldo\tR%%%sf(%%r14), %%r14" % l2,
+                  "\tbv\t%r0(%r13)", "\tnop", "%s:" % l2, "\tcopy\t%r5, %r3"]
+        lines += li(17, DR0_MASKED) + [diag("MTCPU", x=17, dr=0), SYNC] + \
+                 li(14, 0) + li(15, 0) + li(16, 0x18BC0000) + \
+                 [diag("MTCPU", x=14, dr=27), diag("MTCPU", x=15, dr=28), diag("MTCPU", x=16, dr=29),
+                  diag("WI1", b=13), SYNC] + \
+                 li(17, DR0_MASKED | 0x4) + [diag("MTCPU", x=17, dr=0), SYNC] + li(5, 0) + \
+                 ["\tldil\tL%%%sf, %%r14" % l3, "\tldo\tR%%%sf(%%r14), %%r14" % l3,
+                  "\tbv\t%r0(%r13)", "\tnop", "%s:" % l3, "\tcopy\t%r5, %r4"]
+        unplant_i(lines, addr)
+        lines += dr0_reset() + store_regs([3, 4])
+        return lines, [0xFFFFFFFF, 1]
+    group("l1-over-l2", [l1over_vector(k) for k in range(4)])
+
+    # ---- store, dirty bit, FDC write-back, read back from memory (0x4209A)
+    def wb_vector(k):
+        addr = A_D + 0x400 + 32 * k
+        v = rng.getrandbits(32)
+        lines = dr0_reset() + li(13, addr) + li(14, v) + \
+                ["\tstw\t%r14, 0(%r13)", SYNC, diag("RDT", b=13, t=3), diag("RDD", b=13, t=4),
+                 "\tfdc\t%r0(%r13)", SYNC, diag("RDT", b=13, t=5), SYNC, "\tldw\t0(%r13), %r6",
+                 "\tfdc\t%r0(%r13)", SYNC] + dr0_reset() + store_regs([3, 4, 5, 6])
+        rpn = addr >> 12
+        # RDT after the store: RPN, dirty 1, dirty parity 0, tag parity, the data parity of the
+        # stored word and of whatever the fill brought into the odd word (either value);
+        # after FDC the tag is invalid and the data parity bits are unchanged
+        inv = TAG_INVALID | par(0xF0000) << 9 | par(v) << 8
+        st = rpn << 12 | 1 << 11 | par(rpn) << 9 | par(v) << 8
+        return lines, [[st, st | 0x80], v, [inv, inv | 0x80], v]
+    group("dirty-fdc", [wb_vector(k) for k in range(6)])
+
+    # ---- self-modifying code: stw, fdc, fic, execute (0x42097)
+    def smc_vector(k):
+        addr = A_D + 0x800 + 32 * k
+        l2, l3 = lab(), lab()
+        va, vb = rng.randint(-512, 511), rng.randint(-512, 511)
+        def plant(v, lbl, dst):
+            return li(13, addr) + li(14, LDI_R5(v)) + li(15, BV_R14) + li(16, NOP) + \
+                   ["\tstw\t%r14, 0(%r13)", "\tstw\t%r15, 4(%r13)", "\tstw\t%r16, 8(%r13)", "\tstw\t%r16, 12(%r13)",
+                    "\tfdc\t%r0(%r13)", "\tfic\t%r0(%sr0, %r13)", SYNC] + li(5, 0) + \
+                   ["\tldil\tL%%%sf, %%r14" % lbl, "\tldo\tR%%%sf(%%r14), %%r14" % lbl,
+                    "\tbv\t%r0(%r13)", "\tnop", "%s:" % lbl, "\tcopy\t%%r5, %%r%d" % dst]
+        lines = dr0_reset() + plant(va, l2, 3) + plant(vb, l3, 4) + store_regs([3, 4])
+        return lines, [va & 0xFFFFFFFF, vb & 0xFFFFFFFF]
+    group("smc", [smc_vector(k) for k in range(6)])
+    return suite
+
+
+# ---------------------------------------------------------------------------
+# tlbx: the TLB as the PCX-L implements it (cpu.md 2; ERS ch. 6): page and
+# block entries, the space hash of the cache index, access rights, protection
+# IDs, the B/D/T/U bits, PROBE/LPA/LCI, purges, DR8 diagnostic inserts and
+# locks, the hardware walker and its CR28 rules, fetching in virtual mode and
+# GATE promotion. QEMU models a PA-7300LC TLB without DR8, walker or CR28, so
+# the expected words are computed here ("expect" in the JSON, like cache).
+#
+# Every group starts with two block entries that map what the ROM needs
+# while PSW.D / PSW.C are on: 0xF0000000-0xF01FFFFF (code, UART) and
+# 0-0x1FFFFF (data, stack, trap log, test pages) one to one. Page entries map
+# a virtual window at 0x40000000 onto RAM pages 0x101000... one page per
+# vector; the walker's PDIR lives at 0x180000.
+# ---------------------------------------------------------------------------
+TLBX_WORDS = 8
+ESCAPE = TRAPLOG + 32
+
+
+def tlb_prot(ar, aid=0, t=0, d=1, b=0, u=0):
+    """GR[r] of IxTLBP: ar at bits 5:11, aid 16:30, t 2, d 3, b 4, u 12."""
+    return ar << 20 | aid << 1 | t << 29 | d << 28 | b << 27 | u << 19
+
+
+def gen_tlbx(rng):
+    suite = Suite("tlbx")
+    uid = [0]
+    def lab():
+        uid[0] += 1
+        return "9%d" % uid[0]
+    SYNC = "\tsync"
+    AR_RWX = 0b011_11_00                  # type 3, PL1 = 3, PL2 = 0: read any PL, write and execute at PL 0..3
+    VWIN = 0x40001000                  # same cache colour as PBASE (VA = PA mod 128 KB, cpu.md 2.7)
+    PBASE = 0x00101000
+    PDIR = 0x00180000
+
+    def dr8(v):
+        return li(13, v) + [diag("MTCPU", x=13, dr=8)]
+    def block_insert(n, va, mask7, pa, prot):
+        # DR8 block force-insert to entry n; VA carries the mask in offset bits 13:19
+        return dr8(0x2041 | n << 1) + li(13, va | mask7 << 12) + li(14, (pa >> 12) << 5) + \
+               ["\tidtlba\t%r14, (%sr1, %r13)"] + li(14, prot) + ["\tidtlbp\t%r14, (%sr1, %r13)"] + dr8(0x2000)
+    def page_insert(va, pa, prot, sr=1):
+        return li(13, va) + li(14, (pa >> 12) << 5) + ["\tidtlba\t%%r14, (%%sr%d, %%r13)" % sr] + \
+               li(14, prot) + ["\tidtlbp\t%%r14, (%%sr%d, %%r13)" % sr]
+    def page_purge(va, sr=1):
+        return li(13, va) + ["\tpdtlb\t%%r0(%%sr%d, %%r13)" % sr]
+    def log_clear():
+        return li(12, TRAPLOG) + ["\tstw\t%%r0, %d(%%r12)" % (4 * i) for i in range(9) if i != 7]
+    def log_words(dst_regs):
+        # dst_regs: list of (log word index, register)
+        return ["\tldw\t%d(%%r12), %%r%d" % (4 * w, r) for w, r in dst_regs]
+    def store_regs(regs):
+        out = ["\tstw,ma\t%%r%d, 4(%%r9)" % r for r in regs]
+        out += ["\tstw,ma\t%r0, 4(%r9)"] * (TLBX_WORDS - len(regs))
+        return out
+
+    # every group: SR1 = 0, PID check off, D off, DR0 hashing off; the power-on
+    # lock-out/lock-in of all 64 page entries cleared by 64 diagnostic inserts
+    # (as the ROM does, BOOT s.4.4 0x41090); the two block entries
+    suite.setup = ["\tmtsp\t%r0, %sr1", "\trsm\t6, %r0"] + \
+                  li(13, 0x03FF0000) + [diag("MTCPU", x=13, dr=0)] + \
+                  li(15, 0x40) + li(14, 0x7F000000) + ["\tldi\t64, %r16",
+                   "1:", diag("MTCPU", x=15, dr=8), "\tidtlba\t%r0, (%sr1, %r14)",
+                   "\tldo\t0x1000(%r14), %r14", "\tldo\t0x80(%r15), %r15",
+                   "\taddib,>\t-1, %r16, 1b", "\tnop"] + \
+                  block_insert(0, 0xF0000000, 0b1111100, 0xF0000000, tlb_prot(AR_RWX)) + \
+                  block_insert(1, 0x00000000, 0b1111100, 0x00000000, tlb_prot(AR_RWX)) + \
+                  dr8(0x2000)
+
+    def group(name, vectors):
+        # a vector is (lines, expect) or (lines, expect, traps it takes); by default a
+        # vector traps once when its second word (the trap number) is non-zero
+        body, ins = [], []
+        for vec in vectors:
+            lines, expect = vec[0], vec[1]
+            traps = vec[2] if len(vec) > 2 else (1 if (len(expect) > 1 and expect[1]) else 0)
+            words = list(expect) + [0] * (TLBX_WORDS - len(expect))
+            body += log_clear() + li(5, SENTINEL) + lines
+            ins.append({"expect": words, "traps": traps})
+        suite.add(name, len(vectors), TLBX_WORDS, body, ins)
+
+    # ---- loads and stores through a page entry, with and without the space hash
+    def ldst_vector(k, hashed):
+        va, pa = VWIN + 0x1000 * k, PBASE + 0x1000 * k
+        v = rng.getrandbits(32)
+        off = 4 * rng.randint(0, 1000)
+        sp = 0x1F if hashed else 0
+        lines = li(13, sp) + ["\tmtsp\t%r13, %sr1"]
+        if hashed:
+            lines += li(13, 0x03FF0000 | 0x10) + [diag("MTCPU", x=13, dr=0)]      # DHASH_EN
+        lines += page_insert(va, pa, tlb_prot(AR_RWX)) + li(14, v) + li(13, va + off) + \
+                 ["\tssm\t2, %r0", "\tstw\t%r14, 0(%sr1, %r13)", "\tldw\t0(%sr1, %r13), %r3",
+                  "\tldh\t2(%sr1, %r13), %r4", "\tldb\t1(%sr1, %r13), %r6",
+                  "\tfdc\t%r0(%sr1, %r13)", "\trsm\t2, %r0", SYNC] + \
+                 li(13, pa + off) + ["\tldw\t0(%r13), %r7"] + \
+                 page_purge(va) + ["\tmtsp\t%r0, %sr1"] + li(13, 0x03FF0000) + [diag("MTCPU", x=13, dr=0)] + \
+                 log_words([(0, 8)]) + store_regs([3, 4, 6, 7, 8])
+        return lines, [v, v & 0xFFFF, (v >> 16) & 0xFF, v, 0], 0
+    group("virt-ldst", [ldst_vector(k, False) for k in range(4)] + [ldst_vector(k, True) for k in range(4, 8)])
+
+    # ---- access rights at PL 0: the type decides (ACD table 3-1)
+    def rights_vector(k, typ, op):
+        va, pa = VWIN + 0x1000 * k, PBASE + 0x1000 * k
+        ar = typ << 4 | 0b1111
+        lines = page_insert(va, pa, tlb_prot(ar)) + li(14, 0x5A5A0000 | k) + li(13, pa) + \
+                ["\tstw\t%r14, 0(%r13)"] + li(13, va) + ["\tssm\t2, %r0"]
+        if op == "ldw":
+            lines += ["\tldw\t0(%sr1, %r13), %r5"]
+            ok = typ <= 3
+            exp = [0x5A5A0000 | k if ok else SENTINEL, 0 if ok else 26]
+        else:
+            lines += ["\tstw\t%r14, 4(%sr1, %r13)"]
+            ok = typ in (1, 3)
+            exp = [SENTINEL, 0 if ok else 26]
+        lines += ["\trsm\t2, %r0"] + page_purge(va) + log_words([(0, 6)]) + store_regs([5, 6])
+        return lines, exp
+    vecs = []
+    k = 0
+    for typ in range(8):
+        for op in ("ldw", "stw"):
+            vecs.append(rights_vector(k, typ, op)); k += 1
+    group("rights", vecs)
+
+    # ---- protection IDs (PSW.P): CR8 = 0x1234 (WD 0), CR9 = 0x0777 (WD 1)
+    def pid_vector(k, aid, op):
+        va, pa = VWIN + 0x1000 * k, PBASE + 0x1000 * k
+        lines = li(13, 0x1234 << 1) + ["\tmtctl\t%r13, %cr8"] + li(13, 0x0777 << 1 | 1) + ["\tmtctl\t%r13, %cr9"] + \
+                page_insert(va, pa, tlb_prot(AR_RWX, aid=aid)) + li(14, 0x1D000000 | k) + li(13, pa) + \
+                ["\tstw\t%r14, 0(%r13)"] + li(13, va) + ["\tssm\t6, %r0"]
+        if op == "ldw":
+            lines += ["\tldw\t0(%sr1, %r13), %r5"]
+            ok = aid in (0, 0x1234, 0x0777)
+            exp = [0x1D000000 | k if ok else SENTINEL, 0 if ok else 27]
+        else:
+            lines += ["\tstw\t%r14, 4(%sr1, %r13)"]
+            ok = aid in (0, 0x1234)
+            exp = [SENTINEL, 0 if ok else 27]
+        lines += ["\trsm\t6, %r0", "\tmtctl\t%r0, %cr8", "\tmtctl\t%r0, %cr9"] + page_purge(va) + \
+                 log_words([(0, 6)]) + store_regs([5, 6])
+        return lines, exp
+    vecs = []
+    k = 0
+    for aid in (0, 0x1234, 0x0777, 0x0ABC):
+        for op in ("ldw", "stw"):
+            vecs.append(pid_vector(k, aid, op)); k += 1
+    group("pid", vecs)
+
+    # ---- the B, D, T and U bits
+    def bits_vector(k, t, d, b, u, op):
+        va, pa = VWIN + 0x1000 * k, PBASE + 0x1000 * k
+        lines = page_insert(va, pa, tlb_prot(AR_RWX, t=t, d=d, b=b, u=u)) + li(14, 0x0B000000 | k) + li(13, pa) + \
+                ["\tstw\t%r14, 0(%r13)", "\tfdc\t%r0(%r13)", SYNC] + li(13, va) + ["\tssm\t2, %r0"]
+        if op == "ldw":
+            lines += ["\tldw\t0(%sr1, %r13), %r5"]
+            tr = 21 if t else 0
+            exp = [0x0B000000 | k if tr == 0 else SENTINEL, tr]
+        else:
+            lines += ["\tstw\t%r14, 4(%sr1, %r13)"]
+            tr = 19 if b else 20 if not d else 21 if t else 0
+            exp = [SENTINEL, tr]
+        lines += ["\trsm\t2, %r0"] + page_purge(va) + log_words([(0, 6)]) + store_regs([5, 6])
+        return lines, exp
+    vecs = []
+    k = 0
+    for t, d, b, u in ((0, 1, 0, 0), (1, 1, 0, 0), (0, 0, 0, 0), (0, 1, 1, 0), (0, 1, 0, 1), (1, 0, 1, 0)):
+        for op in ("ldw", "stw"):
+            vecs.append(bits_vector(k, t, d, b, u, op)); k += 1
+    group("tdbu", vecs)
+
+    # ---- PROBE / LPA / LCI (translation regardless of PSW.D)
+    def probe_vector(k, typ, pl1, pl2, which, pl):
+        va, pa = VWIN + 0x1000 * k, PBASE + 0x1000 * k
+        ar = typ << 4 | pl1 << 2 | pl2
+        lines = page_insert(va, pa, tlb_prot(ar)) + li(13, va + 0x234) + li(14, pl)
+        if which == "r":   lines += ["\tprober\t(%sr1, %r13), %r14, %r5"]
+        elif which == "w": lines += ["\tprobew\t(%sr1, %r13), %r14, %r5"]
+        elif which == "ri": lines += ["\tproberi\t(%%sr1, %%r13), %d, %%r5" % pl]
+        elif which == "wi": lines += ["\tprobewi\t(%%sr1, %%r13), %d, %%r5" % pl]
+        elif which == "lpa": lines += ["\tlpa\t%r0(%sr1, %r13), %r5"]
+        else: lines += ["\tlci\t%r0(%sr1, %r13), %r5"]
+        lines += page_purge(va) + log_words([(0, 6)]) + store_regs([5, 6])
+        if which in ("r", "ri"): exp = [1 if (typ <= 3 and pl <= pl1) else 0, 0]
+        elif which in ("w", "wi"): exp = [1 if (typ in (1, 3) and pl <= pl2) else 0, 0]
+        elif which == "lpa": exp = [pa + 0x234, 0]
+        else: exp = [0, 0]
+        return lines, exp
+    vecs = []
+    k = 0
+    for _ in range(12):
+        typ, pl1, pl2, pl = rng.randint(0, 7), rng.randint(0, 3), rng.randint(0, 3), rng.randint(0, 3)
+        for which in ("r", "w", "ri", "wi"):
+            vecs.append(probe_vector(k, typ, pl1, pl2, which, pl)); k += 1
+    vecs.append(probe_vector(k, 3, 3, 3, "lpa", 0)); k += 1
+    vecs.append(probe_vector(k, 3, 3, 3, "lci", 0)); k += 1
+    # unmapped: PROBE and LPA take trap 17 (walker off); PROBE's target then stays
+    lines = li(13, VWIN + 0x7F000) + ["\tproberi\t(%sr1, %r13), 0, %r5"] + log_words([(0, 6)]) + \
+            ["\tlpa\t%r0(%sr1, %r13), %r4"] + log_words([(0, 7)]) + store_regs([5, 6, 4, 7])
+    vecs.append((lines, [SENTINEL, 17, None, 17], 2))
+    group("probe-lpa", vecs)
+
+    # ---- purges: PDTLB one page, PDTLBE every page entry (the blocks survive)
+    def purge_vector(k):
+        va, pa = VWIN + 0x1000 * k, PBASE + 0x1000 * k
+        va2, pa2 = VWIN + 0x1000 * (k + 16), PBASE + 0x1000 * (k + 16)
+        lines = page_insert(va, pa, tlb_prot(AR_RWX)) + page_insert(va2, pa2, tlb_prot(AR_RWX)) + \
+                li(13, va) + li(14, va2) + ["\tssm\t2, %r0", "\tldw\t0(%sr1, %r13), %r3"] + \
+                ["\trsm\t2, %r0"] + page_purge(va) + \
+                ["\tssm\t2, %r0", "\tldw\t0(%sr1, %r13), %r4", "\trsm\t2, %r0"] + log_words([(0, 6)]) + \
+                li(12, TRAPLOG) + ["\tstw\t%r0, 0(%r12)"] + \
+                ["\tssm\t2, %r0", "\tldw\t0(%sr1, %r14), %r5", "\trsm\t2, %r0"] + log_words([(0, 7)]) + \
+                li(12, TRAPLOG) + ["\tstw\t%r0, 0(%r12)", "\tpdtlbe\t%r0(%sr1, %r14)"] + \
+                ["\tssm\t2, %r0", "\tldw\t0(%sr1, %r14), %r8", "\trsm\t2, %r0"] + log_words([(0, 10)]) + \
+                store_regs([6, 7, 10])
+        return lines, [15, 0, 15], 2
+    group("purge", [purge_vector(k) for k in range(4)])
+
+    # ---- DR8: diagnostic insert to a chosen entry, lock-out and lock-in
+    def dr8_vector(k, lock):
+        va, pa = VWIN + 0x1000 * k, PBASE + 0x1000 * k
+        n = rng.randint(0, 63)
+        lines = dr8(0x40 | n << 7 | lock) + page_insert(va, pa, tlb_prot(AR_RWX)) + dr8(0x2000) + \
+                li(13, va) + ["\tlpa\t%r0(%sr1, %r13), %r5"] + log_words([(0, 6)]) + \
+                li(12, TRAPLOG) + ["\tstw\t%r0, 0(%r12)"]
+        # re-insert to the same entry without locks: hits again
+        lines += dr8(0x40 | n << 7) + page_insert(va, pa, tlb_prot(AR_RWX)) + dr8(0x2000) + li(13, va) + \
+                 ["\tlpa\t%r0(%sr1, %r13), %r4"] + log_words([(0, 7)]) + page_purge(va) + store_regs([5, 6, 4, 7])
+        locked_out = (lock & 0x8000) != 0
+        return lines, [SENTINEL if locked_out else pa, 17 if locked_out else 0, pa, 0]
+    vecs = [dr8_vector(k, lock) for k, lock in enumerate((0, 0x4000, 0xC000, 0, 0xC000, 0x4000))]
+    group("dr8", vecs)
+
+    # ---- the hardware walker: PDIR at 0x180000 (4 KB table: DR25 mask 0), entries
+    # built in real mode, then a load from an unmapped page walks or traps 15 with CR28
+    def pdir_lines(va, entry_pa, v, r, space, rpn, nxt, ar=AR_RWX):
+        w0 = v << 31 | ((va >> 17) & 0x7FFF) << 16 | space
+        w1 = r << 31 | ar << 20 | 1 << 28
+        w2 = rpn << 5
+        return li(13, entry_pa) + li(14, w0) + ["\tstw\t%r14, 0(%r13)"] + li(14, w1) + ["\tstw\t%r14, 4(%r13)"] + \
+               li(14, w2) + ["\tstw\t%r14, 8(%r13)"] + li(14, nxt) + ["\tstw\t%r14, 12(%r13)"]
+    def walk_vector(k, case, u, n):
+        va, pa = VWIN + 0x1000 * k, PBASE + 0x1000 * k
+        entry = PDIR | ((va >> 12) & 0xFF) << 4
+        nxt = 0x0DEAD000 | k << 4
+        v, r, space = 1, 1, 0
+        if case == "v0": v = 0
+        if case == "r0": r = 0
+        if case == "tag": space = 0x5555
+        lines = pdir_lines(va, entry, v, r, space, pa >> 12, nxt) + li(14, 0xBEEF0000 | k) + li(13, pa) + \
+                ["\tstw\t%r14, 0(%r13)"] + \
+                li(13, 0xC0000) + ["\tmtctl\t%r13, %cr28"] + \
+                li(13, PDIR | 0xE0) + [diag("MTCPU", x=13, dr=24)] + \
+                li(13, 0x8 | u << 2 | n << 1) + [diag("MTCPU", x=13, dr=25)] + \
+                li(13, va) + ["\tssm\t2, %r0", "\tldw\t0(%sr1, %r13), %r5", "\trsm\t2, %r0",
+                              "\tmfctl\t%cr28, %r3"] + log_words([(0, 6)]) + \
+                li(13, 0x9) + [diag("MTCPU", x=13, dr=25)] + page_purge(va) + store_regs([5, 6, 3])
+        if case == "ok":
+            return lines, [0xBEEF0000 | k, 0, 0xC0000]
+        if case in ("v0", "r0"):
+            return lines, [SENTINEL, 15, entry]
+        # tag mismatch
+        if not u: cr28 = entry
+        elif not n: cr28 = nxt
+        else: cr28 = nxt if not (entry & 0x10) else None          # word3 of the line: the other entry's next word
+        return lines, [SENTINEL, 15, cr28]
+    vecs = []
+    k = 0
+    for case in ("ok", "v0", "r0", "tag"):
+        for u, n in ((0, 0), (1, 0), (1, 1)):
+            vecs.append(walk_vector(k, case, u, n)); k += 1
+    # walker disabled: trap 15 and CR28 untouched
+    va, pa = VWIN + 0x1000 * k, PBASE + 0x1000 * k
+    lines = li(13, 0xC0000) + ["\tmtctl\t%r13, %cr28"] + li(13, 0x9) + [diag("MTCPU", x=13, dr=25)] + \
+            li(13, va) + ["\tssm\t2, %r0", "\tldw\t0(%sr1, %r13), %r5", "\trsm\t2, %r0", "\tmfctl\t%cr28, %r3"] + \
+            log_words([(0, 6)]) + store_regs([5, 6, 3])
+    vecs.append((lines, [SENTINEL, 15, 0xC0000]))
+    group("walker", vecs)
+
+    # ---- fetching in virtual mode: RFI with IPSW.C (and D), code on a mapped page,
+    # ITLB miss (6) and no execute rights (7) through the handler's escape, GATE promotion
+    LDI_R5 = lambda v: 0x34000000 | 5 << 16 | ((v & 0x1FFF) << 1 | (1 if v < 0 else 0))
+    BV_R14 = 0xE9C0C000
+    NOP = 0x08000240
+    def plant(pa, words):
+        out = li(13, pa)
+        for i, w in enumerate(words):
+            out += li(14, w) + ["\tstw\t%%r14, %d(%%r13)" % (4 * i)]
+        out += ["\tfdc\t%r0(%r13)", "\tfic\t%r0(%sr1, %r13)", SYNC]
+        return out
+    def to_virt(l):
+        # RFI to label l with C = 1, D = 1 (Q kept)
+        return ["\tmtctl\t%r0, %cr17", "\tmtctl\t%r0, %cr17", "\tldil\tL%%%sf, %%r13" % l, "\tldo\tR%%%sf(%%r13), %%r13" % l,
+                "\tmtctl\t%r13, %cr18", "\tldo\t4(%r13), %r13", "\tmtctl\t%r13, %cr18"] + li(13, PSW_INIT | 0x00040002) + \
+               ["\tmtctl\t%r13, %cr22", "\trfi", "\tnop", "%s:" % l]
+    def to_real(l):
+        return ["\tmtctl\t%r0, %cr17", "\tmtctl\t%r0, %cr17", "\tldil\tL%%%sf, %%r13" % l, "\tldo\tR%%%sf(%%r13), %%r13" % l,
+                "\tmtctl\t%r13, %cr18", "\tldo\t4(%r13), %r13", "\tmtctl\t%r13, %cr18"] + li(13, PSW_INIT) + \
+               ["\tmtctl\t%r13, %cr22", "\trfi", "\tnop", "%s:" % l]
+    def vfetch_vector(k):
+        va, pa = VWIN + 0x1000 * k, PBASE + 0x1000 * k
+        v = rng.randint(-512, 511)
+        l1, l2, l3 = lab(), lab(), lab()
+        lines = plant(pa, [LDI_R5(v), BV_R14, NOP, NOP]) + page_insert(va, pa, tlb_prot(AR_RWX)) + \
+                to_virt(l1) + ["\tldil\tL%%%sf, %%r14" % l2, "\tldo\tR%%%sf(%%r14), %%r14" % l2] + li(13, va) + \
+                ["\tbv\t%r0(%r13)", "\tnop", "%s:" % l2, "\tcopy\t%r5, %r3"] + to_real(l3) + \
+                page_purge(va) + log_words([(0, 6)]) + store_regs([3, 6])
+        return lines, [v & 0xFFFFFFFF, 0]
+    vecs = [vfetch_vector(k) for k in range(4)]
+    # ITLB miss and IMP: the handler escapes to the label after the branch
+    def badfetch_vector(k, imp):
+        va, pa = VWIN + 0x1000 * k, PBASE + 0x1000 * k
+        l1, l2, l3 = lab(), lab(), lab()
+        lines = plant(pa, [LDI_R5(1), BV_R14, NOP, NOP])
+        if imp:
+            lines += page_insert(va, pa, tlb_prot(1 << 4 | 0b1111))          # type 1: no execute
+        lines += ["\tldil\tL%%%sf, %%r14" % l2, "\tldo\tR%%%sf(%%r14), %%r14" % l2, "\tstw\t%r14, 32(%r12)"] + \
+                 to_virt(l1) + li(13, va) + ["\tbv\t%r0(%r13)", "\tnop", "%s:" % l2, "\tcopy\t%r5, %r3"] + \
+                 to_real(l3) + (page_purge(va) if imp else []) + log_words([(0, 6), (5, 7)]) + store_regs([3, 6, 7])
+        return lines, [SENTINEL, 7 if imp else 6, va]
+    vecs.append(badfetch_vector(4, False))
+    vecs.append(badfetch_vector(5, True))
+    # GATE promotion: at PL 3 on a gateway page (type 4, PL1 = 3, PL2 = 0): b,gate promotes to PL 0,
+    # the link carries the GATE's PL 3
+    def gate_vector(k):
+        va, pa = VWIN + 0x1000 * k, PBASE + 0x1000 * k
+        l1, l2, l3 = lab(), lab(), lab()
+        BGATE8 = 0xE8000B00 | 14 << 21 | 0x0 | (1 << 12)   # b,gate .+8, %r14  (w disp 0 -> target +8)
+        BGATE8 = 0xE9C02000 | (0 << 13)                   # placeholder, replaced below
+        # b,gate target = iaoq + 8 + disp; disp = 0: w = 0 -> 0xE8000800 | t<<21 | (1 << 13)
+        BGATE8 = 0xE8002000 | 14 << 21
+        BV_R15 = 0xE9E0C000
+        lines = plant(pa, [BGATE8, NOP, LDI_R5(0x55), BV_R15, NOP, NOP]) + \
+                page_insert(va, pa, tlb_prot(4 << 4 | 3 << 2 | 0)) + \
+                to_virt(l1) + ["\tldil\tL%%%sf, %%r15" % l2, "\tldo\tR%%%sf(%%r15), %%r15" % l2] + \
+                li(13, va | 3) + li(5, 0) + ["\tbv\t%r0(%r13)", "\tnop", "%s:" % l2, "\tcopy\t%r5, %r3", "\tsub\t%r14, %r13, %r4"] + \
+                to_real(l3) + page_purge(va) + log_words([(0, 6)]) + store_regs([3, 4, 6])
+        return lines, [0x55, 8, 0], 0
+    vecs.append(gate_vector(6))
+    group("vfetch", vecs)
+    return suite
+
+
 GENERATORS = {"alu1": gen_alu1, "alu2": gen_alu2, "shift": gen_shift,
               "mem": gen_mem, "branch": gen_branch, "trap": gen_trap,
-              "fp": gen_fp, "fpedge": gen_fpedge, "max1": gen_max1, "sys": gen_sys}
+              "fp": gen_fp, "fpedge": gen_fpedge, "max1": gen_max1, "sys": gen_sys, "cache": gen_cache, "tlbx": gen_tlbx}
 
 
 def main(argv):
     if len(argv) != 3 or argv[1] not in GENERATORS:
         sys.exit(__doc__)
-    rng = random.Random({"alu1": 1, "alu2": 3, "shift": 2, "mem": 4, "branch": 5, "trap": 6, "fp": 7, "fpedge": 8, "max1": 9, "sys": 10}[argv[1]] * 0x715)
+    rng = random.Random({"alu1": 1, "alu2": 3, "shift": 2, "mem": 4, "branch": 5, "trap": 6, "fp": 7, "fpedge": 8, "max1": 9, "sys": 10, "cache": 11, "tlbx": 12}[argv[1]] * 0x715)
     suite = GENERATORS[argv[1]](rng)
     os.makedirs(argv[2], exist_ok=True)
     suite.write(argv[2])

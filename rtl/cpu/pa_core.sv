@@ -38,6 +38,12 @@ module pa_core
     input  logic [31:0] f2_iaoq_f, f2_iaoq_b,
     input  logic [15:0] f2_iasq_f, f2_iasq_b,
     input  logic        f2_err,
+    input  logic [3:0]  f2_perr,
+    input  logic        f2_itlb, f2_imp,
+    input  logic [2:0]  f2_type,
+    output logic        psw_c_o,
+    output logic [4:0]  ihash_o,
+    output logic [31:0] dr8_o,
     output logic        adv_f2,
     output logic        drained,
     output logic        uib_inval,
@@ -48,7 +54,61 @@ module pa_core
     output logic        redir_new_space,
     output logic [31:0] redir_slot,
 
-    // BIU data port
+    // TLB (pa_tlb)
+    output logic [15:0] tlb_lk_space,
+    output logic [19:0] tlb_lk_vpn,
+    output logic        tlb_lk_use,
+    input  logic        tlb_lk_hit,
+    input  logic [19:0] tlb_lk_rpn,
+    input  logic [6:0]  tlb_lk_ar,
+    input  logic [14:0] tlb_lk_aid,
+    input  logic        tlb_lk_t, tlb_lk_d, tlb_lk_b, tlb_lk_u,
+    output logic        tlb_op_req,
+    output tlb_op_e     tlb_op,
+    output logic [15:0] tlb_op_space,
+    output logic [31:0] tlb_op_off, tlb_op_gr,
+    input  logic        tlb_op_done,
+    // the fetch unit's I-LAB refill (served when M does not need the TLB)
+    input  logic        it_req,
+    input  logic [15:0] it_space,
+    input  logic [19:0] it_vpn,
+    output logic        it_ack, it_hit,
+    output logic [19:0] it_rpn,
+    output logic [3:0]  it_xok,
+    output logic [2:0]  it_type,
+    // D-cache (pa_dcache)
+    input  logic        dc_ready,
+    output logic        dc_lk_en,
+    output logic [4:0]  dc_lk_hash, dc_st_hash, dc_op_hash,
+    output logic [19:0] dc_m_rpn, dc_st_rpn, dc_op_rpn,
+    output logic        dc_st_fwd,
+    input  logic [127:0] dc_op_rd2,
+    output logic [31:0] dc_lk_addr, dc_m_addr,
+    input  logic [63:0] dc_m_rdata,
+    input  logic        dc_m_hit, dc_m_dirty,
+    input  logic [3:0]  dc_m_perr,
+    output logic        dc_st_we,
+    output logic [31:0] dc_st_addr,
+    output logic [63:0] dc_st_data,
+    output logic        dc_op_req,
+    output dc_op_e      dc_op,
+    output logic [31:0] dc_op_addr, dc_op_wdata,
+    input  logic        dc_op_done, dc_op_err, dc_op_hit,
+    input  logic [3:0]  dc_op_perr,
+    input  logic [31:0] dc_op_rdata,
+    // I-cache operations (pa_icache)
+    input  logic        ic_ready,
+    output logic        ic_op_req,
+    output ic_op_e      ic_op,
+    output logic [31:0] ic_op_addr, ic_op_wdata,
+    output logic [4:0]  ic_op_hash,
+    output logic [19:0] ic_op_rpn,
+    output logic [31:0] ic_dr27, ic_dr28, ic_dr29,
+    input  logic        ic_op_done, ic_op_hit,
+    input  logic [3:0]  ic_op_perr,
+    input  logic [31:0] ic_op_rdata, ic_rd_dr27, ic_rd_dr28, ic_rd_dr29,
+    output logic        ic_l1_en,
+    // BIU data port (uncached)
     output logic        d_req, d_we,
     output logic [31:0] d_addr,
     output logic [7:0]  d_be,
@@ -94,7 +154,7 @@ module pa_core
     logic [15:0] iiasq_f, iiasq_b, isr;
     logic [31:0] iiaoq_f, iiaoq_b;
     logic [31:0] tr [8];
-    logic [31:0] dr0, dr8, dr24, dr25, dr26, dr27, dr28, dr29;
+    logic [31:0] dr0, dr8, dr24, dr25, dr26;
     logic        toc_mask, toc_pend, hpmc_pend;
     logic [31:0] cr16_cnt;
     logic        cr16_match;
@@ -110,6 +170,9 @@ module pa_core
     // ================================================================ pipeline registers
     // ---- D
     logic        d_valid, d_ferr;
+    logic [3:0]  d_fperr, e_fperr, m_fperr, w_fperr;
+    logic        d_itlb, d_imp, e_itlb, e_imp;
+    logic [2:0]  d_type, e_type;
     logic [31:0] d_insn, d_iaoq_f, d_iaoq_b;
     logic [15:0] d_iasq_f, d_iasq_b;
     // ---- E
@@ -127,9 +190,12 @@ module pa_core
     logic        m_trap_data;
     logic [7:0]  m_cb;
     logic        m_v;
-    logic [1:0]  m_spsel;
     logic [3:0]  m_be;
     logic [31:0] m_stdata;
+    logic [15:0] m_space;
+    logic [4:0]  m_hash;
+    logic [1:0]  m_pl, m_ppl;
+    logic        m_xlate;               // the access translates (TLB lookup in M)
     ctrl_t       m_c;
     // ---- W
     logic        w_valid, w_nul, w_err, w_taken, w_nullify, w_new_space;
@@ -141,9 +207,18 @@ module pa_core
     logic        w_v;
     logic [3:0]  w_be;
     logic [31:0] w_stdata;
+    logic        w_cached, w_hit, w_dirty, w_opflush;
+    logic [19:0] w_rpn;
+    logic [4:0]  w_hash;
+    logic        w_walk;                // the TLB miss may be walked
+    logic [31:0] w_pdir_a;              // the walker's PDIR entry address
+    logic [3:0]  w_dperr;
+    logic [63:0] w_stdw;
     ctrl_t       w_c;
     logic [31:0] w_ld;
     logic        w_lderr;
+    logic [31:0] set_tag;                // SET_TAG latch (ERS s.8.3.5)
+    logic [31:0] dr27, dr28, dr29;
 
     // nullify / taken-branch state for instructions entering E
     logic        pending_nul, prev_taken;
@@ -152,7 +227,7 @@ module pa_core
     logic [5:0]  g4_vec;
 
     // ================================================================ W-stage control (declared early)
-    typedef enum logic [1:0] { W_RUN, W_WAIT, W_DONE } wst_e;
+    typedef enum logic [3:0] { W_RUN, W_WAIT, W_DONE, W_OP, W_REPLAY, W_WALK_RD, W_WALK_A, W_WALK_P, W_WFAIL, W_WALK_RD3 } wst_e;
     wst_e        wst;
     logic        w_hold, w_commit, w_redir, w_trap_take;
     logic        we0, we1;
@@ -173,23 +248,28 @@ module pa_core
         .shr_capture(shr_capture), .shr_restore(shr_restore), .dbg_gr(dbg_gr));
     logic shr_capture, shr_restore;
 
-    // W write-through bypass (port 0 wins)
+    // W write-through bypass (port 0 wins). The select uses what W *would*
+    // write, not whether it commits this cycle: if W traps or holds instead,
+    // D's instruction is killed or re-read, so the gate stays off the path.
+    wire bp0 = w_valid && !w_nul && w_c.rt_we && w_c.rt != 0;
+    wire bp1 = w_valid && !w_nul && w_c.base_we && w_c.rb != 0;
     always_comb begin
         gra_d = rd0; grb_d = rd1;
         if (dc.ra != 0) begin
-            if (we0 && wa0 == dc.ra) gra_d = wd0;
-            else if (we1 && wa1 == dc.ra) gra_d = wd1;
+            if (bp0 && wa0 == dc.ra) gra_d = wd0;
+            else if (bp1 && wa1 == dc.ra) gra_d = wd1;
         end
         if (dc.rb != 0) begin
-            if (we0 && wa0 == dc.rb) grb_d = wd0;
-            else if (we1 && wa1 == dc.rb) grb_d = wd1;
+            if (bp0 && wa0 == dc.rb) grb_d = wd0;
+            else if (bp1 && wa1 == dc.rb) grb_d = wd1;
         end
     end
 
     // interlocks
     wire [4:0] d_f6_10  = d_insn[25:21];
     wire [4:0] d_f11_15 = d_insn[20:16];
-    wire e_late = e_c.fu == FU_LOAD || (e_c.fu == FU_SYS && e_c.sysop == SYS_LDSID);
+    wire e_late = e_c.fu == FU_LOAD || (e_c.fu == FU_SYS && e_c.sysop == SYS_LDSID) ||
+                  (e_c.fu == FU_MMU && (e_c.sysop == MM_PROBE || e_c.sysop == MM_LPA || e_c.sysop == MM_LCI));
     wire ld_use = e_valid && !e_nul && e_late && e_c.rt != 0 &&
                   (e_c.rt == d_f6_10 || e_c.rt == d_f11_15);
     function automatic logic ser_stall(input ctrl_t c);
@@ -278,6 +358,30 @@ module pa_core
         .stbys(e_c.stbys), .st_src(fa), .st_be(ls_be), .st_data(ls_wd),
         .ld_word(32'd0), .ld_data(ls_ld_unused));
 
+    // the data space and virtual address of the instruction in E: the (s,b) rule,
+    // the 3-bit sr field of the I-side TLB/cache ops, or IIAQ / ISR+IOR for the
+    // fast inserts
+    wire [15:0] e_sp = e_c.tlb_fast ? (e_c.tlb_i ? iiasq_f : isr) :
+                       e_c.tlb_i    ? sr[e_c.sr] :
+                       (e_c.s2 != 0) ? sr[e_c.s2] : sr[{1'b1, fb[31:30]}];
+    wire [31:0] e_va = e_c.tlb_fast ? (e_c.tlb_i ? iiaoq_f : ior) : ls_ea;
+    function automatic logic [4:0] hash_of(input logic [15:0] sp);     // cpu.md 2.7
+        return {sp[4], sp[3], sp[0], sp[1], sp[2]};
+    endfunction
+    wire e_is_data = e_c.fu == FU_LOAD || e_c.fu == FU_STORE;
+    wire e_is_na   = e_c.fu == FU_MMU && (e_c.sysop == MM_FDC || e_c.sysop == MM_PDC || e_c.sysop == MM_FIC);
+    wire e_rdtlb   = e_c.fu == FU_DIAG && e_c.sysop == DG_RDTLB;
+    wire e_xlate   = ((e_is_data && !e_c.absolute) || e_is_na) && psw[P_D] ||
+                     (e_c.fu == FU_MMU && (e_c.sysop == MM_PROBE || e_c.sysop == MM_LPA)) || e_rdtlb;
+    wire [4:0] e_hash = (((e_is_data || e_is_na) && psw[P_D]) || e_rdtlb) && dr0[4] ? hash_of(e_sp) : 5'd0;
+
+    // D-cache lookup for the instruction moving into M
+    assign dc_lk_en   = adv;
+    assign dc_lk_addr = ls_ea;
+    assign dc_lk_hash = e_hash;
+    assign dc_m_addr  = m_ea;
+    wire [31:0] ls_wd_eff = e_c.ldcw ? 32'd0 : ls_wd;          // LDCW clears the word
+
     // ---- branches
     logic        br_taken, br_new_space, movb_cond, bit_val;
     logic [31:0] br_target;
@@ -304,7 +408,7 @@ module pa_core
                 default:  br_taken = e_c.cond_f ? ~bit_val : bit_val;
             endcase
             BR_BL:   ;
-            BR_GATE: br_target = {e_target[31:2], 2'b00};              // C = 0: PL 0
+            BR_GATE: br_target = {e_target[31:2], gate_pl};             // promotion from the page's AR type
             BR_BLR:  br_target = e_iaoq_f + 32'd8 + {fa[28:0], 3'b000};
             BR_BV: begin
                 br_target = fb + {fa[28:0], 3'b000};
@@ -317,6 +421,8 @@ module pa_core
             end
         endcase
     end
+    // GATE: C = 0 -> PL 0; C = 1 -> min(current, type{1:2}) when the page's type >= 4, else unchanged
+    wire [1:0] gate_pl = !psw[P_C] ? 2'b00 : !e_type[2] ? cur_pl : (e_type[1:0] < cur_pl ? e_type[1:0] : cur_pl);
     wire br_back = e_c.disp[31];
     wire e_taken = e_is_branch && !e_nul && br_taken;
     wire br_nullify = (e_c.br == BR_COND) ? (e_c.nul & (br_taken ^ br_back)) : e_c.nul;
@@ -397,6 +503,7 @@ module pa_core
                 default:   e_result = fa;                                // MTCTL/MTSP/MTSM source
             endcase
             FU_DIAG: e_result = (e_c.sysop == DG_MFCPU) ? dr_rd : fa;
+            FU_MMU:  e_result = fa;                                      // IxTLBx: GR[r]
             default: ;
         endcase
     end
@@ -408,6 +515,8 @@ module pa_core
         e_trap = TRAP_NONE;
         e_trap_data = 1'b0;
         if (e_err) e_trap = TRAP_HPMC;
+        else if (e_itlb) e_trap = TRAP_ITLB;
+        else if (e_imp) e_trap = TRAP_IMP;
         else if (e_c.fu == FU_DIAG && cur_pl != 2'd0)          // DIAG: privilege before the encoding check
             e_trap = TRAP_PRIV_OP;
         else if (e_c.illegal || (e_c.fu == FU_BRANCH && e_c.br == BR_GATE && e_bflag))
@@ -434,25 +543,120 @@ module pa_core
     end
 
     // ---- E redirect: resolve against the prediction
-    wire e_mispred = e_is_branch && (e_taken != e_pred);
+    wire e_mispred = e_is_branch && (e_taken != e_pred || (e_taken && e_pred && e_c.br == BR_GATE && gate_pl != 2'b00));
     wire e_redir = adv && e_mispred;
     assign redir          = e_redir || d_redir;
     assign redir_new_space = e_redir && e_taken && br_new_space;
     assign redir_slot     = e_redir ? e_iaoq_b : d_iaoq_b;
 
     // ================================================================ M stage
-    wire [15:0] m_space = (m_c.s2 != 0) ? sr[m_c.s2] : sr[{1'b1, m_spsel}];
-    wire [31:0] m_result2 = (m_c.fu == FU_SYS && m_c.sysop == SYS_LDSID) ? {16'd0, m_space} : m_result;
+    // TLB lookup: the instruction in M when it translates, else the fetch unit's refill
+    wire m_is_data = m_c.fu == FU_LOAD || m_c.fu == FU_STORE;
+    wire m_is_wr   = m_c.fu == FU_STORE || m_c.ldcw || (m_c.fu == FU_MMU && m_c.sysop == MM_PDC);
+    wire m_is_rd   = m_c.fu == FU_LOAD;
+    wire m_probe   = m_c.fu == FU_MMU && m_c.sysop == MM_PROBE;
+    wire m_lpa     = m_c.fu == FU_MMU && m_c.sysop == MM_LPA;
+    wire m_need    = m_valid && !m_nul && m_xlate;
+    assign tlb_lk_space = m_need ? m_space : it_space;
+    assign tlb_lk_vpn   = m_need ? m_ea[31:12] : it_vpn;
+    assign tlb_lk_use   = m_need && adv;
+    assign it_ack = it_req && !m_need;
+    assign it_hit = tlb_lk_hit;
+    assign it_rpn = tlb_lk_rpn;
+    assign it_type = tlb_lk_ar[6:4];
+    // access rights (ACD table 3-1): type = ar 0:2, PL1 = ar 3:4, PL2 = ar 5:6
+    wire [2:0] ar_type = tlb_lk_ar[6:4];
+    wire [1:0] ar_pl1 = tlb_lk_ar[3:2], ar_pl2 = tlb_lk_ar[1:0];
+    wire [1:0] chk_pl = m_probe ? m_ppl : m_pl;
+    wire rd_ok = !ar_type[2] && chk_pl <= ar_pl1;
+    wire wr_ok = (ar_type == 3'd1 || ar_type == 3'd3) && chk_pl <= ar_pl2;
+    function automatic logic xok_at(input logic [1:0] pl);
+        return ar_type[2:1] != 2'b00 && ar_pl2 <= pl && pl <= ar_pl1;
+    endfunction
+    logic pid_rd_ok, pid_wr_ok;
+    always_comb begin
+        pid_rd_ok = 1'b0; pid_wr_ok = 1'b0;
+        for (int k = 0; k < 4; k++)
+            if (pid[k][15:1] == tlb_lk_aid) begin
+                pid_rd_ok = 1'b1;
+                if (!pid[k][0]) pid_wr_ok = 1'b1;
+            end
+        if (!psw[P_P] || tlb_lk_aid == 15'd0) begin pid_rd_ok = 1'b1; pid_wr_ok = 1'b1; end
+    end
+    assign it_xok = {xok_at(2'd3), xok_at(2'd2), xok_at(2'd1), xok_at(2'd0)} & {4{pid_rd_ok}};
+    wire [19:0] m_rpn = m_xlate ? tlb_lk_rpn : m_ea[31:12];
+    wire m_tmiss = m_xlate && !tlb_lk_hit;
+    wire m_io    = m_rpn[19:16] == 4'hF;
+    wire m_cached_c = !m_io && !(m_xlate && tlb_lk_u);
+    assign dc_m_rpn = m_rpn;
+    // the group-3 data traps of this access (ACD p.4-14 order), merged with E's
+    logic [5:0] m_trap_x;
+    logic       m_trap_xd;
+    always_comb begin
+        m_trap_x = m_trap; m_trap_xd = m_trap_data;
+        if (m_xlate && !m_nul) begin
+            if (m_tmiss)                                   begin m_trap_x = (m_is_data) ? TRAP_DTLB : TRAP_NA_DTLB; m_trap_xd = 1'b1; end
+            else if (!m_probe && !m_lpa) begin
+                if ((m_is_rd && !rd_ok) || (m_is_wr && !wr_ok))        begin m_trap_x = 6'd26; m_trap_xd = 1'b1; end
+                else if ((m_is_rd && !pid_rd_ok) || (m_is_wr && !pid_wr_ok)) begin m_trap_x = 6'd27; m_trap_xd = 1'b1; end
+                else if (m_trap != TRAP_NONE) ;
+                else if (m_is_wr && tlb_lk_b && !psw[P_X])            begin m_trap_x = 6'd19; m_trap_xd = 1'b1; end
+                else if (m_is_wr && !tlb_lk_d)                         begin m_trap_x = 6'd20; m_trap_xd = 1'b1; end
+                else if (m_is_data && tlb_lk_t)                        begin m_trap_x = 6'd21; m_trap_xd = 1'b1; end
+            end
+        end
+    end
+    wire m_walk_ok = m_tmiss && !dr25[0];                 // DR25 bit 31: D walker disabled
+    logic [31:0] m_result2;
+    always_comb begin
+        m_result2 = m_result;
+        if (m_c.fu == FU_SYS && m_c.sysop == SYS_LDSID) m_result2 = {16'd0, m_space};
+        else if (m_probe) m_result2 = {31'd0, (m_c.probe_w ? (wr_ok && pid_wr_ok) : (rd_ok && pid_rd_ok))};
+        else if (m_lpa)   m_result2 = {m_rpn, m_ea[11:0]};
+        else if (m_c.fu == FU_MMU && m_c.sysop == MM_LCI) m_result2 = 32'd0;
+    end
+    // cached data: the doubleword from the D-cache (with store forwarding), the
+    // load word aligned, the store lanes merged for the W write-back
+    wire [31:0] m_word = m_ea[2] ? dc_m_rdata[31:0] : dc_m_rdata[63:32];
+    logic [31:0] m_ld;
+    always_comb case (m_c.size)
+        2'd0:    m_ld = {24'd0, m_word[8 * (3 - m_ea[1:0]) +: 8]};
+        2'd1:    m_ld = {16'd0, m_ea[1] ? m_word[15:0] : m_word[31:16]};
+        default: m_ld = m_word;
+    endcase
+    logic [63:0] m_stdw;
+    wire [7:0] m_lanes = m_ea[2] ? {4'b0000, m_be} : {m_be, 4'b0000};   // [7] = byte 0
+    always_comb
+        for (int b = 0; b < 8; b++)
+            m_stdw[63 - 8*b -: 8] = m_lanes[7 - b] ? m_stdata[31 - 8*(b & 3) -: 8] : dc_m_rdata[63 - 8*b -: 8];
 
     // ================================================================ W stage
     wire [1:0] w_pl = w_iaoq_f[1:0];
     wire w_is_mem   = w_c.fu == FU_LOAD || w_c.fu == FU_STORE;
     wire w_is_load  = w_c.fu == FU_LOAD;
+    wire w_is_cmem  = w_is_mem && w_cached;          // a cacheable data access
     wire w_is_sync  = w_c.fu == FU_SYS && w_c.sysop == SYS_SYNC;
     wire w_is_rfi   = w_c.fu == FU_SYS && (w_c.sysop == SYS_RFI || w_c.sysop == SYS_RFIR);
     wire w_flush    = (w_c.fu == FU_SYS && (w_c.sysop == SYS_RFI || w_c.sysop == SYS_RFIR ||
                        w_c.sysop == SYS_SSM || w_c.sysop == SYS_RSM || w_c.sysop == SYS_MTSM)) ||
-                      w_c.fu == FU_DIAG || w_c.fu == FU_MMU;
+                      w_c.fu == FU_DIAG || w_c.fu == FU_MMU || w_opflush;
+    // which cache engine, if any, an instruction in W uses
+    wire w_dc_op = w_c.fu == FU_MMU && (w_c.sysop == MM_FDC || w_c.sysop == MM_FDCE || w_c.sysop == MM_PDC) ||
+                   w_c.fu == FU_DIAG && (w_c.sysop == DG_RDD || w_c.sysop == DG_RDT || w_c.sysop == DG_RDTLB ||
+                                         w_c.sysop == DG_WDD || w_c.sysop == DG_WDT);
+    wire w_ic_op = w_c.fu == FU_MMU && (w_c.sysop == MM_FIC || w_c.sysop == MM_FICE) ||
+                   w_c.fu == FU_DIAG && (w_c.sysop == DG_RI2D || w_c.sysop == DG_RI2T || w_c.sysop == DG_WI2D ||
+                                         w_c.sysop == DG_WI2T || w_c.sysop == DG_RI1 || w_c.sysop == DG_WI1);
+    wire w_diag_rd = w_c.fu == FU_DIAG && (w_c.sysop == DG_RDD || w_c.sysop == DG_RDT || w_c.sysop == DG_RDTLB ||
+                                           w_c.sysop == DG_RI2D || w_c.sysop == DG_RI2T);
+    wire w_tlb_op = w_c.fu == FU_MMU && (w_c.sysop == MM_TLB_INS || w_c.sysop == MM_TLB_PURGE);
+    // cache parity errors of the instruction in W: its own fetch, or its data access
+    wire [3:0] w_dperr_eff = (w_is_cmem && w_hit) ? w_dperr : 4'd0;
+    // cache parity flags {dirty, tag, odd word, even word} -> DR0 L2PARERR bits 15:12 (= dr0[16:19])
+    function automatic logic [3:0] perr_dr0(input logic [3:0] p); return {p[0], p[1], p[2], p[3]}; endfunction
+    wire w_l2i_err = |w_fperr[1:0], w_l1i_err = |w_fperr[3:2], w_l2d_err = |w_dperr_eff;
+    wire hpmc_cache = (dr0[25] & ~dr0[24]) | (dr0[23] & ~dr0[22]) | (dr0[21] & ~dr0[20]) |
+                      (w_valid && ((w_l2i_err & ~dr0[24]) | (w_l1i_err & ~dr0[20]) | (w_l2d_err & ~dr0[22])));
     wire w_exec = w_valid && !w_nul;
 
     // ---- interruption select at the first W cycle
@@ -464,27 +668,39 @@ module pa_core
     always_comb begin
         w_vec = TRAP_NONE; w_before = 1'b1;
         if (g4_pend)                                    w_vec = g4_vec;
-        else if (!psw[P_M] && (hpmc_req || hpmc_pend))  w_vec = TRAP_HPMC;
+        else if (!psw[P_M] && (hpmc_req || hpmc_pend || hpmc_cache)) w_vec = TRAP_HPMC;
         else if (toc_pend && !toc_mask)                 w_vec = TRAP_TOC;
         else if (take_rctr)                             w_vec = TRAP_RCTR;
         else if (take_ext)                              w_vec = TRAP_EXT;
         else if (take_lpmc)                             w_vec = TRAP_LPMC;
-        else if (!w_nul && w_trap != TRAP_NONE && !(w_trap == TRAP_HPMC && psw[P_M])) begin
+        else if (!w_nul && w_trap != TRAP_NONE && !(w_trap == TRAP_HPMC && psw[P_M]) && !w_walkable_now) begin
             w_vec = w_trap; w_before = 1'b0;
         end
+        if (w_valid && wst == W_WFAIL) begin w_vec = w_trap; w_before = 1'b0; end
     end
     wire w_run_trap = w_valid && wst == W_RUN && w_vec != TRAP_NONE;
     wire w_ld_trap  = w_valid && wst == W_DONE && w_lderr && !psw[P_M];
-    assign w_trap_take = w_run_trap || w_ld_trap;
+    wire w_wfail_trap = w_valid && wst == W_WFAIL;
+    assign w_trap_take = w_run_trap || w_ld_trap || w_wfail_trap;
+    logic w_walkable_now;
 
     // ---- data access from W
-    wire w_mem_go = w_exec && w_is_mem && wst == W_RUN && !w_run_trap;
+    // uncached (I/O space): the BIU port; cached: the D-cache, misses go to
+    // the engine and the instruction is replayed
+    wire w_mem_go  = w_exec && w_is_mem && wst == W_RUN && !w_run_trap && !w_walkable_now;
+    wire w_umem_go = w_mem_go && !w_cached;
+    wire w_cmem_go = w_mem_go && w_cached && dc_ready;
+    // LDCW with a cache hint, or hitting a dirty line, is done in the cache; with
+    // no hint the engine re-checks the line (cpu.md 5.7)
+    wire w_ldcw_check = w_c.ldcw && w_c.cc == 2'd0;
+    wire w_chit = w_hit && !(w_ldcw_check);
     always_comb begin
         d_req = 1'b0; d_we = 1'b0; d_rclr = 1'b0;
-        d_addr = w_ea; d_be = 8'd0; d_wdata = {w_stdata, w_stdata};
+        d_addr = {w_rpn, w_ea[11:0]};                   // the physical address (translated in M)
+        d_be = 8'd0; d_wdata = {w_stdata, w_stdata};
         if (w_c.fu == FU_STORE) d_be = w_ea[2] ? {4'b0000, w_be} : {w_be, 4'b0000};
         else                    d_be = w_ea[2] ? 8'h0F : 8'hF0;
-        if (w_mem_go) begin
+        if (w_umem_go) begin
             d_req = 1'b1; d_we = (w_c.fu == FU_STORE); d_rclr = w_c.ldcw;
         end else if (wst == W_WAIT) begin
             d_req = 1'b1; d_rclr = w_c.ldcw;
@@ -499,25 +715,121 @@ module pa_core
         default: ld_data = ld_word;
     endcase
 
-    // W holds while an access is in flight or the store buffer is full
+    // ---- cache engines
+    wire w_op_go = w_exec && wst == W_RUN && !w_run_trap && !w_walkable_now && (w_dc_op || w_ic_op || w_tlb_op);
+    wire w_in_op = w_valid && wst == W_OP;
+    logic [1:0] w_op_eng;                 // the current W_OP's engine: 0 D-cache, 1 I-cache, 2 TLB
+    wire w_op_isd = w_op_eng == 2'd0;
+    wire w_walking_rd = w_valid && (wst == W_WALK_RD || wst == W_WALK_RD3);
+    wire w_walking_tlb = w_valid && (wst == W_WALK_A || wst == W_WALK_P);
+    assign dc_op_req  = (w_in_op && w_op_isd && !dc_op_done) || (w_walking_rd && !dc_op_done);
+    assign ic_op_req  = w_in_op && w_op_eng == 2'd1 && !ic_op_done;
+    assign tlb_op_req = (w_in_op && w_op_eng == 2'd2 && !tlb_op_done) || (w_walking_tlb && !tlb_op_done);
+    always_comb begin
+        dc_op = DC_MISS;
+        if (w_walking_rd) dc_op = DC_RD2;
+        else if (w_is_mem) dc_op = w_ldcw_check ? DC_LDCW : DC_MISS;
+        else case (w_c.sysop)
+            MM_FDC:  dc_op = DC_FDC;
+            MM_FDCE: dc_op = DC_FDCE;
+            MM_PDC:  dc_op = (w_pl == 2'd0) ? DC_PDC : DC_FDC;
+            DG_RDD, DG_RDTLB: dc_op = DC_RDD;
+            DG_RDT:  dc_op = DC_RDT;
+            DG_WDD:  dc_op = DC_WDD;
+            DG_WDT:  dc_op = DC_WDT;
+            default: ;
+        endcase
+        case (w_c.sysop)
+            MM_FIC:  ic_op = IC_FIC;
+            MM_FICE: ic_op = IC_FICE;
+            DG_RI2D: ic_op = IC_RI2D;
+            DG_RI2T: ic_op = IC_RI2T;
+            DG_WI2D: ic_op = IC_WI2D;
+            DG_WI2T: ic_op = IC_WI2T;
+            DG_RI1:  ic_op = IC_RI1;
+            default: ic_op = IC_WI1;
+        endcase
+    end
+    // addresses for the engines: the walker reads the PDIR at a real address; FDCE /
+    // FICE and the diagnose ops index by the plain address; the rest as translated in M
+    wire w_plain = w_c.fu == FU_DIAG || (w_c.fu == FU_MMU && (w_c.sysop == MM_FDCE || w_c.sysop == MM_FICE));
+    assign dc_op_addr  = w_walking_rd ? w_pdir_a : w_ea;
+    assign dc_op_hash  = (w_walking_rd || w_plain) ? 5'd0 : w_hash;
+    assign dc_op_rpn   = w_walking_rd ? w_pdir_a[31:12] : w_plain && !(w_c.sysop == DG_RDTLB) ? w_ea[31:12] : w_rpn;
+    assign dc_op_wdata = (w_c.sysop == DG_WDT) ? set_tag : w_result;
+    assign ic_op_addr  = (w_c.sysop == DG_RI1) ? iiaoq_b : w_ea;
+    assign ic_op_hash  = w_plain ? 5'd0 : w_hash;
+    assign ic_op_rpn   = w_plain ? w_ea[31:12] : w_rpn;
+    assign ic_op_wdata = (w_c.sysop == DG_WI2T) ? set_tag : w_result;
+    // store addressing: hashed index and RPN as translated in M
+    assign dc_st_hash = w_hash;
+    assign dc_st_rpn  = w_rpn;
+    assign dc_st_fwd  = w_valid && !w_nul && w_is_cmem && (w_c.fu == FU_STORE || w_c.ldcw);
+    // TLB operations: the instruction's own (VA from E, GR[r]) or the walker's inserts
+    wire [31:0] pdir_w0 = dc_op_rd2[127:96], pdir_w1 = dc_op_rd2[95:64], pdir_w2 = dc_op_rd2[63:32], pdir_w3 = dc_op_rd2[31:0];
+    wire w_walk_i = w_trap == TRAP_ITLB;                        // walking for a fetch miss
+    assign tlb_op_space = w_walking_tlb ? (w_walk_i ? w_iasq_f : w_space) : w_space;
+    assign tlb_op_off   = w_walking_tlb ? (w_walk_i ? w_iaoq_f : w_ea) : w_ea;
+    assign tlb_op_gr    = (wst == W_WALK_A) ? pdir_w2 : (wst == W_WALK_P) ? pdir_w1 : w_result;
+    always_comb begin
+        if (wst == W_WALK_A) tlb_op = TLB_INS_A;
+        else if (wst == W_WALK_P) tlb_op = TLB_INS_P;
+        else if (w_c.sysop == MM_TLB_PURGE) tlb_op = w_c.tlb_all ? TLB_PURGE_ALL : TLB_PURGE;
+        else tlb_op = w_c.tlb_p ? TLB_INS_P : TLB_INS_A;
+    end
+    // the hardware walker (cpu.md 2.6): hashed PDIR entry address, checks, CR28 rule
+    wire [15:0] wk_space = w_walk_i ? w_iasq_f : w_space;
+    wire [31:0] wk_off   = w_walk_i ? w_iaoq_f : w_ea;
+    wire [31:0] wk_hash  = ({12'd0, wk_off[31:12]} << 4) ^ ({16'd0, wk_space} << 9);
+    wire [31:0] wk_addr  = (dr24 & 32'hFFFF_F000) | (wk_hash & (dr25 | 32'h0000_0FFF));
+    wire wk_v = pdir_w0[31], wk_r = pdir_w1[31];
+    wire wk_tag_ok = pdir_w0[30:16] == wk_off[31:17] && pdir_w0[15:0] == wk_space;
+    wire wk_pass = wk_v && wk_r && wk_tag_ok;
+    logic [31:0] wk_cr28;
+    logic        w_cr28_we;             // the failed walk writes CR28 with the trap
+    logic [31:0] w_cr28_val;
+    always_comb begin
+        if (!(wk_v && wk_r)) wk_cr28 = w_pdir_a;
+        else if (!dr25[2])   wk_cr28 = w_pdir_a;                // DR25 bit 29 U = 0: the current entry
+        else if (!dr25[1])   wk_cr28 = pdir_w3;                 // N = 0: this entry's next pointer
+        else                 wk_cr28 = 32'd0;                   // N = 1: word3 of the line (read below)
+    end
+    // can this instruction's miss be walked?
+    assign w_walkable_now = !w_nul && (((w_trap == TRAP_DTLB || w_trap == TRAP_NA_DTLB) && w_walk) ||
+                                       (w_trap == TRAP_ITLB && !dr25[3]));
+    wire w_walk_go = w_valid && wst == W_RUN && w_walkable_now && !w_run_trap;
+    assign ic_dr27 = dr27; assign ic_dr28 = dr28; assign ic_dr29 = dr29;
+    assign ic_l1_en = dr0[2];
+    wire w_op_done = w_in_op && (w_op_eng == 2'd0 ? dc_op_done : w_op_eng == 2'd1 ? ic_op_done : tlb_op_done);
+    // the cached access of the instruction in W completes in the cache this cycle
+    wire w_cache_hit_go = w_cmem_go && w_chit;
+    assign dc_st_we   = (w_cache_hit_go && (w_c.fu == FU_STORE || w_c.ldcw)) ||
+                        (w_valid && wst == W_DONE && w_c.ldcw && w_cached && !w_lderr && w_opflush);
+    assign dc_st_addr = w_ea;
+    assign dc_st_data = w_stdw;
+
+    // W holds while an access or an engine operation is in flight
     always_comb begin
         w_hold = 1'b0;
         if (w_valid) case (wst)
-            W_RUN:  w_hold = (w_mem_go && (w_is_load || !d_ack)) ||
+            W_RUN:  w_hold = (w_umem_go && (w_is_load || !d_ack)) ||
+                             (w_mem_go && w_cached && (!dc_ready || !w_chit)) ||
+                             w_op_go || w_walk_go ||
                              (w_exec && w_is_sync && !sb_empty && !w_run_trap);
-            W_WAIT: w_hold = 1'b1;
+            W_WAIT, W_OP, W_REPLAY, W_WALK_RD, W_WALK_A, W_WALK_P, W_WFAIL: w_hold = 1'b1;
             default: w_hold = 1'b0;
         endcase
     end
     // the instruction leaves W this cycle (commit or trap)
-    assign w_commit = w_valid && !w_hold && !w_trap_take;
+    assign w_commit = w_valid && !w_hold && !w_trap_take && wst != W_REPLAY && wst != W_WFAIL;
+    wire w_replay = w_valid && wst == W_REPLAY;
 
     // ---- GR write ports
-    wire [31:0] w_wd0_val = (wst == W_DONE) ? w_ld :
+    wire [31:0] w_wd0_val = (wst == W_DONE || (w_is_cmem && w_is_load)) ? w_ld :
                             (w_c.fu == FU_SYS && (w_c.sysop == SYS_SSM || w_c.sysop == SYS_RSM)) ? {25'd0, psw[6:0]} :
                             w_result;
     always_comb begin
-        we0 = w_commit && !w_nul && w_c.rt_we && w_c.rt != 0;
+        we0 = w_commit && !w_nul && w_c.rt_we && w_c.rt != 0 && !(w_c.fu == FU_DIAG && w_diag_rd && wst != W_DONE);
         we1 = w_commit && !w_nul && w_c.base_we && w_c.rb != 0;
         wa0 = w_c.rt; wd0 = w_wd0_val;
         wa1 = w_c.rb; wd1 = w_base;
@@ -528,12 +840,13 @@ module pa_core
 
     // ---- W redirect: trap, RFI, flush
     logic [31:0] psw_next;
-    assign w_redir = w_trap_take || (w_commit && !w_nul && w_flush);
+    assign w_redir = w_trap_take || (w_commit && !w_nul && w_flush) || w_replay;
     assign redir_kill_all = w_redir;
     wire [31:0] vec_addr = (w_vec == TRAP_HPMC || w_vec == TRAP_TOC) ? 32'hF000_0000 : {iva[31:10], w_vec[4:0], 5'd0};
     always_comb begin
         redir_back = 32'd0;
         if (w_trap_take)      begin redir_back = vec_addr + 32'd4; end
+        else if (w_replay)    begin redir_back = w_iaoq_b; end
         else if (w_is_rfi)    begin redir_back = iiaoq_b; end
         else                  begin redir_back = w_iaoq_b + 32'd4; end
     end
@@ -541,6 +854,7 @@ module pa_core
     always_comb begin
         if (w_redir) begin
             if (w_trap_take)   begin redir_target = vec_addr; redir_space = 16'd0;    redir_back_space = 16'd0; end
+            else if (w_replay) begin redir_target = w_iaoq_f; redir_space = w_iasq_f; redir_back_space = w_iasq_b; end
             else if (w_is_rfi) begin redir_target = iiaoq_f;  redir_space = iiasq_f;  redir_back_space = iiasq_b; end
             else               begin redir_target = w_iaoq_b; redir_space = w_iasq_b; redir_back_space = w_iasq_b; end
         end else begin
@@ -562,18 +876,22 @@ module pa_core
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             d_valid <= 1'b0; e_valid <= 1'b0; m_valid <= 1'b0; w_valid <= 1'b0;
-            d_ferr <= 0; d_insn <= 0; d_iaoq_f <= 0; d_iaoq_b <= 0; d_iasq_f <= 0; d_iasq_b <= 0;
+            d_ferr <= 0; d_fperr <= 0; e_fperr <= 0; m_fperr <= 0; w_fperr <= 0; d_insn <= 0; d_iaoq_f <= 0; d_iaoq_b <= 0; d_iasq_f <= 0; d_iasq_b <= 0;
             e_nul <= 0; e_err <= 0; e_pred <= 0; e_bflag <= 0; e_insn <= 0; e_iaoq_f <= 0; e_iaoq_b <= 0;
             e_iasq_f <= 0; e_iasq_b <= 0; e_gra <= 0; e_grb <= 0; e_target <= 0; e_c <= '0;
             e_fa_sel <= 0; e_fb_sel <= 0; e_cb_sel <= 0; e_v_sel <= 0; e_sar_sel <= 0;
             m_nul <= 0; m_err <= 0; m_taken <= 0; m_nullify <= 0; m_new_space <= 0; m_insn <= 0;
             m_iaoq_f <= 0; m_iaoq_b <= 0; m_iasq_f <= 0; m_iasq_b <= 0; m_result <= 0; m_base <= 0;
-            m_ea <= 0; m_target <= 0; m_trap <= 0; m_trap_data <= 0; m_cb <= 0; m_v <= 0; m_spsel <= 0;
+            m_ea <= 0; m_target <= 0; m_trap <= 0; m_trap_data <= 0; m_cb <= 0; m_v <= 0;
             m_be <= 0; m_stdata <= 0; m_c <= '0;
             w_nul <= 0; w_err <= 0; w_taken <= 0; w_nullify <= 0; w_new_space <= 0; w_insn <= 0;
             w_iaoq_f <= 0; w_iaoq_b <= 0; w_iasq_f <= 0; w_iasq_b <= 0; w_result <= 0; w_base <= 0;
             w_ea <= 0; w_target <= 0; w_trap <= 0; w_trap_data <= 0; w_cb <= 0; w_v <= 0; w_space <= 0;
             w_be <= 0; w_stdata <= 0; w_c <= '0; w_ld <= 0; w_lderr <= 0;
+            w_cached <= 0; w_hit <= 0; w_dirty <= 0; w_dperr <= 0; w_stdw <= 0; w_opflush <= 0; w_op_eng <= 0;
+            w_rpn <= 0; w_hash <= 0; w_walk <= 0; w_pdir_a <= 0; w_cr28_we <= 0; w_cr28_val <= 0;
+            d_itlb <= 0; d_imp <= 0; d_type <= 0; e_itlb <= 0; e_imp <= 0; e_type <= 0;
+            m_space <= 0; m_hash <= 0; m_pl <= 0; m_ppl <= 0; m_xlate <= 0;
             pending_nul <= 1'b0; prev_taken <= 1'b0;
         end else begin
             // ---- W redirect kills everything younger (and W leaves)
@@ -588,15 +906,22 @@ module pa_core
                     w_nullify <= m_nullify; w_new_space <= m_new_space; w_insn <= m_insn;
                     w_iaoq_f <= m_iaoq_f; w_iaoq_b <= m_iaoq_b; w_iasq_f <= m_iasq_f; w_iasq_b <= m_iasq_b;
                     w_result <= m_result2; w_base <= m_base; w_ea <= m_ea; w_target <= m_target;
-                    w_trap <= m_trap; w_trap_data <= m_trap_data; w_cb <= m_cb; w_v <= m_v;
+                    w_trap <= m_trap_x; w_trap_data <= m_trap_xd; w_cb <= m_cb; w_v <= m_v;
                     w_space <= m_space; w_be <= m_be; w_stdata <= m_stdata; w_c <= m_c;
+                    w_fperr <= m_fperr; w_cached <= m_cached_c; w_hit <= dc_m_hit; w_dirty <= dc_m_dirty;
+                    w_dperr <= dc_m_perr; w_stdw <= m_stdw; w_opflush <= 1'b0;
+                    w_rpn <= m_rpn; w_hash <= m_hash; w_walk <= m_walk_ok;
+                    if (m_cached_c) w_ld <= m_ld;
 
                     m_valid <= e_valid; m_nul <= e_nul; m_err <= e_err; m_taken <= e_taken;
                     m_nullify <= e_nullify; m_new_space <= e_taken && br_new_space; m_insn <= e_insn;
                     m_iaoq_f <= e_iaoq_f; m_iaoq_b <= e_iaoq_b; m_iasq_f <= e_iasq_f; m_iasq_b <= e_iasq_b;
-                    m_result <= e_result; m_base <= ls_new_base; m_ea <= ls_ea; m_target <= br_target;
+                    m_result <= e_result; m_base <= ls_new_base; m_ea <= e_va; m_target <= br_target;
                     m_trap <= e_trap; m_trap_data <= e_trap_data; m_cb <= alu_cb; m_v <= alu_v;
-                    m_spsel <= fb[31:30]; m_be <= ls_be; m_stdata <= ls_wd; m_c <= e_c;
+                    m_be <= ls_be; m_stdata <= ls_wd_eff; m_c <= e_c;
+                    m_fperr <= e_fperr;
+                    m_space <= e_sp; m_hash <= e_hash; m_pl <= cur_pl; m_xlate <= e_xlate;
+                    m_ppl <= e_c.a_imm ? e_c.imm[1:0] : fa[1:0];
                     if (e_valid) begin
                         pending_nul <= e_nullify;
                         prev_taken  <= e_taken;
@@ -608,7 +933,8 @@ module pa_core
                         e_valid <= d_valid;
                         e_nul   <= e_valid ? e_nullify : pending_nul;
                         e_bflag <= e_valid ? e_taken : prev_taken;
-                        e_err <= d_ferr; e_insn <= d_insn; e_iaoq_f <= d_iaoq_f;
+                        e_err <= d_ferr; e_fperr <= d_fperr; e_insn <= d_insn; e_iaoq_f <= d_iaoq_f;
+                        e_itlb <= d_itlb; e_imp <= d_imp; e_type <= d_type;
                         e_iaoq_b <= (e_redir && d_valid) ? redir_target : d_iaoq_b;
                         e_iasq_f <= d_iasq_f;
                         e_iasq_b <= (e_redir && d_valid && redir_new_space) ? redir_space : d_iasq_b;
@@ -628,7 +954,8 @@ module pa_core
                 // ---- F2 -> D
                 if (adv_d) begin
                     d_valid <= f2_valid;
-                    d_insn <= f2_insn; d_ferr <= f2_err;
+                    d_insn <= f2_insn; d_ferr <= f2_err; d_fperr <= f2_perr;
+                    d_itlb <= f2_itlb; d_imp <= f2_imp; d_type <= f2_type;
                     d_iaoq_f <= f2_iaoq_f; d_iasq_f <= f2_iasq_f;
                     d_iaoq_b <= d_redir ? d_target : f2_iaoq_b;   // the F2 instruction is D's delay slot
                     d_iasq_b <= f2_iasq_b;
@@ -643,10 +970,43 @@ module pa_core
                     end
                 end
             end
-            // ---- W state and the load data
-            if (!w_valid || w_commit || w_trap_take) wst <= W_RUN;
-            else if (wst == W_RUN && w_mem_go && w_is_load) wst <= W_WAIT;
+            // ---- W state, the load data, the engine results
+            if (!w_valid || w_commit || w_trap_take || w_replay) begin wst <= W_RUN; w_cr28_we <= 1'b0; end
+            else if (wst == W_RUN) begin
+                if (w_walk_go) begin wst <= W_WALK_RD; w_pdir_a <= wk_addr; end
+                else if (w_umem_go && w_is_load) wst <= W_WAIT;
+                else if (w_cmem_go && !w_chit) begin wst <= W_OP; w_op_eng <= 2'd0; end
+                else if (w_op_go) begin wst <= W_OP; w_op_eng <= w_dc_op ? 2'd0 : w_ic_op ? 2'd1 : 2'd2; end
+            end
+            else if (wst == W_WALK_RD && dc_op_done) begin
+                w_cr28_we <= 1'b1;
+                if (dc_op_err) begin wst <= W_WFAIL; w_cr28_val <= w_pdir_a; end
+                else if (wk_pass) begin wst <= W_WALK_A; w_cr28_we <= 1'b0; end
+                else if (wk_v && wk_r && dr25[2] && dr25[1]) begin
+                    // N = 1: word3 of the line, which an entry at word4 has 16 bytes below it
+                    if (!w_pdir_a[4]) begin wst <= W_WFAIL; w_cr28_val <= pdir_w3; end
+                    else begin wst <= W_WALK_RD3; w_pdir_a <= {w_pdir_a[31:5], 5'd0}; end
+                end else begin wst <= W_WFAIL; w_cr28_val <= wk_cr28; end
+            end
+            else if (wst == W_WALK_RD3 && dc_op_done) begin wst <= W_WFAIL; w_cr28_val <= pdir_w3; end
+            else if (wst == W_WALK_A && tlb_op_done) wst <= W_WALK_P;
+            else if (wst == W_WALK_P && tlb_op_done) wst <= W_REPLAY;
             else if (wst == W_WAIT && d_ack) begin wst <= W_DONE; w_ld <= ld_data; w_lderr <= d_err; end
+            else if (wst == W_OP && w_op_done) begin
+                if (w_is_mem) begin
+                    if (dc_op == DC_LDCW) begin
+                        // in the cache if the line is dirty (the word read in M, cleared
+                        // here); otherwise the line was invalidated: read-and-clear memory
+                        w_opflush <= 1'b1;
+                        if (dc_op_hit) begin wst <= W_DONE; w_lderr <= 1'b0; end
+                        else begin wst <= W_WAIT; w_cached <= 1'b0; end
+                    end else if (dc_op_err) begin wst <= W_DONE; w_lderr <= 1'b1; end
+                    else wst <= W_REPLAY;
+                end else begin
+                    wst <= W_DONE; w_lderr <= 1'b0;
+                    if (w_diag_rd) w_ld <= w_op_isd ? dc_op_rdata : ic_op_rdata;
+                end
+            end
         end
     end
 
@@ -707,6 +1067,7 @@ module pa_core
             ccr <= 0; sar <= 0; iiasq_f <= 0; iiasq_b <= 0; isr <= 0; iiaoq_f <= 0; iiaoq_b <= 0;
             dr0 <= {CPU_REVISION, 26'd0} | 32'h0000_0200;
             dr8 <= 32'h0000_2000; dr24 <= 0; dr25 <= 32'h8000_0009; dr26 <= 0; dr27 <= 0; dr28 <= 0; dr29 <= 0;
+            set_tag <= 32'd0;
             toc_mask <= 1'b1; toc_pend <= 1'b0; hpmc_pend <= 1'b0;
             g4_pend <= 1'b0; g4_vec <= 0;
             dbg_retire <= 0; dbg_nullified <= 0; dbg_trap <= 0; dbg_trap_vec <= 0; dbg_iaoq_f <= 0;
@@ -723,9 +1084,28 @@ module pa_core
             if (toc_req) toc_pend <= 1'b1;
             if (sb_err) hpmc_pend <= 1'b1;
             dr25[31] <= soft_pwr_n;                          // DR25 bit 0 (PA numbering)
+            // cache parity flags (DR0 bits 6/8/10 and 12:15, PA numbering) from the
+            // instruction's own fetch or data access, and HIT/PARERR from diagnose reads
+            if (w_valid && wst == W_RUN) begin
+                if (w_l2i_err) begin dr0[25] <= 1'b1; dr0[19:16] <= dr0[19:16] | perr_dr0({2'b00, w_fperr[1:0]}); end
+                if (w_l1i_err) dr0[21] <= 1'b1;
+                if (w_l2d_err) begin dr0[23] <= 1'b1; dr0[19:16] <= dr0[19:16] | perr_dr0(w_dperr_eff); end
+            end
+            if (w_op_done && w_diag_rd) begin
+                dr0[1] <= w_op_isd ? dc_op_hit : ic_op_hit;
+                dr0[0] <= |(w_op_isd ? dc_op_perr : ic_op_perr);
+                if (w_op_isd && |dc_op_perr) begin dr0[23] <= 1'b1; dr0[19:16] <= dr0[19:16] | perr_dr0(dc_op_perr); end
+                if (!w_op_isd && |ic_op_perr) begin dr0[25] <= 1'b1; dr0[19:16] <= dr0[19:16] | perr_dr0(ic_op_perr); end
+            end
+            if (w_op_done && w_c.fu == FU_DIAG && w_c.sysop == DG_RI1) begin
+                dr27 <= ic_rd_dr27; dr28 <= ic_rd_dr28; dr29 <= ic_rd_dr29;
+                dr0[1] <= ic_op_hit; dr0[0] <= |ic_op_perr;
+                if (|ic_op_perr) dr0[21] <= 1'b1;
+            end
 
             if (w_trap_take) begin
                 enter_interruption(w_vec);
+                if (w_wfail_trap && w_cr28_we) tr[4] <= w_cr28_val;
                 dbg_trap <= 1'b1; dbg_trap_vec <= w_vec;
                 dbg_iaoq_f <= w_iaoq_f; dbg_iaoq_b <= w_iaoq_b; dbg_iasq_f <= w_iasq_f; dbg_insn <= w_insn;
             end else if (w_commit) begin
@@ -782,10 +1162,12 @@ module pa_core
                                 5'd27: dr27 <= w_result;
                                 5'd28: dr28 <= w_result;
                                 5'd29: dr29 <= w_result;
+                                // DR27-29 are declared with the pipeline registers
                                 default: ;
                             endcase
                             DG_TOC_EN:  toc_mask <= 1'b0;
                             DG_TOC_DIS: toc_mask <= 1'b1;
+                            DG_SET_TAG: set_tag <= w_result;
                             default: ;
                         endcase
                         default: ;
@@ -795,4 +1177,7 @@ module pa_core
         end
     end
     assign dbg_psw = psw;
+    assign psw_c_o = psw[P_C];
+    assign dr8_o = dr8;
+    assign ihash_o = {4'd0, dr0[3]};                     // DR0 IHASH_EN
 endmodule

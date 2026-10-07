@@ -12,7 +12,10 @@ CFLAGS = -O1 -mpa-risc-1-1 -mschedule=7100LC -mdisable-fpregs -mno-space-regs \
 	-ffreestanding -nostdlib -fno-builtin -fno-pic \
 	-fno-asynchronous-unwind-tables -Wall -Isrc
 
-SUITES = alu1 alu2 shift mem branch trap fp fpedge max1 sys
+SUITES = alu1 alu2 shift mem branch trap fp fpedge max1 sys cache tlbx
+# suites QEMU can run: cache and tlbx use PCX-L diagnose cache/TLB access,
+# which QEMU 11.1.1 ignores (they are checked against model.py instead)
+QEMU_SUITES = alu1 alu2 shift mem branch trap fp fpedge max1 sys
 COMMON = src/crt0.S src/ivt.S src/main.c src/uart.c
 
 all: $(SUITES:%=build/%.bin)
@@ -28,7 +31,7 @@ build/%.elf: build/gen_%.S build/gen_%.c $(COMMON) src/pacputest.h src/link.ld
 build/%.bin: build/%.elf
 	$(OBJCOPY) -O binary $< $@
 
-qemu: $(SUITES:%=ref/qemu/%.log)
+qemu: $(QEMU_SUITES:%=ref/qemu/%.log)
 
 ref/qemu/%.log: build/%.elf run_qemu.py
 	@mkdir -p ref/qemu

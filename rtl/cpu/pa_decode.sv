@@ -6,9 +6,9 @@
 // GNU as and QEMU's insns.decode. Pure combinational.
 //
 // Not decoded yet (they raise trap 8 or 22 until their units exist): the
-// PCX-L explicit-endian word loads/stores (03/3, 03/B), the TLB/cache/probe
-// group (major 01) beyond classification, cache diagnose ops, and the FPU
-// (every FP instruction raises assist emulation) -- docs/STUBS.md S-005.
+// PCX-L explicit-endian word loads/stores (03/3, 03/B), the TLB/probe ops of
+// major 01, RDTLB's translation, and the FPU (every FP instruction raises
+// assist emulation) -- docs/STUBS.md S-005.
 module pa_decode
     import pa_pkg::*;
 (
@@ -82,9 +82,64 @@ module pa_decode
         end
 
         // ------------------------------------------------------ 01 memory management
+        // Instruction group (bit 19 = 0): ext7 = bits 19:25, sr = 16:18.
+        // Data group (bit 19 = 1): ext8 = bits 18:25, s = 16:17. m = bit 26.
+        // The cache flushes decode here; TLB/probe ops stay illegal until
+        // pa_tlb exists (STUBS S-005).
         6'h01: begin
             c.fu = FU_MMU;
-            c.illegal = 1'b1;           // TLB/cache/probe ops: with pa_tlb / caches (S-005)
+            c.priv = 1'b0;
+            c.rb = f6_10;               // base
+            c.ra = f11_15;              // index x
+            c.use_index = 1'b1;
+            c.base_we = f26;            // ,m: GR[b] <- GR[b] + GR[x]
+            c.sr = sr3(insn);
+            c.s2 = insn[15:14];
+            c.illegal = 1'b1;
+            // PCX-L fast inserts: bits 18:25 = 10/11/50/51, b and s ignored (cpu.md 4.3.2)
+            case (insn[13:6])
+                8'h10: begin c.illegal = 1'b0; c.sysop = MM_TLB_INS; c.priv = 1'b1; c.ra = f11_15; c.tlb_p = 1'b1; c.tlb_fast = 1'b1; c.tlb_i = 1'b1; c.use_index = 1'b0; c.base_we = 1'b0; end
+                8'h11: begin c.illegal = 1'b0; c.sysop = MM_TLB_INS; c.priv = 1'b1; c.ra = f11_15; c.tlb_fast = 1'b1; c.tlb_i = 1'b1; c.use_index = 1'b0; c.base_we = 1'b0; end
+                8'h50: begin c.illegal = 1'b0; c.sysop = MM_TLB_INS; c.priv = 1'b1; c.ra = f11_15; c.tlb_p = 1'b1; c.tlb_fast = 1'b1; c.use_index = 1'b0; c.base_we = 1'b0; end
+                8'h51: begin c.illegal = 1'b0; c.sysop = MM_TLB_INS; c.priv = 1'b1; c.ra = f11_15; c.tlb_fast = 1'b1; c.use_index = 1'b0; c.base_we = 1'b0; end
+                default: ;
+            endcase
+            if (c.illegal) begin
+                if (!f19) begin
+                    // instruction group: IxTLBA/P r,(sr,b), PITLB/E x(sr,b), FIC/FICE
+                    c.tlb_i = 1'b1;
+                    case (insn[12:6])       // ext7
+                        7'h00: begin c.illegal = 1'b0; c.sysop = MM_TLB_INS; c.priv = 1'b1; c.tlb_p = 1'b1; c.use_index = 1'b0; c.base_we = 1'b0; end
+                        7'h01: begin c.illegal = 1'b0; c.sysop = MM_TLB_INS; c.priv = 1'b1; c.use_index = 1'b0; c.base_we = 1'b0; end
+                        7'h08: begin c.illegal = 1'b0; c.sysop = MM_TLB_PURGE; c.priv = 1'b1; end
+                        7'h09: begin c.illegal = 1'b0; c.sysop = MM_TLB_PURGE; c.priv = 1'b1; c.tlb_all = 1'b1; end
+                        7'h0A: begin c.illegal = 1'b0; c.sysop = MM_FIC; end
+                        7'h0B: begin c.illegal = 1'b0; c.sysop = MM_FICE; end
+                        default: ;
+                    endcase
+                end else begin
+                    // data group: ext8 = bits 18:25
+                    case (insn[13:6])
+                        8'h40: begin c.illegal = 1'b0; c.sysop = MM_TLB_INS; c.priv = 1'b1; c.tlb_p = 1'b1; c.use_index = 1'b0; c.base_we = 1'b0; end
+                        8'h41: begin c.illegal = 1'b0; c.sysop = MM_TLB_INS; c.priv = 1'b1; c.use_index = 1'b0; c.base_we = 1'b0; end
+                        8'h48: begin c.illegal = 1'b0; c.sysop = MM_TLB_PURGE; c.priv = 1'b1; end
+                        8'h49: begin c.illegal = 1'b0; c.sysop = MM_TLB_PURGE; c.priv = 1'b1; c.tlb_all = 1'b1; end
+                        8'h4A: begin c.illegal = 1'b0; c.sysop = MM_FDC; end
+                        8'h4B: begin c.illegal = 1'b0; c.sysop = MM_FDCE; end
+                        8'h4E: begin c.illegal = 1'b0; c.sysop = MM_PDC; end
+                        8'h46, 8'h47, 8'hC6, 8'hC7: begin                   // PROBER/W, PROBERI/WI
+                            c.illegal = 1'b0; c.sysop = MM_PROBE; c.rt = f27_31; c.rt_we = 1'b1;
+                            c.use_index = 1'b0; c.base_we = 1'b0;
+                            c.probe_w = insn[6];
+                            c.a_imm = insn[13];                              // immediate PL
+                            c.imm = {30'd0, insn[17:16]};
+                        end
+                        8'h4D: begin c.illegal = 1'b0; c.sysop = MM_LPA; c.priv = 1'b1; c.rt = f27_31; c.rt_we = 1'b1; end
+                        8'h4C: begin c.illegal = 1'b0; c.sysop = MM_LCI; c.priv = 1'b1; c.rt = f27_31; c.rt_we = 1'b1; end
+                        default: ;
+                    endcase
+                end
+            end
         end
 
         // ------------------------------------------------------ 02 arith/logical, MAX-1
@@ -149,6 +204,7 @@ module pa_decode
         6'h03: begin
             c.rb = f6_10;
             c.s2 = insn[15:14];
+            c.cc = insn[11:10];
             if (!f19) begin                                         // indexed
                 c.ra = f11_15;
                 c.rt = f27_31;
@@ -223,13 +279,20 @@ module pa_decode
                 7'b0_101_?_?_1: begin c.illegal = 1'b0; c.sysop = DG_TOC_DIS; end
                 7'b1_101_?_?_0: begin c.illegal = 1'b0; c.sysop = DG_SHDW_GR; end
                 7'b1_101_?_?_1: begin c.illegal = 1'b0; c.sysop = DG_GR_SHDW; end
-                // cache diagnose: RDD, RDTLB, RDT, RI2D, RI2T, RI1, WDD, WDT,
-                // WI2D, WI2T, WI1, SET_TAG -- with the caches (S-005)
-                7'b1_110_0_0_1, 7'b1_110_0_1_1, 7'b1_110_1_0_1,
-                7'b0_110_0_0_1, 7'b0_110_1_0_1, 7'b0_100_0_0_0,
-                7'b1_111_0_0_1, 7'b1_111_1_0_1, 7'b0_111_0_0_1,
-                7'b0_111_1_0_1, 7'b0_111_0_0_0, 7'b0_100_?_0_1:
-                                 begin c.sysop = DG_CACHE; end          // still illegal for now
+                // cache diagnose (ERS s.8.3.4-8.3.7): reads b = 6:10, t = 27:31;
+                // writes b = 6:10, x = 11:15; RI1 indexes with IIAOQ back
+                7'b1_110_0_0_1: begin c.illegal = 1'b0; c.sysop = DG_RDD;   c.rb = f6_10; c.rt = f27_31; c.rt_we = 1'b1; end
+                7'b1_110_0_1_1: begin c.illegal = 1'b0; c.sysop = DG_RDTLB; c.rb = f6_10; c.rt = f27_31; c.rt_we = 1'b1; c.s2 = insn[15:14]; end
+                7'b1_110_1_0_1: begin c.illegal = 1'b0; c.sysop = DG_RDT;   c.rb = f6_10; c.rt = f27_31; c.rt_we = 1'b1; end
+                7'b0_110_0_0_1: begin c.illegal = 1'b0; c.sysop = DG_RI2D;  c.rb = f6_10; c.rt = f27_31; c.rt_we = 1'b1; end
+                7'b0_110_1_0_1: begin c.illegal = 1'b0; c.sysop = DG_RI2T;  c.rb = f6_10; c.rt = f27_31; c.rt_we = 1'b1; end
+                7'b0_100_0_0_0: begin c.illegal = 1'b0; c.sysop = DG_RI1; end
+                7'b1_111_0_0_1: begin c.illegal = 1'b0; c.sysop = DG_WDD;   c.rb = f6_10; c.ra = f11_15; end
+                7'b1_111_1_0_1: begin c.illegal = 1'b0; c.sysop = DG_WDT;   c.rb = f6_10; end
+                7'b0_111_0_0_1: begin c.illegal = 1'b0; c.sysop = DG_WI2D;  c.rb = f6_10; c.ra = f11_15; end
+                7'b0_111_1_0_1: begin c.illegal = 1'b0; c.sysop = DG_WI2T;  c.rb = f6_10; end
+                7'b0_111_0_0_0: begin c.illegal = 1'b0; c.sysop = DG_WI1;   c.rb = f6_10; end
+                7'b0_100_?_0_1: begin c.illegal = 1'b0; c.sysop = DG_SET_TAG; c.ra = f11_15; end
                 default: ;
             endcase
         end

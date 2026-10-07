@@ -39,15 +39,33 @@ package pa_pkg;
     } brcond_e;
 
     // ------------------------------------------------------------ system ops
-    typedef enum logic [4:0] {
+    typedef enum logic [5:0] {
         SYS_BREAK, SYS_SYNC, SYS_RFI, SYS_RFIR, SYS_SSM, SYS_RSM, SYS_MTSM,
         SYS_LDSID, SYS_MTSP, SYS_MFSP, SYS_MTCTL, SYS_MFCTL,
         // diagnose (FU_DIAG)
         DG_MTCPU, DG_MFCPU, DG_TOC_EN, DG_TOC_DIS, DG_SHDW_GR, DG_GR_SHDW,
-        DG_CACHE,   // RDD/RDT/RDTLB/RI2x/WDD/WDT/WI2x/RI1/WI1/SET_TAG (caches)
+        DG_SET_TAG,                                  // tag latch <- GR[x]
+        DG_RDD, DG_RDT, DG_RDTLB, DG_WDD, DG_WDT,    // L2-D data/tag, real (RDTLB: virtual)
+        DG_RI2D, DG_RI2T, DG_WI2D, DG_WI2T,          // L2-I data/tag
+        DG_RI1, DG_WI1,                              // L1-I entry <-> DR27/28/29
         // memory management (FU_MMU)
-        MM_TLB_INS, MM_TLB_PURGE, MM_CACHE_FLUSH, MM_PROBE, MM_LPA, MM_LCI
+        MM_TLB_INS, MM_TLB_PURGE, MM_PROBE, MM_LPA, MM_LCI,
+        MM_FDC, MM_FDCE, MM_PDC, MM_FIC, MM_FICE
     } sysop_e;
+
+    // ------------------------------------------------------------ cache engine operations
+    typedef enum logic [3:0] {
+        DC_MISS, DC_FDC, DC_FDCE, DC_PDC, DC_LDCW, DC_RDD, DC_RDT, DC_WDD, DC_WDT, DC_RD2
+    } dc_op_e;
+    typedef enum logic [3:0] {
+        IC_FILL, IC_FIC, IC_FICE, IC_RI2D, IC_RI2T, IC_WI2D, IC_WI2T, IC_RI1, IC_WI1
+    } ic_op_e;
+
+    typedef enum logic [1:0] { TLB_INS_A, TLB_INS_P, TLB_PURGE, TLB_PURGE_ALL } tlb_op_e;
+    typedef enum logic [3:0] {
+        F_ADD, F_SUB, F_MPY, F_DIV, F_SQRT, F_CPY, F_ABS, F_CNVFF, F_CNVXF, F_CNVFX, F_CNVFXT,
+        F_CMP, F_XMPYU, F_RND, F_RESERVED
+    } fpu_op_e;
 
     // ------------------------------------------------------------ traps
     localparam logic [5:0] TRAP_NONE      = 6'd0;
@@ -131,6 +149,7 @@ package pa_pkg;
         logic        base_trunc;   // STBYS ,m
         logic [1:0]  stbys;
         logic        ldcw;
+        logic [1:0]  cc;           // cache-control hint (bits 20:21); LDCW: != 0 -> in the cache
         logic        absolute;     // LDWA/STWA: physical address, priv
         logic [2:0]  sr;           // explicit space register (BE/BLE/MTSP/MFSP)
         logic [1:0]  s2;           // 2-bit s field: 0 -> SR[4 + GR[b]{0:1}]
@@ -143,6 +162,11 @@ package pa_pkg;
         logic        link;         // writes the link register (rt)
 
         // system / diagnose / MMU
+        logic        tlb_p;        // IxTLBP (protection) rather than IxTLBA
+        logic        tlb_i;        // instruction-side form (3-bit sr field)
+        logic        tlb_all;      // PxTLBE
+        logic        tlb_fast;     // IITLBxF / IDTLBxF: VA from IIAQ or ISR/IOR
+        logic        probe_w;      // PROBEW
         sysop_e      sysop;
         logic [4:0]  cr;           // CR / DR number
         logic [9:0]  sm_imm;       // SSM/RSM immediate

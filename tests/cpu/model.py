@@ -671,7 +671,7 @@ SHIFT = {"shd", "vshd", "extru", "extrs", "vextru", "vextrs", "zdep", "dep",
 LONGIMM = {"ldil", "addil", "ldo"}
 MAX1 = {"hadd", "hsub", "havg", "hshladd", "hshradd"}
 
-SUITES = ("alu1", "alu2", "shift", "max1")
+SUITES = ("alu1", "alu2", "shift", "max1", "cache", "tlbx")
 
 
 def parse_group(name):
@@ -752,6 +752,11 @@ def predict(suite, group, v):
     successor and 1 otherwise, and word 2 is cb_map(PSW[C/B])."""
     if suite not in SUITES:
         raise KeyError("model does not cover suite %r" % suite)
+    if suite in ("cache", "tlbx"):
+        # the generator computed the expected words from the ERS formats
+        # a list of alternatives in the JSON means any one of them
+        return Prediction([frozenset(w) if isinstance(w, list) else w for w in v["expect"]],
+                          ("expected words from gen_tests.py gen_cache",))
     o, cb_before = execute(group, v)
     executed = None if o.cond is None else (0 if o.cond else 1)
     if o.cb is not None:
@@ -813,11 +818,14 @@ def _qemu_ds_uv(group, v):
     return Prediction([p.words[0], 0 if cs else 1] + p.words[2:], ["QEMU bug ds-uv"])
 
 
-def expected_traps(suite, group, vectors):
+def expected_traps(suite, group, vectors, inputs=None):
     """Interruptions a group takes by design: the alu2 divide-step groups
-    read PSW[V] through the IPSW of one BREAK per vector."""
+    read PSW[V] through the IPSW of one BREAK per vector; the tlbx vectors
+    say how many they take ("traps" in the JSON)."""
     if suite == "alu2" and group.startswith("ds"):
         return vectors
+    if suite == "tlbx" and inputs is not None:
+        return sum(v.get("traps", 0) for v in inputs)
     return 0
 
 

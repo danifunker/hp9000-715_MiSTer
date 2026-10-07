@@ -63,6 +63,8 @@ WORD_NAMES.update({
     "branch": ["path", "r3", "r4"],
     "trap": ["r5", "exec", "trapno", "iir", "isr", "ior", "ipsw", "iiaoq"],
     "sys": ["r5", "exec", "trapno", "iir", "isr", "ior", "ipsw", "iiaoq"],
+    "cache": ["w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7"],
+    "tlbx": ["w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7"],
     "fp": ["fhi", "flo", "status", "pad"],
     "fpedge": ["fhi", "flo", "status", "pad"],
 })
@@ -264,7 +266,7 @@ def compare_group(suite, name, got, ref, inputs, use_model, nmax, known_qemu):
             r.warnings.append("trap count adjusted for known QEMU bug %s" % refbug["id"])
     bug = model.qemu_bug_for(suite, name) if use_model else None
     whole_bug = bug is not None and bug["predict"] is None
-    want_traps = model.expected_traps(suite, name, len(got.vectors)) if use_model else 0
+    want_traps = model.expected_traps(suite, name, len(got.vectors), inputs) if use_model else 0
     if use_model and got.traps is not None and got.traps != want_traps:
         msg = "took %d traps, the model expects %d" % (got.traps, want_traps)
         if known_qemu and whole_bug:

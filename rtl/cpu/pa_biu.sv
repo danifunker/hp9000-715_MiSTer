@@ -6,7 +6,10 @@
 // order. A posted store that ends in a bus error is reported with sb_err; the
 // core takes it as an HPMC at its next instruction boundary.
 //
-// The cacheable line port (mem_*) is not here yet: it arrives with the caches.
+// The cacheable line port (mem_*, cpu.md 6.8) is shared by the D-cache
+// (write-backs and fills) and the I-cache (fills): the D side has priority,
+// and a transaction holds the port until its last beat. The two never
+// overlap in practice: I-fills are issued only when the pipeline is empty.
 module pa_biu (
     input  logic        clk,
     input  logic        rst_n,
@@ -37,6 +40,36 @@ module pa_biu (
     output logic        sb_err,         // posted store answered with a bus error
     output logic        sb_valid_o,
     output logic [31:0] sb_addr_o,
+    // cacheable line port
+    output logic        mem_req, mem_we, mem_ifill,
+    output logic [31:0] mem_addr,
+    input  logic        mem_ack,
+    output logic [63:0] mem_wdata,
+    output logic        mem_wvalid,
+    input  logic        mem_wready,
+    input  logic [63:0] mem_rdata,
+    input  logic        mem_rvalid,
+    input  logic [1:0]  mem_rbeat,
+    input  logic        mem_rerr,
+    // D-cache line client
+    input  logic        dl_req, dl_we,
+    input  logic [31:0] dl_addr,
+    output logic        dl_ack,
+    input  logic [63:0] dl_wdata,
+    input  logic        dl_wvalid,
+    output logic        dl_wready,
+    output logic [63:0] dl_rdata,
+    output logic        dl_rvalid,
+    output logic [1:0]  dl_rbeat,
+    output logic        dl_rerr,
+    // I-cache line client (reads only)
+    input  logic        il_req,
+    input  logic [31:0] il_addr,
+    output logic        il_ack,
+    output logic [63:0] il_rdata,
+    output logic        il_rvalid,
+    output logic [1:0]  il_rbeat,
+    output logic        il_rerr,
     // instruction fetch burst (fetch unit)
     input  logic        f_req,          // held until f_done
     input  logic [31:0] f_addr,         // 32-byte aligned
@@ -46,6 +79,44 @@ module pa_biu (
     output logic        f_done,
     output logic        f_err
 );
+    // ---------------------------------------------------------------- line port
+    // grant: 0 none, 1 D, 2 I; held from the request to the last beat
+    logic [1:0] grant;
+    logic [2:0] beats;
+    wire d_sel = grant == 2'd1, i_sel = grant == 2'd2;
+    always_comb begin
+        mem_req = 1'b0; mem_we = 1'b0; mem_ifill = 1'b0; mem_addr = dl_addr; mem_wdata = dl_wdata; mem_wvalid = 1'b0;
+        dl_ack = 1'b0; dl_wready = 1'b0; dl_rvalid = 1'b0; il_ack = 1'b0; il_rvalid = 1'b0;
+        dl_rdata = mem_rdata; dl_rbeat = mem_rbeat; dl_rerr = mem_rerr;
+        il_rdata = mem_rdata; il_rbeat = mem_rbeat; il_rerr = mem_rerr;
+        if (d_sel) begin
+            mem_req = dl_req && beats == 0; mem_we = dl_we; mem_addr = dl_addr;
+            mem_wvalid = dl_wvalid; dl_ack = mem_ack; dl_wready = mem_wready; dl_rvalid = mem_rvalid;
+        end else if (i_sel) begin
+            mem_req = il_req && beats == 0; mem_ifill = 1'b1; mem_addr = il_addr;
+            il_ack = mem_ack; il_rvalid = mem_rvalid;
+        end
+    end
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin grant <= 2'd0; beats <= 3'd0; end
+        else begin
+            case (grant)
+                2'd0: begin
+                    if (dl_req) grant <= 2'd1;
+                    else if (il_req) grant <= 2'd2;
+                    beats <= 3'd0;
+                end
+                default: begin
+                    if (mem_ack) beats <= 3'd1;                      // transfer phase
+                    if ((mem_rvalid && !mem_we) || (mem_wvalid && mem_wready)) begin
+                        beats <= beats + 3'd1;
+                        if (beats == 3'd4) begin grant <= 2'd0; beats <= 3'd0; end
+                    end
+                end
+            endcase
+        end
+    end
+
     typedef enum logic [1:0] { S_IDLE, S_STORE, S_LOAD, S_FETCH } st_e;
     st_e st;
     logic        sb_valid;
