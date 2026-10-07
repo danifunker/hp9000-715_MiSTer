@@ -52,6 +52,7 @@ skeleton laid down from Template_MiSTer. **No RTL yet** --
 | `docs/reference/` | PDFs and their text extracts (not committed; `README.md` there has the sources) |
 | `roms/` | firmware (not committed; `README.md` there has the recipe and hashes) |
 | `tools/hpfw/hpfw.py` | unpacks HP firmware tapes (LIF) and checks the image header checksum |
+| `docs/design/cpu.md` | **the CPU specification** (PA-7100LC): state, VM/TLB/walker, interruptions, every instruction, PCX-L specifics, pipeline, interfaces, module plan and budget |
 | `docs/STUBS.md` | **the stub register**: every stub/simplification, active or planned |
 | `scratch/` | scratch Quartus projects / experiments (ignored) |
 
@@ -99,6 +100,11 @@ Checked in the 11.1.1 source on 2026-10-07:
   use), so **HP-UX 10.20 hangs at SCSI on `-M 715`**; with that fixed it
   still panics in the I/O probe. The same image boots on `-M B160L`.
 - No Harmony audio, WAX, floppy or real TOD/EEPROM model.
+- Major opcodes 0x16, 0x17, 0x1E, 0x1F, 0x2E and the bit-30 forms of 0x14/0x1C
+  decode as PA 2.0 instructions instead of illegal-instruction traps on a
+  PA 1.1 CPU (`docs/design/cpu.md` 8.3). More CPU deviations (recovery
+  counter, traps 23-25, shadow capture only when Q=1, TOC clobbering
+  GR24/25, PROBE privilege rule, the ROM's odd BB/BVB words): cpu.md 7.3.
 - It reports 16 block-TLB slots, so HP-UX on `-M 715` runs its **PCX-T**
   (PA-7100) code paths, not PCX-L ones (`docs/review/06` 3.1).
 - SH1ADD/SH2ADD/SH3ADD(L) conditions NUV/ZNV/UV/VNZ are wrong: `do_add_uv()`
