@@ -30,6 +30,29 @@ tested (pipeline, caches with diagnose access, TLB with the hardware walker).
    the FMPYADD single mapping is QEMU's `fmpyadd_s_reg`: specifier 0-15 ->
    fr(16+r)L, 16-31 -> fr(r)R).
 
+## Status update (2026-10-07, later session): steps 1 and 2 done
+
+- **Step 1 done:** `make -C verilator tb_fpu` replays the fp suite's 1360
+  vectors through the engine alone (QEMU's results as expectations): 0
+  mismatches; the 80 "unimplemented" are FRND, by design. Fixed on the way:
+  the restoring divide never produced the units digit (now 56 steps against
+  2b), the square root fed a 162-bit radicand into 81 steps (now m << 56, 55
+  steps) and mixed signed/unsigned in its exponent.
+- **Step 2 done:** `rtl/cpu/pa_fpunit.sv` (FR file, FPSR + compare queue +
+  exception registers, the W-stage decode of the operation word, FMPYADD/
+  SUB/CFXT sequencing, the unimplemented exception) is wired into `pa_cpu`;
+  the core decodes 09/0B as FP loads/stores with a doubleword size and a
+  64-bit data path, traps 22/14 as sec. 3.5 says, FTEST nullifies from E.
+  Simplification: one operation at a time, every FP instruction waits in D
+  while one is pending (STUBS S-012). **`tests/run-cputest.sh fp` passes
+  (1300 vectors)**, all other suites too; FRND was moved out of the `fp`
+  suite (the PCX-L traps on it; QEMU rounds).
+- **Not done:** step 3's `fpedge` expectations (STUBS S-013), step 4's fit
+  (cpu-timing.md section 5, "fit 10"), the ROM's FP tests in the system
+  simulator. The CPU without the FPU meets 64 MHz (fit 9: 65.1 MHz, seed 2).
+
+The text below is the original handoff.
+
 ## Where the FPU stands (2026-10-07, end of the previous session)
 
 - `rtl/cpu/pa_fpu.sv` is a **first draft of the arithmetic engine, untested

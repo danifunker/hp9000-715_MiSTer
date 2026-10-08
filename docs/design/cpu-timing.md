@@ -350,6 +350,12 @@ translation would allow it) once the FPU's cost is known.
 
 ## 5. Open items
 
+- **Fit 10: the FPU** (`pa_fpunit` + `pa_fpu`, committed 91bf0e8, not yet fitted): the 53x53
+  multiplier (`prod <= mul_a * mul_b`, one registered stage -- expect DSP blocks
+  and a long path), the AND-OR payload of the engine's rounding step, and the FR
+  file's three MLAB read ports in W. Add nothing else to that fit so its cost is
+  readable; 64 MHz is the gate.
+
 - Prediction in F2 instead of D (see 2.1) once the real F2 (tag compare +
   select) exists and its slack is known.
 - The caches' M10K output registers: the plan is registered outputs with the

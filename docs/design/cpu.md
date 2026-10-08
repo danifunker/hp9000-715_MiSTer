@@ -1230,7 +1230,7 @@ rom.dis f00158e0-f00158fc) -- a patched ROM, so only if needed (Q1).
 | Item | Design | Source |
 |---|---|---|
 | Registers | fr4-fr31 as two 32-bit MLAB halves (L, R), 3 read ports (2 for operations, 1 for FP stores) and 2 write ports (FPU result, FP load) via banks + LVT; fr0-fr3 (status + 7 exception registers) in flip-flops | ACD p.6-5 |
-| Issue | one operation at a time (multi-cycle, not pipelined); FP ops issue from E; the integer pipeline continues; a per-register busy bit stalls FP loads/stores/ops that touch a pending destination; FLDD/FSTD of fr0-fr3 and COPR wait for the FPU to drain; FTEST waits for a pending FCMP | ACD p.6-27 |
+| Issue | one operation at a time (multi-cycle, not pipelined). **Implemented (2026-10-07, `pa_fpunit`, STUBS S-012):** the operation issues at W commit with its operands read from the FR file in W; any FP instruction waits in D while an FP operation is in E/M/W or in flight, so no scoreboard is needed; the integer pipeline continues. Planned refinement: issue from E with a per-register busy bit; FLDD/FSTD of fr0-fr3 and COPR wait for the FPU to drain; FTEST waits for a pending FCMP | ACD p.6-27 |
 | Unpack/classify | zero, normal, denormal, inf, qNaN, sNaN per operand; **NaN or denormal (D = 0) input -> unimplemented exception immediately** (no compute) | ERS s.7.3 |
 | Add/sub/compare/convert | 55-bit alignment shifter, adder, leading-zero count, normaliser, IEEE rounding (4 modes, FPSR.RM); FCNVxx through the same shifters | |
 | Multiply | 53x53 from **four 27x27 DSPs**, 2 cycles + normalise/round; XMPYU (32x32 unsigned) on the same array | ERS s.7.5.2: XMPYU uses the MPY unit |
