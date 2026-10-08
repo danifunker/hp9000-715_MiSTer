@@ -2,27 +2,27 @@
 //============================================================================
 //  HP 9000/715 -- Verilator simulation top
 //
-//  `emu` here is the SIMULATION top: the sim-friendly port surface that
-//  sim_main.cpp drives (the MiSTer framework's sys_top is not simulated).
+//  `emu` here is the SIMULATION top: the machine (rtl/hp715.sv) with
+//  behavioural memories -- system RAM, the ECC check store, the boot ROM
+//  store (filled through rtl/rom_loader.sv by the ioctl download, so the
+//  STUBS S-011 patch is applied as on the board) -- and a small video
+//  generator that shows the eight front-panel LEDs until Artist exists.
+//  sim_main.cpp (GUI) and romsim/tb_rom.cpp (headless) both drive it.
 //
-//  Bring-up stage 0: the machine does not exist yet, so the MiSTer
-//  template's demo core paints the video window and paces frames
-//  (docs/STUBS.md S-001). The port list is already the machine's: option
-//  bits, PS/2, video, audio, the ROM download, a serial-console tap and CPU
-//  debug taps, so sim_main.cpp does not change shape when the machine
-//  replaces the demo core.
+//  sim_status: [1:0] model (0 = 715/64, 1 = /80, 2 = /100),
+//              [5:2] RAM = 2^n MB (0 = the default, 16 MB; at most RAM_LG_MAX)
+//  +eeprom=<hex> preloads the EEPROM (rtl/hp_xbus.sv); blank otherwise.
 //============================================================================
 
-module emu
+module emu #(
+	parameter int RAM_LG_MAX = 6          // the RAM array: 2^6 = 64 MB
+)
 (
 	input         clk_sys,
 	input         reset,
-
-	// Stand-ins for the MiSTer status word (the OSD options):
-	//   sim_status[2] TV mode for the template (0 NTSC, 1 PAL)
 	input  [31:0] sim_status,
 
-	// PS/2 keyboard and mouse, in hps_io's format (LASI PS/2 when it exists)
+	// PS/2 keyboard and mouse, in hps_io's format
 	input  [10:0] ps2_key,
 	input  [24:0] ps2_mouse,
 
@@ -40,8 +40,7 @@ module emu
 	output [15:0] AUDIO_L,
 	output [15:0] AUDIO_R,
 
-	// Boot ROM download (hps_io ioctl, index 0 = boot.rom). The sim can
-	// also preload the ROM with $readmemh once the machine exists.
+	// Boot ROM download (hps_io ioctl, index 0 = boot.rom)
 	input         ioctl_download,
 	input         ioctl_wr,
 	input  [24:0] ioctl_addr,
@@ -49,61 +48,195 @@ module emu
 	input  [7:0]  ioctl_index,
 	output        ioctl_wait,
 
-	// Serial console tap: one strobe per byte the LASI UART transmits
-	// (the CPU test ROM and the PDC report through it)
+	// Serial console: every byte the LASI UART starts to send, and bytes
+	// typed into its receiver
 	output        uart_tx_strobe,
 	output [7:0]  uart_tx_byte,
+	input         uart_rx_strobe,
+	input  [7:0]  uart_rx_byte,
+	output        uart_rx_full,
+
+	// Front panel
+	output [7:0]  leds,            // the LED latch (active low)
+	output        led_strobe,      // a chassis code was written
+	input         toc_button,
+	input         soft_power_off,
 
 	// CPU debug taps
-	output [31:0] debug_iaoq_f,    // instruction address offset queue, front
-	output [31:0] debug_iaoq_b,    // ... and back
-	output [31:0] debug_insn,      // instruction at the front of the queue
-	output        debug_retire,    // one pulse per retired instruction
-	output        debug_halted     // CPU stopped (halt / fatal machine check)
+	output [31:0] debug_iaoq_f,
+	output [31:0] debug_iaoq_b,
+	output [31:0] debug_insn,
+	output        debug_retire,
+	output        debug_nullified,
+	output        debug_trap,
+	output [5:0]  debug_trap_vec,
+	output [31:0] debug_psw,
+	output        debug_halted,
+	output        debug_buserr,
+	output [31:0] debug_buserr_addr
 );
 
+localparam int RAM_WORDS = 1 << (RAM_LG_MAX + 17);     // 64-bit words
+localparam int CHK_WORDS = 1 << (RAM_LG_MAX + 15);     // one per 32-byte line
+
+wire [3:0] ram_lg = sim_status[5:2] == 4'd0 ? 4'd4 :
+                    sim_status[5:2] > 4'(RAM_LG_MAX) ? 4'(RAM_LG_MAX) : sim_status[5:2];
+
 //----------------------------------------------------------------------------
-// Placeholder: the template demo core (docs/STUBS.md S-001)
+// Boot ROM store, written by the loader
 //----------------------------------------------------------------------------
-wire       ce_pix;
-wire [7:0] video;
-wire       hbl, vbl, hs, vs;
-
-mycore mycore
-(
-	.clk(clk_sys),
-	.reset(reset),
-	.pal(sim_status[2]),
-	.scandouble(1'b0),
-	.ce_pix(ce_pix),
-	.hvcnt_atzero(),
-	.HBlank(hbl),
-	.HSync(hs),
-	.VBlank(vbl),
-	.VSync(vs),
-	.video(video)
-);
-
-assign CE_PIXEL = ce_pix;
-assign VGA_R    = video;
-assign VGA_G    = video;
-assign VGA_B    = video;
-assign VGA_HS   = hs;
-assign VGA_VS   = vs;
-assign VGA_HB   = hbl;
-assign VGA_VB   = vbl;
-
-assign AUDIO_L  = 16'd0;
-assign AUDIO_R  = 16'd0;
+logic        rl_busy, rl_wr;
+logic [17:3] rl_waddr;
+logic [63:0] rl_wdata;
+rom_loader #(.INDEX(8'd0)) u_rl (
+	.clk(clk_sys), .ioctl_download(ioctl_download), .ioctl_wr(ioctl_wr), .ioctl_addr(ioctl_addr),
+	.ioctl_dout(ioctl_dout), .ioctl_index(ioctl_index), .busy(rl_busy),
+	.wr(rl_wr), .waddr(rl_waddr), .wdata(rl_wdata));
 assign ioctl_wait = 1'b0;
 
-assign uart_tx_strobe = 1'b0;
-assign uart_tx_byte   = 8'd0;
+logic [63:0] rom [32768];
+always_ff @(posedge clk_sys) if (rl_wr) rom[rl_waddr] <= rl_wdata;
 
-assign debug_iaoq_f = 32'd0;
-assign debug_iaoq_b = 32'd0;
-assign debug_insn   = 32'd0;
-assign debug_retire = 1'b0;
-assign debug_halted = 1'b0;
+// machine reset: the input, and the download (plus a little while after it)
+logic [7:0] rst_cnt;
+always_ff @(posedge clk_sys)
+	if (reset || rl_busy) rst_cnt <= 8'd255;
+	else if (rst_cnt != 8'd0) rst_cnt <= rst_cnt - 8'd1;
+wire m_reset = reset || rl_busy || rst_cnt != 8'd0;
+
+//----------------------------------------------------------------------------
+// The machine
+//----------------------------------------------------------------------------
+logic        ram_req, ram_we, ram_line, ram_ack, ram_wready, ram_rvalid;
+logic [27:0] ram_addr;
+logic [7:0]  ram_be;
+logic [63:0] ram_wdata, ram_rdata;
+logic        chk_req, chk_we, chk_ack;
+logic [22:0] chk_addr;
+logic [3:0]  chk_be;
+logic [31:0] chk_wdata, chk_rdata;
+logic        rom_req, rom_ack, rom_rvalid;
+logic [17:5] rom_addr;
+logic [63:0] rom_rdata;
+logic [31:0] gr [32];
+logic [31:0] pcr;
+
+hp715 #(.CLK_HZ(64_000_000), .SIM_FAST(1'b1)) u_hp715 (
+	.clk(clk_sys), .reset(m_reset),
+	.cfg_model(sim_status[1:0]), .cfg_ram_lg(ram_lg),
+	.soft_pwr_n(!soft_power_off), .toc_button(toc_button),
+	.led_latch(leds), .led_strobe(led_strobe), .lasi_pcr(pcr),
+	.ram_req(ram_req), .ram_we(ram_we), .ram_line(ram_line), .ram_addr(ram_addr), .ram_be(ram_be),
+	.ram_wdata(ram_wdata), .ram_ack(ram_ack), .ram_wready(ram_wready), .ram_rvalid(ram_rvalid),
+	.ram_rdata(ram_rdata),
+	.chk_req(chk_req), .chk_we(chk_we), .chk_addr(chk_addr), .chk_be(chk_be), .chk_wdata(chk_wdata),
+	.chk_ack(chk_ack), .chk_rdata(chk_rdata),
+	.rom_req(rom_req), .rom_addr(rom_addr), .rom_ack(rom_ack), .rom_rvalid(rom_rvalid),
+	.rom_rdata(rom_rdata), .rom_inval(rl_busy),
+	.uart_txd(), .uart_rxd(1'b1), .uart_tap_strobe(uart_tx_strobe), .uart_tap_byte(uart_tx_byte),
+	.uart_inj_strobe(uart_rx_strobe), .uart_inj_byte(uart_rx_byte), .uart_inj_full(uart_rx_full),
+	.ps2_key(ps2_key), .ps2_mouse(ps2_mouse),
+	.rtc_set(1'b0), .rtc_value(32'd0),
+	.ee_haddr(11'd0), .ee_hwe(1'b0), .ee_hwdata(32'd0), .ee_hrdata(), .ee_dirty(), .ee_dirty_clr(1'b0),
+	.dbg_retire(debug_retire), .dbg_nullified(debug_nullified), .dbg_iaoq_f(debug_iaoq_f),
+	.dbg_iaoq_b(debug_iaoq_b), .dbg_insn(debug_insn), .dbg_trap(debug_trap), .dbg_trap_vec(debug_trap_vec),
+	.dbg_psw(debug_psw), .dbg_halted(debug_halted), .dbg_buserr(debug_buserr),
+	.dbg_buserr_addr(debug_buserr_addr), .dbg_gr(gr));
+
+//----------------------------------------------------------------------------
+// System RAM: acknowledge the cycle after the request, then one beat per
+// cycle (a line wraps from ram_addr[4:3])
+//----------------------------------------------------------------------------
+logic [63:0] ram [RAM_WORDS];
+logic [1:0]  r_state;              // 0 idle, 1 reading, 2 writing
+logic [27:0] r_addr;
+logic [1:0]  r_beat, r_left;
+logic [7:0]  r_be;
+wire  [RAM_LG_MAX+16:0] r_widx = {r_addr[RAM_LG_MAX+19:5], r_beat};
+always_ff @(posedge clk_sys) begin
+	ram_ack <= 1'b0; ram_rvalid <= 1'b0; ram_wready <= 1'b0;
+	case (r_state)
+		2'd0: if (ram_req && !ram_ack) begin
+			ram_ack <= 1'b1; r_addr <= ram_addr; r_beat <= ram_addr[4:3]; r_be <= ram_be;
+			r_left <= ram_line ? 2'd3 : 2'd0;
+			r_state <= ram_we ? 2'd2 : 2'd1;
+		end
+		2'd1: begin
+			ram_rvalid <= 1'b1; ram_rdata <= ram[r_widx];
+			r_beat <= r_beat + 2'd1; r_left <= r_left - 2'd1;
+			if (r_left == 2'd0) r_state <= 2'd0;
+		end
+		default: begin
+			if (!ram_wready) ram_wready <= 1'b1;
+			if (ram_wready) begin
+				for (int b = 0; b < 8; b++) if (r_be[b]) ram[r_widx][8*b +: 8] <= ram_wdata[8*b +: 8];
+				r_beat <= r_beat + 2'd1; r_left <= r_left - 2'd1;
+				if (r_left == 2'd0) r_state <= 2'd0;
+				else ram_wready <= 1'b1;
+			end
+		end
+	endcase
+	if (reset) r_state <= 2'd0;
+end
+
+// check store
+logic [31:0] chk [CHK_WORDS];
+wire  [RAM_LG_MAX+14:0] c_idx = chk_addr[RAM_LG_MAX+14:0];
+always_ff @(posedge clk_sys) begin
+	chk_ack <= 1'b0;
+	if (chk_req && !chk_ack) begin
+		chk_ack <= 1'b1;
+		if (chk_we) begin
+			for (int b = 0; b < 4; b++) if (chk_be[b]) chk[c_idx][8*b +: 8] <= chk_wdata[8*b +: 8];
+		end else chk_rdata <= chk[c_idx];
+	end
+end
+
+// boot ROM: four beats after the acknowledge
+logic [1:0] rm_beat;
+logic       rm_busy;
+logic [17:5] rm_line;
+always_ff @(posedge clk_sys) begin
+	rom_ack <= 1'b0; rom_rvalid <= 1'b0;
+	if (!rm_busy) begin
+		if (rom_req && !rom_ack) begin rom_ack <= 1'b1; rm_busy <= 1'b1; rm_beat <= 2'd0; rm_line <= rom_addr; end
+	end else begin
+		rom_rvalid <= 1'b1; rom_rdata <= rom[{rm_line, rm_beat}];
+		rm_beat <= rm_beat + 2'd1;
+		if (rm_beat == 2'd3) rm_busy <= 1'b0;
+	end
+	if (reset) rm_busy <= 1'b0;
+end
+
+//----------------------------------------------------------------------------
+// Video: 640x480 at 16 MHz pixel clock, the eight LEDs as squares (lit =
+// latch bit clear), plus the power LED (green, from LASI PCR)
+//----------------------------------------------------------------------------
+logic [1:0] pdiv;
+logic [9:0] hc, vc;
+always_ff @(posedge clk_sys) begin
+	pdiv <= pdiv + 2'd1;
+	if (pdiv == 2'd3) begin
+		if (hc == 10'd799) begin hc <= 10'd0; vc <= (vc == 10'd524) ? 10'd0 : vc + 10'd1; end
+		else hc <= hc + 10'd1;
+	end
+end
+assign CE_PIXEL = pdiv == 2'd3;
+assign VGA_HB = hc >= 10'd640;
+assign VGA_VB = vc >= 10'd480;
+assign VGA_HS = hc >= 10'd656 && hc < 10'd752;
+assign VGA_VS = vc >= 10'd490 && vc < 10'd492;
+wire       in_row = vc >= 10'd200 && vc < 10'd240;
+wire [9:0] hx = hc - 10'd80;
+wire       in_led = in_row && hc >= 10'd80 && hc < 10'd560 && hx[5:0] < 6'd40;
+wire [2:0] led_n = 3'd7 - hx[8:6];                      // LED8 on the left
+wire       lit = in_led && !leds[led_n];
+wire       pwr = vc >= 10'd300 && vc < 10'd320 && hc >= 10'd300 && hc < 10'd340 && !pcr[1];
+assign VGA_R = (VGA_HB || VGA_VB) ? 8'd0 : lit ? 8'hFF : in_led ? 8'h30 : 8'd0;
+assign VGA_G = (VGA_HB || VGA_VB) ? 8'd0 : lit ? 8'hB0 : pwr ? 8'hFF : in_led ? 8'h20 : 8'd0;
+assign VGA_B = 8'd0;
+
+assign AUDIO_L = 16'd0;
+assign AUDIO_R = 16'd0;
 
 endmodule

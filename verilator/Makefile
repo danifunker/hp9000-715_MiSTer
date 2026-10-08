@@ -32,12 +32,12 @@ LDFLAGS = $(LIBS)
 EXE = ./obj_dir/Vemu
 V_OPT = --x-assign fast --x-initial fast --noassert --unroll-count 256
 
-# Core RTL under simulation. Stage 0: the template demo core paints the
-# video window until the machine exists (docs/STUBS.md S-001).
-V_SRC = \
-	sim.v \
-	$(RTL)/mycore.v \
-	sim_lfsr.v
+# Core RTL under simulation: the machine (rtl/hp715.sv) inside sim.v.
+# CPU_RTL is defined below with the CPU benches.
+MACHINE_RTL = $(RTL)/mioc_ecc.sv $(RTL)/mioc.sv $(RTL)/hp_xbus.sv $(RTL)/lasi/lasi_uart.sv \
+	$(RTL)/lasi/lasi_ps2.sv $(RTL)/lasi/ps2_dev.sv $(RTL)/lasi/lasi.sv $(RTL)/wax_stub.sv \
+	$(RTL)/rom_loader.sv $(RTL)/hp715.sv
+V_SRC = $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v
 
 C_SRC = \
 	sim_main.cpp \
@@ -137,12 +137,12 @@ tb_ldst: obj_dir_tb/mem_vectors.txt
 # runs tests/cpu/build/<suite>.bin and checks the log with compare.py.
 # CORE=seq runs the sequential bring-up core, CORE=pipe (default) the
 # pipelined pa_cpu; the binaries live in obj_dir_ct/$(CORE).
-CPU_RTL = $(RTL)/cpu/pa_pkg.sv $(RTL)/cpu/pa_decode.sv $(RTL)/cpu/pa_alu.sv $(RTL)/cpu/pa_shift.sv \
+CPU_PIPE_RTL = $(RTL)/cpu/pa_pkg.sv $(RTL)/cpu/pa_decode.sv $(RTL)/cpu/pa_alu.sv $(RTL)/cpu/pa_shift.sv \
 	$(RTL)/cpu/pa_max1.sv $(RTL)/cpu/pa_ldst.sv $(RTL)/cpu/pa_regfile.sv $(RTL)/cpu/pa_cr16.sv \
 	$(RTL)/cpu/pa_biu.sv $(RTL)/cpu/pa_fetch.sv $(RTL)/cpu/pa_core.sv $(RTL)/cpu/pa_cpu.sv \
 	$(RTL)/cpu/pa_cache_ram.sv $(RTL)/cpu/pa_dcache.sv $(RTL)/cpu/pa_icache.sv $(RTL)/cpu/pa_tlb.sv \
-	$(RTL)/cpu/pa_fpu.sv $(RTL)/cpu/pa_fpunit.sv \
-	$(RTL)/cpu/pa_core_seq.sv
+	$(RTL)/cpu/pa_fpu.sv $(RTL)/cpu/pa_fpunit.sv
+CPU_RTL = $(CPU_PIPE_RTL) $(RTL)/cpu/pa_core_seq.sv
 CT_RTL = $(CPU_RTL) cputest/cputest_top.sv
 CORE ?= pipe
 CT_PIPE_seq = 0
@@ -180,3 +180,17 @@ cosim: $(COSIM_EXE) obj_dir_ct/$(SUITE).hex
 	$(COSIM_EXE) +rom=obj_dir_ct/$(SUITE).hex
 
 .PHONY: cosim
+
+# ---------------------------------------------------------------------------
+# The whole machine on HP's boot ROM, headless (verilator/romsim):
+# `make romsim` builds obj_dir_rom/Vemu; tests/run-rom.sh runs it.
+ROMSIM_EXE = obj_dir_rom/Vemu
+$(ROMSIM_EXE): $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v romsim/tb_rom.cpp
+	$(V) --cc --exe --build -j 0 -O3 -Wno-fatal -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL \
+		-Wno-UNUSEDPARAM -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-TIMESCALEMOD --x-assign fast --x-initial fast \
+		+define+SIMULATION=1 --savable --Mdir obj_dir_rom --top-module emu -o Vemu $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v \
+		$(abspath romsim/tb_rom.cpp)
+
+romsim: $(ROMSIM_EXE)
+
+.PHONY: romsim

@@ -277,9 +277,12 @@ compares 0xDC with those values after reading each line back. Together:
     ECC(0x01234567FEDCBA98) = 0x55
 
 HP's H-matrix is not known. Any SEC-DED code with those three values, odd-
-weight columns, and no data column equal to 0xD0 or 0x0D passes all of the
+weight columns, no data column equal to 0xD0 or 0x0D, and no three columns
+of the triple flip 0x00000D00 in the upper word (`mem_ecc_multibit`
+f000d4f8, which must HPMC) XORing to a fourth column passes all of the
 above; `tools/rom/hwmap_ecc.py` finds one (prints 64 columns; ECC(d) = 0x33 ^
-XOR of the columns of the set data bits).
+XOR of the columns of the set data bits). (Its first version missed the
+triple flip; the RTL simulator caught it, 2026-10-07.)
 
 **Cheap FPGA model (no check-bit storage):** compute ECC on the fly; keep a
 small "poison" table (4 entries = one line is enough for the ROM) of

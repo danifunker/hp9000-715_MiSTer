@@ -112,9 +112,10 @@ finds (FASTSIZE cannot help, it also clips the reported size).
 
 The ROM's memory tests need SEC-DED ECC with one check byte per doubleword
 (HW 1.6): ECC(0) = 0x33, ECC(~0) = 0xCC, ECC(0x01234567FEDCBA98) = 0x55,
-odd-weight columns, no data column equal to 0xD0 or 0x0D. We use the code
-`tools/rom/hwmap_ecc.py` finds (seed 715): ECC(d) = 0x33 ^ XOR of col[j]
-over the set bits j of d.
+odd-weight columns, no data column equal to 0xD0 or 0x0D, and the triple
+data error 0x00000D00 in the upper word detected rather than miscorrected.
+We use the code `tools/rom/hwmap_ecc.py` finds (seed 715): ECC(d) = 0x33 ^
+XOR of col[j] over the set bits j of d (`rtl/mioc_ecc.sv`).
 
 | Piece | What it does |
 |---|---|

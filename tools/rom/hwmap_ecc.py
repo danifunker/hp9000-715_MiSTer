@@ -11,6 +11,8 @@ down through these observations (one check byte per 64-bit doubleword):
   ECC(0x01234567FEDCBA98) == 0x55   (ECC test reads DC back as 0x55555555)
   every single data-bit flip (64) and check-bit flip (8) is corrected (sedc)
   data double flip 0x01000400 (in either word)           -> uncorrectable (dedc)
+  data triple flip 0x00000D00 in the upper word (f000d4f8) -> uncorrectable (dedc):
+      the three columns must not XOR to another column (a miscorrection)
   check-byte flips 0xD0, 0x0D (3 bits) and 0x88 (2 bits) -> uncorrectable (dedc)
 
 so ECC(x) = H.x xor 0x33 with H.1 = 0xFF and H.(0x01234567FEDCBA98) = 0x66.
@@ -103,9 +105,9 @@ def verify(cols, quiet=False):
         check(classify(cols, s) == ("data", j), "single data bit %d corrected" % j)
     for k in range(8):
         check(classify(cols, 0x80 >> k) == ("check", k), "single check bit %d" % k)
-    for flip in (0x01000400 << 32, 0x01000400):
+    for flip in (0x01000400 << 32, 0x01000400, 0x00000D00 << 32):
         s = ecc(cols, PATTERN ^ flip) ^ 0x55
-        check(classify(cols, s) == "dedc", "double data flip %#x fatal" % flip)
+        check(classify(cols, s) == "dedc", "multi-bit data flip %#x fatal" % flip)
     for s in (0xD0, 0x0D, 0x88):
         check(classify(cols, s) == "dedc", "check flip %#x fatal" % s)
     return ok
