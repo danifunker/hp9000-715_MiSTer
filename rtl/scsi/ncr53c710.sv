@@ -75,6 +75,8 @@ module ncr53c710 #(
     logic [7:0]  dmode, dien, dwt, dcntl;
     logic        sigp, abrt_req, srst, carry;
     logic        con;                          // connected
+    logic        bsy_q;                        // BSY last cycle (CON drops on its falling edge)
+    logic        bad_par_q;                    // forcing bad parity onto the bus last cycle
     logic        target_mode;
     // diagnostic DMA FIFO: 4 lanes x 16 bytes (+ parity)
     logic [8:0]  dff [4][16];
@@ -219,6 +221,7 @@ module ncr53c710 #(
             if (rst) dcntl <= 8'd0; else dcntl <= dcntl & 8'h20;          // the soft reset keeps EA
             if (rst) srst <= 1'b0;
             sigp <= 1'b0; abrt_req <= 1'b0; carry <= 1'b0; con <= 1'b0; target_mode <= 1'b0;
+            bsy_q <= 1'b0; bad_par_q <= 1'b0;
             sb_atn <= 1'b0; sb_ackhold <= 1'b0; sb_rst <= 1'b0;
             for (int l = 0; l < 4; l++) begin dff_n[l] <= 5'd0; dff_rd[l] <= 4'd0; dff_wr[l] <= 4'd0; end
             dfp_latch <= 1'b0; dfifo_cnt <= 7'd0;
@@ -312,9 +315,17 @@ module ncr53c710 #(
                 dfp_latch <= dff[l][dff_rd[l]][8];
                 if (dff_n[l] != 5'd0) begin dff_rd[l] <= dff_rd[l] + 4'd1; dff_n[l] <= dff_n[l] - 5'd1; end
             end
-            // a bus reset seen on the bus (the edge)
             if (sb_req) latched_phase <= sb_phase;
-            if (!sb_bsy && con && est == E_IDLE) con <= 1'b0;
+            // CON drops when the target releases BSY (the host may set it in
+            // low-level mode, so it is not simply !BSY)
+            bsy_q <= sb_bsy;
+            if (bsy_q && !sb_bsy && est == E_IDLE) con <= 1'b0;
+            // SSTAT0.PAR: the only parity error we can have is the one the
+            // chip forces itself -- driving the bus (ADB) with AESP and parity
+            // checking on; the IODC's loopback self-check (HW 4.5, ROM
+            // F_f002dc2c) expects it latched
+            bad_par_q <= scntl1[6] && scntl1[2] && scntl0[3];
+            if (scntl1[6] && scntl1[2] && scntl0[3] && !bad_par_q) set_s0[0] = 1'b1;
 
             // ------------------------------------------------ the engine
             case (est)

@@ -55,7 +55,7 @@ yet run on a board); SCSI (`rtl/scsi/`) is being brought up against the ROM.
 | `rtl/scsi/` | `ncr53c710.sv` (the 53C710 in LASI page 6: SCRIPTS, DMA via the MIOC `dma_*` port) and `scsi_targets.sv` (disks ID 6/5, CD-ROM ID 2 on hps_io block devices) -- written 2026-10-08, not yet exercised (STUBS S-020/S-021) |
 | `rtl/mister/` | board side, all on the 64 MHz clock: `sdram64.sv` (system RAM; `make -C verilator tb_sdram64`), `ddr3_port.sv` (boot ROM + ECC check store in DDR3), `eeprom_save.sv` (EEPROM image on hps_io slot 1). `HP9K715.sv` is the MiSTer top (system.md 9); whole-core builds in system.md 10 |
 | `tests/run-rom.sh` | **the ROM milestone ratchet**: HP's PDC 1.6 on the whole machine to `BOOT_ADMIN>` (~6 min) |
-| `verilator/romsim/` | headless whole-machine run on HP's ROM: `make -C verilator romsim`, then `verilator/obj_dir_rom/Vemu +eeprom=<hex> --stamp --until 'BOOT_ADMIN>'`; `--save-at`/`--restore` checkpoints, `+gsctrace`, `--trace` |
+| `verilator/romsim/` | headless whole-machine run on HP's ROM: `make -C verilator romsim`, then `verilator/obj_dir_rom/Vemu +eeprom=<hex> --stamp --until 'BOOT_ADMIN>'`; `--save-at`/`--save-on`/`--restore` checkpoints, `--type`/`--then` console input, `--disk0 disks/hpux1020.img --snapshot`, `--gsctrace`, `--scsitrace`, `--trace` |
 | `tools/eeprom/mkeeprom.py` | EEPROM images (`bootstrap`: initialised, fastboot on, manufacturing mode = RS-232 console) |
 | `docs/design/cpu-timing.md` | **the timing/area log**: every Quartus fit of the CPU (`scratch/cpu_fmax/`, `run.sh <revision>`), the pipeline decisions and their bubble costs |
 | `tests/cpu/` | **pacputest**: bare-metal CPU test ROMs (gen_tests.py, 12 suites incl. `sys`, `cache`, `tlbx` and `fpedge`), QEMU reference logs (`ref/qemu`), the independent reference model (`model.py`: integer, MAX-1 and the PCX-L FPU rules) and `compare.py`; see its README |
@@ -66,6 +66,8 @@ yet run on a board); SCSI (`rtl/scsi/`) is being brought up against the ROM.
 | `roms/disasm/`, `roms/hpux/` | generated listings, and HP-UX files pulled from the 10.20 image (`vmunix`, `system`, ISL ...) -- not committed |
 | `docs/reference/` | PDFs and their text extracts (not committed; `README.md` there has the sources) |
 | `roms/` | firmware (not committed; `README.md` there has the recipe and hashes) |
+| `disks/` | SCSI disk/CD images (not committed; `README.md` there has the recipe): `hpux1020.img`, HP-UX 10.20 from tenox's qcow2, 4 GiB raw |
+| `tools/sim/console_png.py` | renders a romsim `--stamp` console log as a terminal screenshot (the machine's only screen until Artist) |
 | `tools/hpfw/hpfw.py` | unpacks HP firmware tapes (LIF) and checks the image header checksum |
 | `docs/design/cpu.md` | **the CPU specification** (PA-7100LC): state, VM/TLB/walker, interruptions, every instruction, PCX-L specifics, pipeline, interfaces, module plan and budget |
 | `docs/STUBS.md` | **the stub register**: every stub/simplification, active or planned |

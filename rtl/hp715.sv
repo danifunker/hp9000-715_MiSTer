@@ -77,7 +77,7 @@ module hp715 #(
     output logic        ee_dirty,
     input  logic        ee_dirty_clr,
     // debug
-    input  logic [7:0]  dbg_ctl,            // simulator trace switches: [0] GSC accesses
+    input  logic [7:0]  dbg_ctl,            // simulator trace switches: [0] GSC accesses, [1] I-cache, [2] SCSI
     output logic        dbg_retire, dbg_nullified,
     output logic [31:0] dbg_iaoq_f, dbg_iaoq_b,
     output logic [31:0] dbg_insn,
@@ -273,6 +273,28 @@ module hp715 #(
         if (u_cpu.u_icache.lk_valid && u_cpu.u_icache.f1_addr[31:5] == 27'd0)
             $display("IF  addr=%08x hash=%02x l1hit=%0d l2hit=%0d word=%08x", u_cpu.u_icache.f1_addr,
                      u_cpu.u_icache.lk_hash, u_cpu.u_icache.l1_hit, u_cpu.u_icache.l2_hit, u_cpu.u_icache.f1_word);
+    end
+`endif
+
+`ifdef SIMULATION
+    // dbg_ctl[2]: the 53C710 -- SCRIPTS instructions as decoded, selections,
+    // interrupt status, the bytes on the bus, the block-device requests
+    logic       sc_irq_q, sc_req_q, sc_ack_q;
+    always_ff @(posedge clk) if (dbg_ctl[2]) begin
+        sc_irq_q <= s_irq; sc_req_q <= sb_req; sc_ack_q <= sb_ack;
+        if (u_scsi.est == 5'd2)
+            $display("SCR %08x: %08x %08x", u_scsi.dsp - (u_scsi.ins0[31:30] == 2'b11 ? 32'd12 : 32'd8),
+                     u_scsi.ins0, u_scsi.dsps);
+        if (sb_sel) $display("SCR select id %0d atn %0d", sb_sel_id, sb_sel_atn);
+        if (sb_sel_done) $display("SCR selected");
+        if (sb_sel_fail) $display("SCR no target");
+        if (s_irq && !sc_irq_q)
+            $display("SCR IRQ dstat %02x sstat0 %02x dsps %08x dsp %08x", u_scsi.dstat, u_scsi.sstat0_st,
+                     u_scsi.dsps, u_scsi.dsp);
+        if (sb_ack && !sc_ack_q)
+            $display("SCR byte ph %0d %02x", sb_phase, sb_phase[0] ? sb_tdata : sb_idata);
+        if (|sd_rd) $display("SCR sd_rd %b lba %0d cnt %0d", sd_rd, sd_lba[0], sd_blk_cnt[0] + 1);
+        if (|sd_wr) $display("SCR sd_wr %b lba %0d cnt %0d", sd_wr, sd_lba[0], sd_blk_cnt[0] + 1);
     end
 `endif
 

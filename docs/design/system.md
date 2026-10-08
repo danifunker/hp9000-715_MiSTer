@@ -194,7 +194,7 @@ for PS/2, R06b).
 | +0x1000, +0x2000, +0x3000 | parallel DMA, parallel port, DMA reset | stub: registers store, no DMA (P-010) | R06b 3 |
 | +0x4000 | Harmony audio | stub P-003 (`06a` sec. 9) | R06a |
 | +0x5000 | RS-232 16550A (+0x800) | `lasi_uart.sv`: true 16550A, 16-byte FIFOs, IIR priorities, TEMT, scratch, loopback; 7.3728 MHz reference (P-009) | R06b 2; HW 4.3 |
-| +0x6000 | 53C710 SCSI | stub until step 6: unit reset, register file that reads back what the ROM's IODC self-checks need, no SCRIPTS | R06d; HW 4.5 |
+| +0x6000 | 53C710 SCSI | `rtl/scsi/ncr53c710.sv` (registers, SCRIPTS, DMA on the MIOC's `dma_*` port; S-021) and `rtl/scsi/scsi_targets.sv` (disks at IDs 6 and 5, CD-ROM at 2, on hps_io block devices; S-020); IRQ = IPR bit 9. The ROM boots ISL from it | R06d; HW 4.5 |
 | +0x7000 | 82596 LAN | stub P-005 (writes ignored; the ROM never reads it) | HW 4.6 |
 | +0x8000 | PS/2 keyboard (+0x000) and mouse (+0x100), mirrored every 0x200 | `lasi_ps2.sv`: ID, RESET, 4-deep RX FIFO, 1-deep TX, CONTROL (ENBL, LPBXR, DIAG), STATUS (RBNE, TBNE, CMPINTR), loopback; device side to a keyboard/mouse model | Lasi ERS 9; HW 4.7; R06b 1 |
 | +0x9000 | RTC | 32-bit seconds counter, 1 Hz from the board clock, write clears the prescaler; set from the MiSTer RTC at power-up *(later)* | Lasi ERS 8 |
@@ -285,8 +285,14 @@ loads the same file through the same loader (`verilator/sim.v`).
   console, the LEDs and the CPU taps.
 * `verilator/romsim/`: the same `emu` with a headless driver (no SDL):
   loads the ROM and an EEPROM image, logs the serial console and every
-  chassis code, can type into the serial port, and stops on a string.
-  Whole-model checkpoints (`--save-at`, `--restore`; valid only for the
+  chassis code, can type into the serial port (`--type`, then any number
+  of `--then AFTER TEXT`), and stops on a string (`--until`, looked for
+  after the last typed text). SCSI images on the hps_io-style block
+  devices (`--disk0` ID 6, `--disk1` ID 5, `--cd` ID 2; `--snapshot` keeps
+  writes in memory; `disks/README.md` has the HP-UX 10.20 image), and a
+  SCSI trace (`--scsitrace`: SCRIPTS instructions, selections, interrupts,
+  bus bytes).
+  Whole-model checkpoints (`--save-at CYCLE`, `--save-on STR`, `--restore`; valid only for the
   build that made them), trace switches through an input port so they work
   after a restore (`--gsctrace`, `--l1trace`, `--flags-from`), and a
   simulator-only CR16 speed-up (`--turbo N`, default after 30M cycles: the

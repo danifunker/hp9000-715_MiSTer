@@ -4,21 +4,25 @@
 // byte whenever it changes (the chassis code's LED part), and stops on a
 // string, a halt, or a cycle limit. tests/run-rom.sh uses it.
 //
-//   obj_dir_rom/Vemu [--rom FILE] [+eeprom=HEX] [--max-cycles N] [--until STR]
-//                    [--type STR] [--type-after STR] [--serial-log FILE]
+//   obj_dir_rom/Vemu [--rom FILE] [+eeprom=HEX] [--max-cycles N] [--until STR (after --type's text, if any)]
+//                    [--type STR] [--type-after STR (default BOOT_ADMIN>; "" = at once)]
+//                    [--then AFTER STR ...] (more typing, each after AFTER appears) [--serial-log FILE]
 //                    [--model 0|1|2] [--ram-lg N] [--leds] [--buserr]
-//                    [--trace N] [--trace-from CYCLE] [--traps] [--stamp] [--sample N] [--gsctrace]
+//                    [--trace N] [--trace-from CYCLE] [--traps] [--stamp] [--sample N] [--gsctrace] [--scsitrace]
 //                    [--turbo N [--turbo-after CYCLE]]  (CR16 N x faster after CYCLE, default 30M:
 //                    shortens the ROM's delays; selftest1's timer test needs the real rate)
-//                    [--disk0 IMG] [--disk1 IMG] [--cd ISO]   (SCSI IDs 6, 5, 2; disks are written)
-//                    [--save-at CYCLE FILE] [--restore FILE]   (whole-model checkpoints;
-//                    a restored run keeps the cycle count, and needs the same build)
+//                    [--disk0 IMG] [--disk1 IMG] [--cd ISO]   (SCSI IDs 6, 5, 2; disks are written
+//                    unless --snapshot: then writes stay in memory, like QEMU's -snapshot)
+//                    [--save-at CYCLE FILE] [--save-on STR FILE] [--restore FILE]   (whole-model
+//                    checkpoints, at a cycle or when the console first prints STR; a restored
+//                    run keeps the cycle count, and needs the same build)
 #include "Vemu.h"
 #include "verilated.h"
 #include "verilated_save.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -32,8 +36,27 @@ static uint64_t cyc = 0;
 struct BlkDev {
 	FILE* f = nullptr;
 	uint64_t size = 0;
+	std::map<uint64_t, std::vector<uint8_t>> overlay;   // --snapshot: sectors written
 };
 static BlkDev blk[3];
+static bool snapshot = false;
+
+static void blk_read(BlkDev& d, uint64_t lba, uint8_t* p, size_t n) {
+	if (d.f) { fseeko(d.f, (off_t)lba * 512, SEEK_SET); size_t got = fread(p, 1, n, d.f); (void)got; }
+	for (size_t k = 0; k < n / 512; k++) {
+		auto it = d.overlay.find(lba + k);
+		if (it != d.overlay.end()) memcpy(p + 512 * k, it->second.data(), 512);
+	}
+}
+
+static void blk_write(BlkDev& d, uint64_t lba, const uint8_t* p, size_t n) {
+	if (!d.f) return;
+	if (snapshot) {
+		for (size_t k = 0; k < n / 512; k++) d.overlay[lba + k].assign(p + 512 * k, p + 512 * (k + 1));
+	} else {
+		fseeko(d.f, (off_t)lba * 512, SEEK_SET); fwrite(p, 1, n, d.f); fflush(d.f);
+	}
+}
 static struct {
 	int st = 0;           // 0 idle, 1 reading, 2 writing
 	int n = 0;            // slot
@@ -54,8 +77,7 @@ static void sd_step() {
 				sd.buf.assign(sd.words * 2, 0);
 				top->sd_ack = 1 << n;
 				if ((top->sd_rd >> n) & 1) {
-					if (blk[n].f) { fseeko(blk[n].f, (off_t)sd.lba * 512, SEEK_SET);
-					                size_t got = fread(sd.buf.data(), 1, sd.buf.size(), blk[n].f); (void)got; }
+					blk_read(blk[n], sd.lba, sd.buf.data(), sd.buf.size());
 					sd.st = 1;
 				} else sd.st = 2;
 				break;
@@ -76,8 +98,7 @@ static void sd_step() {
 			uint16_t v = top->sd_buff_din[sd.n];
 			sd.buf[2 * sd.w] = v & 0xFF; sd.buf[2 * sd.w + 1] = v >> 8;
 			if (++sd.w == sd.words) {
-				if (blk[sd.n].f) { fseeko(blk[sd.n].f, (off_t)sd.lba * 512, SEEK_SET);
-				                   fwrite(sd.buf.data(), 1, sd.buf.size(), blk[sd.n].f); fflush(blk[sd.n].f); }
+				blk_write(blk[sd.n], sd.lba, sd.buf.data(), sd.buf.size());
 				top->sd_ack = 0; sd.st = 0;
 			}
 		}
@@ -97,12 +118,19 @@ int main(int argc, char** argv) {
 	const char* logpath = nullptr;
 	unsigned long long max_cycles = 2000000000ULL, trace = 0, trace_from = 0;
 	std::string until, type_str, type_after = "BOOT_ADMIN>";
+	// what to type into the serial port: --type TEXT (after --type-after,
+	// default the first BOOT_ADMIN>), then each --then AFTER TEXT in order;
+	// each AFTER is looked for in the output since the previous text went in
+	struct Step { std::string after, text; };
+	std::vector<Step> steps;
 	int model = 0, ram_lg = 0;
 	bool show_leds = false, show_buserr = false, show_traps = false, stamp = false;
 	unsigned long long sample = 0; uint64_t save_at = 0;
 	unsigned trace_flags = 0, turbo = 0;
 	uint64_t turbo_after = 30000000, flags_from = 0;
 	const char* save_file = nullptr;
+	std::string save_on;
+	const char* blk_path[3] = {nullptr, nullptr, nullptr};
 	const char* restore_file = nullptr;
 	for (int i = 1; i < argc; i++) {
 		std::string a = argv[i];
@@ -112,6 +140,7 @@ int main(int argc, char** argv) {
 		else if (a == "--until") until = next();
 		else if (a == "--type") type_str = next();
 		else if (a == "--type-after") type_after = next();
+		else if (a == "--then") { std::string w = next(); steps.push_back({w, next()}); }
 		else if (a == "--serial-log") logpath = next();
 		else if (a == "--model") model = atoi(next());
 		else if (a == "--ram-lg") ram_lg = atoi(next());
@@ -122,29 +151,39 @@ int main(int argc, char** argv) {
 		else if (a == "--gsctrace") trace_flags |= 1;
 		else if (a == "--disk0" || a == "--disk1" || a == "--cd") {
 			int n = a == "--disk0" ? 0 : a == "--disk1" ? 1 : 2;
-			const char* path = next();
-			blk[n].f = fopen(path, n == 2 ? "rb" : "r+b");
-			if (!blk[n].f) { fprintf(stderr, "cannot open %s\n", path); return 2; }
-			fseeko(blk[n].f, 0, SEEK_END); blk[n].size = ftello(blk[n].f);
+			blk_path[n] = next();
 		}
 		else if (a == "--l1trace") trace_flags |= 2;
+		else if (a == "--scsitrace") trace_flags |= 4;
 		else if (a == "--flags-from") flags_from = strtoull(next(), 0, 0);
 		else if (a == "--turbo") turbo = atoi(next());
 		else if (a == "--turbo-after") turbo_after = strtoull(next(), 0, 0);
 		else if (a == "--save-at") { save_at = strtoull(next(), 0, 0); save_file = next(); }
+		else if (a == "--save-on") { save_on = next(); save_file = next(); }
+		else if (a == "--snapshot") snapshot = true;
 		else if (a == "--restore") restore_file = next();
 		else if (a == "--sample") sample = strtoull(next(), 0, 0);
 		else if (a == "--trace") trace = strtoull(next(), 0, 0);
 		else if (a == "--trace-from") trace_from = strtoull(next(), 0, 0);
 		else if (a[0] != '+') { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
 	}
+	for (int n = 0; n < 3; n++) {
+		if (!blk_path[n]) continue;
+		blk[n].f = fopen(blk_path[n], n == 2 || snapshot ? "rb" : "r+b");
+		if (!blk[n].f) { fprintf(stderr, "cannot open %s\n", blk_path[n]); return 2; }
+		fseeko(blk[n].f, 0, SEEK_END); blk[n].size = ftello(blk[n].f);
+	}
 	// escape sequences in --type: \r \n
-	std::string typed;
-	for (size_t k = 0; k < type_str.size(); k++) {
-		if (type_str[k] == '\\' && k + 1 < type_str.size()) {
-			char c = type_str[++k];
-			typed.push_back(c == 'r' ? '\r' : c == 'n' ? '\n' : c == 'e' ? 27 : c);
-		} else typed.push_back(type_str[k]);
+	if (!type_str.empty()) steps.insert(steps.begin(), Step{type_after, type_str});
+	for (auto& st : steps) {
+		std::string t;
+		for (size_t k = 0; k < st.text.size(); k++) {
+			if (st.text[k] == '\\' && k + 1 < st.text.size()) {
+				char c = st.text[++k];
+				t.push_back(c == 'r' ? '\r' : c == 'n' ? '\n' : c == 'e' ? 27 : c);
+			} else t.push_back(st.text[k]);
+		}
+		st.text = t;
 	}
 
 	FILE* f = fopen(rom, "rb");
@@ -195,42 +234,55 @@ int main(int argc, char** argv) {
 	std::string out;
 	top->sim_trace = flags_from ? 0 : trace_flags;
 	unsigned long long retired = 0, traps = 0, traced = 0, next_type = 0;
-	size_t typed_pos = 0;
-	bool typing = false;
+	size_t typed_pos = 0, step = 0;
+	bool bol = true;   // the console is at the beginning of a line (--stamp)
+	bool typing = !steps.empty() && steps[0].after.empty();   // --type-after "": type at once (after a restore)
+	if (typing) next_type = cyc + 200000;
 	int last_led = -1, rc = 1;
 	const char* why = "cycle limit";
 	while (cyc - start < max_cycles) {
 		top->uart_rx_strobe = 0;
-		if (typing && typed_pos < typed.size() && cyc >= next_type && !top->uart_rx_full) {
+		if (typing && cyc >= next_type && !top->uart_rx_full) {
+			const std::string& typed = steps[step].text;
 			top->uart_rx_strobe = 1; top->uart_rx_byte = typed[typed_pos++];
 			next_type = cyc + 20000;
+			if (typed_pos == typed.size()) {
+				// the next step (and --until) look at what follows
+				out.clear(); typing = false; typed_pos = 0; step++;
+				if (step < steps.size() && steps[step].after.empty()) { typing = true; next_type = cyc + 200000; }
+			}
 		}
 		sd_step();
 		tick();
 		unsigned long long t = cyc - start;
 		top->sim_status = (model & 3) | ((ram_lg & 15) << 2) | (t >= turbo_after ? (turbo & 15) << 6 : 0);
 		if (flags_from && t == flags_from) top->sim_trace = trace_flags;
-		if (save_file && t == save_at) {
+		auto save = [&]() {
 			VerilatedSave os;
 			os.open(save_file);
 			os << start << cyc;
 			os << *top;
 			os.close();
 			fprintf(stderr, "romsim: saved %s at cycle %llu\n", save_file, t);
-		}
+		};
+		if (save_file && save_on.empty() && t == save_at) save();
 		if (top->uart_tx_strobe) {
 			char c = (char)top->uart_tx_byte;
 			if (c != '\r') {
-				if (stamp && (out.empty() || out.back() == '\n')) printf("[%12llu] ", t);
+				if (stamp && bol) printf("[%12llu] ", t);
+				bol = c == '\n';
 				fputc(c, stdout); fflush(stdout);
 				if (log) { fputc(c, log); fflush(log); }
 				out.push_back(c);
 				if (out.size() > 4096) out.erase(0, out.size() - 2048);
 			}
-			if (!typing && !typed.empty() && out.find(type_after) != std::string::npos) {
+			if (!typing && step < steps.size() && out.find(steps[step].after) != std::string::npos) {
 				typing = true; next_type = cyc + 200000;
 			}
-			if (!until.empty() && out.find(until) != std::string::npos) { rc = 0; why = "found"; break; }
+			if (!save_on.empty() && out.find(save_on) != std::string::npos) { save(); save_on.clear(); save_file = nullptr; }
+			if (!until.empty() && step == steps.size() && out.find(until) != std::string::npos) {
+				rc = 0; why = "found"; break;
+			}
 		}
 		if (top->led_strobe && show_leds) {
 			int led = (~top->leds) & 0xFF;

@@ -193,11 +193,17 @@ cosim: $(COSIM_EXE) obj_dir_ct/$(SUITE).hex
 # ---------------------------------------------------------------------------
 # The whole machine on HP's boot ROM, headless (verilator/romsim):
 # `make romsim` builds obj_dir_rom/Vemu; tests/run-rom.sh runs it.
-ROMSIM_EXE = obj_dir_rom/Vemu
+# ROMSIM_DIR: build a second copy elsewhere without disturbing a running
+# simulation (checkpoints only restore into the build that made them);
+# ROMSIM_OPT: the C++ optimisation (-Os measured 8 % faster than -O2)
+ROMSIM_DIR ?= obj_dir_rom
+ROMSIM_OPT ?= -Os
+ROMSIM_EXE = $(ROMSIM_DIR)/Vemu
 $(ROMSIM_EXE): $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v romsim/tb_rom.cpp
 	$(V) --cc --exe --build -j 0 -O3 -Wno-fatal -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL \
 		-Wno-UNUSEDPARAM -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-TIMESCALEMOD --x-assign fast --x-initial fast \
-		+define+SIMULATION=1 --savable --Mdir obj_dir_rom --top-module emu -o Vemu $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v \
+		+define+SIMULATION=1 --savable --Mdir $(ROMSIM_DIR) --top-module emu -o Vemu \
+		-MAKEFLAGS "OPT_FAST='$(ROMSIM_OPT)'" $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v \
 		$(abspath romsim/tb_rom.cpp)
 
 romsim: $(ROMSIM_EXE)
