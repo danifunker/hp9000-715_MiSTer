@@ -18,7 +18,11 @@
 //                    [--save-at CYCLE FILE] [--save-on STR FILE] [--restore FILE]   (whole-model
 //                    checkpoints, at a cycle or when the console first prints STR; a restored
 //                    run keeps the cycle count, and needs the same build)
+//                    [--wtrace A B]   (every cycle from A to B: the core's W and M stages and the
+//                    TLB's state, with a dump of all TLB entries at A and at B; reads the model's
+//                    internal signals, so it follows pa_core / pa_tlb renames)
 #include "Vemu.h"
+#include "Vemu___024root.h"
 #include "verilated.h"
 #include "verilated_save.h"
 #include <cstdio>
@@ -29,6 +33,33 @@
 #include <vector>
 
 static Vemu* top;
+
+// --wtrace: the pipeline's W/M stages and the TLB, from the model's internals
+#define CORE_(x) top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__u_core__DOT__##x
+#define TLB_(x)  top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__u_tlb__DOT__##x
+static void dump_tlb(unsigned long long t) {
+	fprintf(stderr, "[%12llu] TLB valid %016llx lockout %016llx lockin %016llx used %016llx\n", t,
+	        (unsigned long long)TLB_(valid), (unsigned long long)TLB_(lockout), (unsigned long long)TLB_(lockin),
+	        (unsigned long long)TLB_(used));
+	for (int i = 0; i < 64; i++) {
+		unsigned long long tg = TLB_(tag)[i], py = TLB_(pay)[i];
+		fprintf(stderr, "  e%02d %c%c sp %04llx vpn %05llx rpn %05llx ar %02llx aid %04llx tdbu %llx\n", i,
+		        ((TLB_(valid) >> i) & 1) ? 'V' : '-', ((TLB_(lockout) >> i) & 1) ? 'L' : '-', tg >> 20, tg & 0xFFFFF,
+		        py >> 26, (py >> 19) & 0x7F, (py >> 4) & 0x7FFF, py & 0xF);
+	}
+	for (int i = 0; i < 8; i++)
+		fprintf(stderr, "  b%d %c%c sp %04x vpn %04x mask %02x trans %04x\n", i, ((TLB_(b_valid) >> i) & 1) ? 'V' : '-',
+		        ((TLB_(b_lockout) >> i) & 1) ? 'L' : '-', TLB_(b_space)[i], TLB_(b_vpn)[i], TLB_(b_mask)[i], TLB_(b_trans)[i]);
+}
+static void wtrace_line(unsigned long long t) {
+	fprintf(stderr, "%12llu W v%d st%d nul%d %08x ea %08x sp %04x rpn %05x trap %2d walk%d wkn%d hit%d cch%d pdir %08x"
+	        " | M v%d %08x ea %08x | TLB st%d tag %09llx pg%d b%d lkhit%d lkrpn %05x\n", t,
+	        CORE_(w_valid), CORE_(wst), CORE_(w_nul), CORE_(w_iaoq_f), CORE_(w_ea), CORE_(w_space), CORE_(w_rpn),
+	        CORE_(w_trap), CORE_(w_walk), CORE_(w_walkable_now), CORE_(w_hit), CORE_(w_cached), CORE_(w_pdir_a),
+	        CORE_(m_valid), CORE_(m_iaoq_f), CORE_(m_ea), TLB_(st),
+	        (unsigned long long)top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__tlb_lk_tag_r, TLB_(pg_hit), TLB_(b_hit),
+	        top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__tlb_lk_hit, top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__tlb_lk_rpn);
+}
 static uint64_t cyc = 0;
 
 // hps_io's block devices, for the SCSI images: the core raises sd_rd/sd_wr
@@ -132,6 +163,7 @@ int main(int argc, char** argv) {
 	int model = 0, ram_lg = 0;
 	bool show_leds = false, show_buserr = false, show_traps = false, stamp = false;
 	unsigned long long sample = 0; uint64_t save_at = 0;
+	unsigned long long wtrace_a = 0, wtrace_b = 0;
 	unsigned trace_flags = 0, turbo = 0;
 	uint64_t turbo_after = 30000000, turbo_until = ~0ull, flags_from = 0;
 	const char* save_file = nullptr;
@@ -173,6 +205,7 @@ int main(int argc, char** argv) {
 		else if (a == "--sdtrace") sdtrace = true;
 		else if (a == "--restore") restore_file = next();
 		else if (a == "--sample") sample = strtoull(next(), 0, 0);
+		else if (a == "--wtrace") { wtrace_a = strtoull(next(), 0, 0); wtrace_b = strtoull(next(), 0, 0); }
 		else if (a == "--trace") trace = strtoull(next(), 0, 0);
 		else if (a == "--trace-from") trace_from = strtoull(next(), 0, 0);
 		else if (a[0] != '+') { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
@@ -266,6 +299,11 @@ int main(int argc, char** argv) {
 		sd_step();
 		tick();
 		unsigned long long t = cyc - start;
+		if (wtrace_b && t >= wtrace_a && t <= wtrace_b) {
+			if (t == wtrace_a) dump_tlb(t);
+			wtrace_line(t);
+			if (t == wtrace_b) dump_tlb(t);
+		}
 		top->sim_status = (model & 3) | ((ram_lg & 15) << 2) | (t >= turbo_after && t < turbo_until ? (turbo & 15) << 6 : 0);
 		if (flags_from && t == flags_from) top->sim_trace = trace_flags;
 		auto save = [&]() {
