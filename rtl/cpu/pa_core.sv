@@ -876,7 +876,11 @@ module pa_core
     wire w_replay = w_valid && wst == W_REPLAY;
 
     // ---- GR write ports
-    wire [31:0] w_wd0_val = (wst == W_DONE || (w_is_cmem && w_is_load)) ? w_ld[31:0] :
+    // A load takes w_ld whether cached or not (cpu-timing.md 4.6): an uncached
+    // load in W_RUN is held until its data lands in w_ld (W_DONE), and nothing
+    // consumes wd0 while it is held, so the TLB's cached/uncached decision
+    // (w_cached) stays out of the write-data select and the E forward.
+    wire [31:0] w_wd0_val = (wst == W_DONE || w_is_load) ? w_ld[31:0] :
                             (w_c.fu == FU_SYS && (w_c.sysop == SYS_SSM || w_c.sysop == SYS_RSM)) ? {25'd0, psw[6:0]} :
                             w_result;
     always_comb begin

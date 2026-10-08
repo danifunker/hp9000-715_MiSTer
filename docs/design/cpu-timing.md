@@ -27,6 +27,7 @@ same device); the paths are what to judge by.
 | 9 | 2026-10-07 | fit 8's RTL, fitter seed 2 | `top_pipe` | **65.1 MHz** | +0.25 ns | 11,373 | 14,764 | 291 | 0 | **64 MHz met**; section 4.4 |
 | 10 | 2026-10-07 | 1365246 + the FPU (`pa_fpunit` + `pa_fpu`, seed 2) | `top_pipe` | **55.8 MHz** | -2.28 ns | 17,545 | 21,254 | 293 | 4 | 64 MHz **missed**: +6.2k ALMs, the TLB path spread out; section 4.5 |
 | 11 | 2026-10-07 | + fpedge fixes, FR file as MLAB copies, registered operand read (`S_RD`) | `top_pipe` | **57.3 MHz** | -1.82 ns | 14,276 | 17,131 | 291 | 4 | FPU 3.2k ALMs; the TLB -> `wd0` -> ALU chain is back as the worst; section 4.6 |
+| 12 | 2026-10-07 | + the `w_wd0_val` cut (loads take `w_ld` regardless of cached), FCNVXF through the normalise shifter, one shared right shifter | `top_pipe` | **59.0 MHz** | -1.33 ns | 14,041 | 16,734 | 291 | 4 | the `wd0` chain is gone; next: TLB -> PID check -> PROBE result -> W forward -> shift amount; section 4.7 |
 
 ## 1. Baseline: the sequential core (fit 1)
 
@@ -422,10 +423,31 @@ fit-9 note said to cut for real margin:
   `S_NORM`'s shifter, one right shifter shared by the alignment and FCNVFX;
   FCNVXF 4 -> 5 cycles) and the `dbg_fp_stall` output.
 
+### 4.7 Fit 12: the write-data select cut
+
+**59.0 MHz, -1.33 ns; 14,041 ALMs / 16,734 registers.** All suites and the
+co-simulation pass. The `wd0` chain is gone from the report; the 40 worst
+paths are now the fit-5 chain, 16.2 ns: `lk_tag` -> CAM `match` -> `sel` ->
+payload AND-OR -> `lk_aid` -> the PID compare (`Equal85`) -> `pid_rd_ok` ->
+PROBE's result (`m_result2`, retimed forward through `w_result`) ->
+`sar_in` (an MTSAR in W forwarded into the shift amount) -> the shifter's
+first mux (`Mux97`). Two stages again in series because the retimer moved
+`w_result` forward: `w_result` is loaded from `m_result2`, which carries
+the M-stage late results (PROBE from the PID check, LPA from the RPN,
+LDSID), so the TLB logic sits in its input cone.
+
+Fit 12b (`cpu_fmax_pipe_nort`: the same RTL, retiming off, seed 2) gives
+the per-stage slacks before the next cut; the candidate is to take the TLB
+out of `w_result`'s cone: PROBE and LPA become W_DONE late results (one W
+hold cycle; their result is computed from registered copies into `w_ld`,
+which `wd0` already selects for late results), leaving `w_result <=
+m_result`, a plain register-to-register copy.
+
 ## 5. Open items
 
-- **Fit 12**: the `w_wd0_val` cut; 64 MHz with the FPU is the gate. If the
-  chain stays, seeds 1 and 3, then the registered-translation idea of 4.2.
+- **Fit 13**: the PROBE/LPA late-result cut once fit 12b says where the
+  stage budgets stand; 64 MHz with the FPU is the gate. Then seeds 1 and 3
+  for margin.
 
 - Prediction in F2 instead of D (see 2.1) once the real F2 (tag compare +
   select) exists and its slack is known.

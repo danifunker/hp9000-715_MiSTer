@@ -118,11 +118,18 @@ module pa_fpu
         lzc58 = 6'd58;
         for (int i = 0; i < 58; i++) if (v[i]) lzc58 = 6'(57 - i);
     endfunction
-    function automatic logic [6:0] lzc64(input logic [63:0] v);
-        lzc64 = 7'd64;
-        for (int i = 0; i < 64; i++) if (v[i]) lzc64 = 7'(63 - i);
-    endfunction
     wire en_v = enables[4], en_z = enables[3], en_o = enables[2], en_i = enables[0];
+
+    // the one right shifter with a sticky bit, shared by the add/subtract
+    // alignment (S_ADD_ALIGN) and the float-to-integer conversion (S_CVT):
+    // the state selects its operand and amount
+    logic [57:0] sh_in, sh_out;
+    logic [5:0]  sh_amt;
+    logic        sh_lost;
+    always_comb begin
+        sh_out = sh_in >> sh_amt;
+        sh_lost = (sh_amt != 0) && ((sh_in & ((58'd1 << sh_amt) - 58'd1)) != 0);
+    end
 
     // ---------------------------------------------------------------- classify (combinational on registered operands)
     num_t ua, ub;
@@ -269,6 +276,21 @@ module pa_fpu
         else            pk = {rs, 11'(e_final + 14'sd1023), mant[51:0]};
     end
 
+    // the alignment's operand order and the shared shifter's inputs
+    wire a_is_big = na.e > nb.e || (na.e == nb.e && na.sig >= nb.sig);
+    always_comb begin
+        logic signed [13:0] d;
+        if (st == S_ADD_ALIGN) begin
+            d = a_is_big ? (na.e - nb.e) : (nb.e - na.e);
+            sh_in = a_is_big ? {2'b00, nb.sig, 3'd0} : {2'b00, na.sig, 3'd0};
+            sh_amt = (d > 14'sd57) ? 6'd57 : 6'(d);
+        end else begin                                     // S_CVT, FCNVFX(T): the units bit is bit 52 of sig,
+            d = 14'sd52 - na.e;                            // shift right by 52 - e with two guard bits
+            sh_in = {3'd0, na.sig, 2'b00};
+            sh_amt = (d > 14'sd55) ? 6'd55 : 6'(d);
+        end
+    end
+
     // ---------------------------------------------------------------- engine
     always_ff @(posedge clk) begin
         if (!rst_n) begin
@@ -307,25 +329,13 @@ module pa_fpu
 
                 // ---- add / subtract: align the smaller operand, add or subtract magnitudes
                 S_ADD_ALIGN: begin
-                    logic signed [13:0] d;
-                    logic [57:0] big, sml, shifted;
-                    logic big_s;
-                    logic signed [13:0] big_e;
-                    logic [6:0] sh;
-                    logic sticky;
-                    // operands as {sig, 3'b0} in 56 bits, two guard bits of headroom at the top
-                    if (na.e > nb.e || (na.e == nb.e && na.sig >= nb.sig)) begin
-                        big = {2'b00, na.sig, 3'd0}; sml = {2'b00, nb.sig, 3'd0}; big_s = na.s; big_e = na.e; d = na.e - nb.e;
-                        eff_sub <= na.s != nb.s;
-                    end else begin
-                        big = {2'b00, nb.sig, 3'd0}; sml = {2'b00, na.sig, 3'd0}; big_s = nb.s; big_e = nb.e; d = nb.e - na.e;
-                        eff_sub <= na.s != nb.s;
-                    end
-                    sh = (d > 14'sd57) ? 7'd57 : 7'(d);
-                    shifted = sml >> sh;
-                    sticky = (sh != 0) && ((sml & ((58'd1 << sh) - 58'd1)) != 0);
-                    rs <= big_s; re <= big_e + 14'sd2;              // the leading one sits at bit 55
-                    rsig <= big; add_small <= shifted; rsticky <= sticky;
+                    // operands as {sig, 3'b0} in 56 bits, two guard bits of headroom at the top;
+                    // the smaller one goes through the shared shifter (sh_in / sh_amt below)
+                    eff_sub <= na.s != nb.s;
+                    rs <= a_is_big ? na.s : nb.s;
+                    re <= (a_is_big ? na.e : nb.e) + 14'sd2;        // the leading one sits at bit 55
+                    rsig <= a_is_big ? {2'b00, na.sig, 3'd0} : {2'b00, nb.sig, 3'd0};
+                    add_small <= sh_out; rsticky <= sh_lost;
                     st <= S_ADD_SUM;
                 end
                 S_ADD_SUM: begin
@@ -385,16 +395,14 @@ module pa_fpu
                     F_CNVFF: begin                                 // normal in, exact or rounded
                         rs <= na.s; re <= na.e; rsig <= {na.sig, 5'd0}; st <= S_ROUND;
                     end
-                    F_CNVXF: begin
+                    F_CNVXF: begin                                 // normalised by S_NORM's shifter
                         logic [63:0] v, mag;
-                        logic [6:0] lz;
                         v = sgl ? {{32{a[63]}}, a[63:32]} : a;
                         mag = v[63] ? -v : v;
-                        lz = lzc64(mag);
                         rs <= v[63];
-                        re <= 14'sd63 - 14'(signed'({7'd0, lz}));
-                        rsig <= 58'((mag << lz) >> 6); rsticky <= |(6'((mag << lz)));
-                        st <= S_ROUND;
+                        if (|mag[63:58]) begin rsig <= mag[63:6]; rsticky <= |mag[5:0]; re <= 14'sd63; end
+                        else             begin rsig <= mag[57:0];  rsticky <= 1'b0;       re <= 14'sd57; end
+                        st <= S_NORM;
                     end
                     default: begin                                 // F_CNVFX / F_CNVFXT: to a 32- or 64-bit integer
                         logic [63:0] ival;
@@ -407,14 +415,8 @@ module pa_fpu
                                 ival = {11'd0, na.sig} << 6'(e - 14'sd52);
                                 gi = 0; ri = 0; si = 0;
                             end else begin
-                                // the units bit is bit 52 of sig: shift right by 52 - e with two guard bits
-                                logic [6:0] sh;
-                                logic [54:0] ext, shifted, lost;
-                                sh = (14'sd52 - e > 14'sd55) ? 7'd55 : 7'(14'sd52 - e);
-                                ext = {na.sig, 2'b00};
-                                shifted = ext >> sh;
-                                lost = ext & ((55'd1 << sh) - 55'd1);
-                                ival = {11'd0, shifted[54:2]}; gi = shifted[1]; ri = shifted[0]; si = |lost;
+                                // {sig, 2'b00} >> (52 - e) through the shared shifter (sh_in / sh_amt)
+                                ival = {11'd0, sh_out[54:2]}; gi = sh_out[1]; ri = sh_out[0]; si = sh_lost;
                             end
                             if (op == F_CNVFXT) up = 1'b0;
                             else case (rm)
