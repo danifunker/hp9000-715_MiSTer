@@ -53,6 +53,7 @@ module pa_fetch (
     // redirect (priority: W kill-all > branch)
     input  logic        redir,          // a branch redirect (from D or E)
     input  logic        redir_kill_all, // W: interruption / RFI / flush
+    input  logic        ilab_inval,     // W: the I-LAB refresh events (ERS s.6.4; a subset of kill-all)
     input  logic [31:0] redir_target,
     input  logic [31:0] redir_back,     // kill-all: the IAOQ back of the first new instruction
     input  logic [15:0] redir_space, redir_back_space,
@@ -252,7 +253,7 @@ module pa_fetch (
                     ilab_xok <= it_xok; ilab_type <= it_type;
                 end else f1_tmiss <= 1'b1;
             end
-            if (redir_kill_all) ilab_valid <= 1'b0;
+            if (ilab_inval) ilab_valid <= 1'b0;
 
             // I-cache line fill: non-speculative, only for a missing, unkilled F1
             if (ic_fill_req) begin

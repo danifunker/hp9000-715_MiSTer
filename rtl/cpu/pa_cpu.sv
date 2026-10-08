@@ -97,7 +97,7 @@ module pa_cpu
     logic        f2_valid, f2_err, adv_f2, drained, uib_inval;
     logic [31:0] f2_insn, f2_iaoq_f, f2_iaoq_b;
     logic [15:0] f2_iasq_f, f2_iasq_b;
-    logic        redir, redir_kill_all, redir_new_space;
+    logic        redir, redir_kill_all, ilab_inval, redir_new_space;
     logic [31:0] redir_target, redir_back, redir_slot_e, redir_slot_d;
     logic        redir_from_e;
     logic [15:0] redir_space, redir_back_space;
@@ -115,7 +115,7 @@ module pa_cpu
         .psw_c(psw_c), .ihash(ihash),
         .it_req(it_req), .it_space(it_space), .it_vpn(it_vpn), .it_ack(it_ack), .it_hit(it_hit), .it_rpn(it_rpn),
         .it_xok(it_xok), .it_type(it_type),
-        .redir(redir), .redir_kill_all(redir_kill_all), .redir_target(redir_target), .redir_back(redir_back),
+        .redir(redir), .redir_kill_all(redir_kill_all), .ilab_inval(ilab_inval), .redir_target(redir_target), .redir_back(redir_back),
         .redir_space(redir_space), .redir_back_space(redir_back_space), .redir_new_space(redir_new_space),
         .redir_slot_e(redir_slot_e), .redir_slot_d(redir_slot_d), .redir_from_e(redir_from_e),
         .f2_valid(f2_valid), .f2_insn(f2_insn), .f2_iaoq_f(f2_iaoq_f), .f2_iaoq_b(f2_iaoq_b),
@@ -193,7 +193,7 @@ module pa_cpu
         .ic_dr27(ic_dr27), .ic_dr28(ic_dr28), .ic_dr29(ic_dr29),
         .ic_op_done(ic_op_done), .ic_op_hit(ic_op_hit), .ic_op_perr(ic_op_perr), .ic_op_rdata(ic_op_rdata),
         .ic_rd_dr27(ic_rd_dr27), .ic_rd_dr28(ic_rd_dr28), .ic_rd_dr29(ic_rd_dr29), .ic_l1_en(ic_l1_en),
-        .redir(redir), .redir_kill_all(redir_kill_all), .redir_target(redir_target), .redir_back(redir_back),
+        .redir(redir), .redir_kill_all(redir_kill_all), .ilab_inval(ilab_inval), .redir_target(redir_target), .redir_back(redir_back),
         .redir_space(redir_space), .redir_back_space(redir_back_space), .redir_new_space(redir_new_space),
         .redir_slot_e(redir_slot_e), .redir_slot_d(redir_slot_d), .redir_from_e(redir_from_e),
         .d_req(d_req), .d_we(d_we), .d_addr(d_addr), .d_be(d_be), .d_wdata(d_wdata), .d_rclr(d_rclr),

@@ -49,6 +49,7 @@ module pa_core
     output logic        uib_inval,
     output logic        redir,
     output logic        redir_kill_all,
+    output logic        ilab_inval,                   // the I-LAB is refreshed (ERS s.6.4)
     output logic [31:0] redir_target, redir_back,
     output logic [15:0] redir_space, redir_back_space,
     output logic        redir_new_space,
@@ -647,7 +648,10 @@ module pa_core
         else if (tlb_op_accept) lk_is_it <= 1'b0;
         else if (tlb_lk_load) lk_is_it <= !e_need;
     end
-    assign tlb_lk_use   = m_need && adv;
+    // every translation hit sets the entry's used bit (cpu.md 2.2), the
+    // I-LAB's refills too: otherwise the code page's entry stays "not
+    // recently used" while the LAB serves it and is the first replaced
+    assign tlb_lk_use   = (m_need && adv) || it_ack;
     assign it_ack = it_req && lk_is_it && !m_need && !tlb_op_cam &&
                     {it_space, it_vpn} == tlb_lk_tag_r;
     assign it_hit = tlb_lk_hit;
@@ -946,6 +950,22 @@ module pa_core
     wire w_refetch = wst == W_DONE && w_is_load && e_valid && e_bp_ld;
     assign w_redir = w_trap_take || (w_commit && !w_nul && (w_flush || w_refetch)) || w_replay;
     assign redir_kill_all = w_redir;
+    // The I-LAB is refreshed only where the PCX-L refreshes its LAB (ERS s.6.4,
+    // cpu.md 2.2): an interruption (the handler runs untranslated; the RFI
+    // refills it), RFI, SSM/RSM/MTSM (the P bit), MTCTL to a PID, the ITLB
+    // inserts and purges, DIAG (DR8). Not on the other redirects: a D-side
+    // insert (IDTLBx, the walker's) or a cache miss replays the instruction
+    // with the LAB kept. Dropping it there livelocked a full TLB -- the
+    // walker's data-page insert evicted the code page, the refetch's insert
+    // evicted the data page, and so on (HP-UX 10.20 pa_dma_init, cpu-requests #7).
+    wire w_pid_wr = w_c.fu == FU_SYS && w_c.sysop == SYS_MTCTL &&
+                    (w_c.cr == 5'd8 || w_c.cr == 5'd9 || w_c.cr == 5'd12 || w_c.cr == 5'd13);
+    wire w_itlb_op = w_c.fu == FU_MMU && w_c.tlb_i && (w_c.sysop == MM_TLB_INS || w_c.sysop == MM_TLB_PURGE);
+    assign ilab_inval = w_trap_take ||
+                        (w_commit && !w_nul && (w_c.fu == FU_SYS && (w_c.sysop == SYS_RFI || w_c.sysop == SYS_RFIR ||
+                                                    w_c.sysop == SYS_SSM || w_c.sysop == SYS_RSM ||
+                                                    w_c.sysop == SYS_MTSM) ||
+                                                w_pid_wr || w_itlb_op || w_c.fu == FU_DIAG));
     wire [31:0] vec_addr = (w_vec == TRAP_HPMC || w_vec == TRAP_TOC) ? 32'hF000_0000 : {iva[31:10], w_vec[4:0], 5'd0};
     always_comb begin
         redir_back = 32'd0;
