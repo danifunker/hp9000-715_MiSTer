@@ -8,7 +8,7 @@
 //                    [--type STR] [--type-after STR (default BOOT_ADMIN>; "" = at once)]
 //                    [--then AFTER STR ...] (more typing, each after AFTER appears) [--serial-log FILE]
 //                    [--model 0|1|2] [--ram-lg N] [--leds] [--buserr]
-//                    [--trace N] [--trace-from CYCLE] [--traps] [--stamp] [--sample N] [--gsctrace] [--scsitrace] [--miotrace]
+//                    [--trace N] [--trace-from CYCLE] [--traps] [--stamp] [--sample N] [--gsctrace] [--scsitrace] [--miotrace] [--evtrace]
 //                    [--turbo N [--turbo-after CYCLE] [--turbo-until CYCLE]]  (CR16 N x faster from
 //                    --turbo-after, default 30M, until --turbo-until -- an OS needs the real rate:
 //                    shortens the ROM's delays; selftest1's timer test needs the real rate)
@@ -162,6 +162,7 @@ int main(int argc, char** argv) {
 		else if (a == "--l1trace") trace_flags |= 2;
 		else if (a == "--scsitrace") trace_flags |= 4;
 		else if (a == "--miotrace") trace_flags |= 8;
+		else if (a == "--evtrace") trace_flags |= 16;
 		else if (a == "--flags-from") flags_from = strtoull(next(), 0, 0);
 		else if (a == "--turbo") turbo = atoi(next());
 		else if (a == "--turbo-after") turbo_after = strtoull(next(), 0, 0);

@@ -10,6 +10,8 @@
 //   0x3000_0000  boot ROM, 256 KB, as the loader assembled it (big-endian)
 //   0x3100_0000  check store, 32 MB = 8M lines: line L in word L/2, the
 //                even line in bits 63:32
+//   0x3200_0000  the debug event ring (rtl/mister/trace_ddr3.sv): 32-byte
+//                records, written last of all clients
 module ddr3_port (
     input  logic        clk,
     input  logic        rst,
@@ -32,6 +34,11 @@ module ddr3_port (
     input  logic [31:0] chk_wdata,
     output logic        chk_ack,
     output logic [31:0] chk_rdata,
+    // debug records (rtl/mister/trace_ddr3.sv): one 4-beat write each
+    input  logic        tr_req,
+    input  logic [15:0] tr_idx,
+    input  logic [255:0] tr_data,
+    output logic        tr_ack,
     // MiSTer DDRAM bridge
     input  logic        DDRAM_BUSY,
     output logic [7:0]  DDRAM_BURSTCNT,
@@ -45,6 +52,7 @@ module ddr3_port (
 );
     localparam logic [28:0] ROM_BASE = 29'h0600_0000;     // 0x3000_0000 / 8
     localparam logic [28:0] CHK_BASE = 29'h0620_0000;     // 0x3100_0000 / 8
+    localparam logic [28:0] TRC_BASE = 29'h0640_0000;     // 0x3200_0000 / 8
 
     // one loader doubleword waits here while the port is busy
     logic        ld_pend;
@@ -52,14 +60,14 @@ module ddr3_port (
     logic [63:0] ld_d;
     assign ld_busy = ld_pend;
 
-    typedef enum logic [2:0] { S_IDLE, S_CMD, S_RDATA, S_DONE } st_e;
+    typedef enum logic [2:0] { S_IDLE, S_CMD, S_RDATA, S_DONE, S_TWR } st_e;
     st_e st;
     logic [1:0] who;            // 0 loader, 1 check store, 2 ROM
     logic [1:0] beat;
     logic       odd;
 
     always_ff @(posedge clk) begin
-        rom_ack <= 1'b0; rom_rvalid <= 1'b0; chk_ack <= 1'b0;
+        rom_ack <= 1'b0; rom_rvalid <= 1'b0; chk_ack <= 1'b0; tr_ack <= 1'b0;
         if (ld_wr) begin ld_pend <= 1'b1; ld_a <= ld_addr; ld_d <= ld_data; end
         if (rst) begin
             st <= S_IDLE; DDRAM_RD <= 1'b0; DDRAM_WE <= 1'b0; ld_pend <= 1'b0;
@@ -80,6 +88,11 @@ module ddr3_port (
                     who <= 2'd2; st <= S_CMD; beat <= 2'd0;
                     DDRAM_RD <= 1'b1; DDRAM_BURSTCNT <= 8'd4;
                     DDRAM_ADDR <= ROM_BASE + {14'd0, rom_addr, 2'b00};
+                end else if (tr_req && !tr_ack) begin
+                    // a 4-beat burst: address and count with the first beat
+                    st <= S_TWR; beat <= 2'd0;
+                    DDRAM_WE <= 1'b1; DDRAM_BURSTCNT <= 8'd4;
+                    DDRAM_ADDR <= TRC_BASE + {11'd0, tr_idx, 2'b00}; DDRAM_DIN <= tr_data[63:0];
                 end
             end
             // the command stays on the bus until the bridge takes it
@@ -106,6 +119,14 @@ module ddr3_port (
             end
             // the client drops its request the cycle after the acknowledge
             S_DONE: st <= S_IDLE;
+            // the burst's beats, each held until the bridge takes it
+            S_TWR: if (!DDRAM_BUSY) begin
+                logic [1:0] nb;
+                nb = beat + 2'd1;
+                beat <= nb;
+                DDRAM_DIN <= tr_data[64 * nb +: 64];
+                if (beat == 2'd3) begin DDRAM_WE <= 1'b0; tr_ack <= 1'b1; st <= S_DONE; end
+            end
             default: st <= S_IDLE;
         endcase
     end

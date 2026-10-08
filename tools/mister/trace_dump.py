@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Read the core's debug event ring (rtl/mister/trace_ddr3.sv) from DDR3.
+
+Runs on the MiSTer (python3, /dev/mem). The ring is 64K records of 32 bytes
+at physical 0x32000000; each record holds a sequence number, the cycle, and
+one event of rtl/hp715.sv's dbg_ev (types below). DDR3 is not cleared when a
+core loads, so `clear` the ring before the run you want to look at.
+
+    trace_dump.py clear
+    trace_dump.py dump [--last N] [--raw]      oldest first
+    trace_dump.py decode LOG                   the simulator's --evtrace lines, decoded
+
+Output lines match the simulator's --evtrace ("EV seq tT aAA addr data"),
+decoded unless --raw:
+    1 SCSI byte (aux = phase)      2 SCRIPTS instruction (addr = DSP)
+    3 SCSI interrupt                4/5 DMA read/write (aux = byte enables)
+    6/7 CPU line read/write         8/9 CPU uncached read/write (RAM, 53C710)
+    10 selection (aux = ID)
+"""
+import mmap, os, struct, sys
+
+BASE, N, REC = 0x32000000, 1 << 16, 32
+PHASE = ['DATA_OUT', 'DATA_IN', 'CMD', 'STATUS', 'RES4', 'RES5', 'MSG_OUT', 'MSG_IN']
+
+
+def ring(write=False):
+    fd = os.open('/dev/mem', (os.O_RDWR if write else os.O_RDONLY) | os.O_SYNC)
+    prot = mmap.PROT_READ | (mmap.PROT_WRITE if write else 0)
+    return mmap.mmap(fd, N * REC, mmap.MAP_SHARED, prot, offset=BASE)
+
+
+def decode(t, a, addr, d):
+    if t == 1: return 'scsi %-8s %02x' % (PHASE[a & 7], d & 0xFF)
+    if t == 2: return 'scr  %08x: %08x %08x' % (addr, d >> 32, d & 0xFFFFFFFF)
+    if t == 3: return 'irq  dstat %02x sstat0 %02x dsps %08x' % (d >> 56, (d >> 48) & 0xFF, d & 0xFFFFFFFF)
+    if t in (4, 5): return 'dma%s %08x be=%02x %016x' % ('R' if t == 4 else 'W', addr, a, d)
+    if t in (6, 7): return 'line%s %08x' % ('R' if t == 6 else 'W', addr)
+    if t in (8, 9): return 'io%s  %08x be=%02x %016x' % ('R' if t == 8 else 'W', addr, a, d)
+    if t == 10: return 'sel  id %d %s' % (a & 7, 'answered' if d & 1 else 'no target')
+    return 't%d a%02x %08x %016x' % (t, a, addr, d)
+
+
+def main(argv):
+    if not argv or argv[0] not in ('clear', 'dump', 'decode'):
+        print(__doc__); return 2
+    if argv[0] == 'decode':
+        for line in open(argv[1], errors='replace'):
+            f = line.split()
+            if len(f) == 6 and f[0] == 'EV' and f[2][0] == 't':
+                print('EV %s %s' % (f[1], decode(int(f[2][1:]), int(f[3][1:], 16), int(f[4], 16), int(f[5], 16))))
+        return 0
+    if argv[0] == 'clear':
+        m = ring(True)
+        m[:] = b'\xff' * (N * REC)      # seq 0xffffffff = empty
+        print('cleared'); return 0
+    raw = '--raw' in argv
+    last = int(argv[argv.index('--last') + 1]) if '--last' in argv else None
+    m = ring()
+    data = m[:]
+    recs = []
+    for i in range(N):
+        w0, w1, w2 = struct.unpack_from('<QQQ', data, i * REC)
+        seq = w0 & 0xFFFFFFFF
+        if seq == 0xFFFFFFFF:
+            continue
+        recs.append((seq, w0 >> 32, w1 >> 56, (w1 >> 48) & 0xFF, w1 & 0xFFFFFFFF, w2))
+    recs.sort()
+    if last:
+        recs = recs[-last:]
+    prev = None
+    for seq, cyc, t, a, addr, d in recs:
+        if prev is not None and seq != prev + 1:
+            print('-- %d events lost' % (seq - prev - 1))
+        prev = seq
+        if raw: print('EV %d t%d a%02x %08x %016x' % (seq, t, a, addr, d))
+        else:   print('EV %d %s' % (seq, decode(t, a, addr, d)))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

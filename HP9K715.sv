@@ -230,6 +230,11 @@ wire        ee_hwe, ee_dirty, ee_dirty_clr;
 wire [31:0] ee_hwdata, ee_hrdata;
 wire [31:0] gr [32];
 wire        scsi_act;
+wire         dbg_ev_valid;
+wire [111:0] dbg_ev;
+wire         tr_req, tr_ack;
+wire  [15:0] tr_idx;
+wire [255:0] tr_data;
 // the serial console on the screen and the MiSTer keyboard typing into it
 wire        con_tx, con_rx_full, kbd_ascii_stb;
 wire  [7:0] con_tx_byte, kbd_ascii;
@@ -259,7 +264,14 @@ hp715 #(.CLK_HZ(64_000_000)) hp715
 	.ee_dirty(ee_dirty), .ee_dirty_clr(ee_dirty_clr),
 	.dbg_ctl(8'd0), .dbg_retire(), .dbg_nullified(), .dbg_iaoq_f(), .dbg_iaoq_b(), .dbg_insn(),
 	.dbg_trap(), .dbg_trap_vec(), .dbg_psw(), .dbg_halted(), .dbg_buserr(), .dbg_buserr_addr(),
-	.dbg_gr(gr)
+	.dbg_gr(gr), .dbg_ev_valid(dbg_ev_valid), .dbg_ev(dbg_ev)
+);
+
+// the debug event ring in DDR3 at 0x3200_0000 (tools/mister/trace_dump.py)
+trace_ddr3 #(.LG_N(16)) trace_ddr3
+(
+	.clk(clk_sys), .rst(m_reset), .ev_valid(dbg_ev_valid), .ev(dbg_ev),
+	.tr_req(tr_req), .tr_idx(tr_idx), .tr_data(tr_data), .tr_ack(tr_ack), .drops()
 );
 
 ///////////////////////   MEMORY   ///////////////////////////////
@@ -294,6 +306,7 @@ ddr3_port ddr3
 	.rom_req(rom_req), .rom_addr(rom_addr), .rom_ack(rom_ack), .rom_rvalid(rom_rvalid), .rom_rdata(rom_rdata),
 	.chk_req(chk_req), .chk_we(chk_we), .chk_addr(chk_addr), .chk_be(chk_be), .chk_wdata(chk_wdata),
 	.chk_ack(chk_ack), .chk_rdata(chk_rdata),
+	.tr_req(tr_req), .tr_idx(tr_idx), .tr_data(tr_data), .tr_ack(tr_ack),
 	.DDRAM_BUSY(DDRAM_BUSY), .DDRAM_BURSTCNT(DDRAM_BURSTCNT), .DDRAM_ADDR(DDRAM_ADDR),
 	.DDRAM_DOUT(DDRAM_DOUT), .DDRAM_DOUT_READY(DDRAM_DOUT_READY), .DDRAM_RD(DDRAM_RD),
 	.DDRAM_DIN(DDRAM_DIN), .DDRAM_BE(DDRAM_BE), .DDRAM_WE(DDRAM_WE)

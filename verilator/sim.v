@@ -167,7 +167,16 @@ hp715 #(.CLK_HZ(64_000_000), .SIM_FAST(1'b1)) u_hp715 (
 	.dbg_ctl(sim_trace), .dbg_retire(debug_retire), .dbg_nullified(debug_nullified), .dbg_iaoq_f(debug_iaoq_f),
 	.dbg_iaoq_b(debug_iaoq_b), .dbg_insn(debug_insn), .dbg_trap(debug_trap), .dbg_trap_vec(debug_trap_vec),
 	.dbg_psw(debug_psw), .dbg_halted(debug_halted), .dbg_buserr(debug_buserr),
-	.dbg_buserr_addr(debug_buserr_addr), .dbg_gr(gr));
+	.dbg_buserr_addr(debug_buserr_addr), .dbg_gr(gr), .dbg_ev_valid(dbg_ev_valid), .dbg_ev(dbg_ev));
+
+// the board's debug events (rtl/mister/trace_ddr3.sv), printed with sim_trace[4]
+logic        dbg_ev_valid;
+logic [111:0] dbg_ev;
+logic [31:0] ev_seq = 0;
+always_ff @(posedge clk_sys) if (dbg_ev_valid) begin
+	ev_seq <= ev_seq + 1;
+	if (sim_trace[4]) $display("EV %0d t%0d a%02x %08x %016x", ev_seq, dbg_ev[111:104], dbg_ev[103:96], dbg_ev[95:64], dbg_ev[63:0]);
+end
 
 `ifdef SDRAM_MODEL
 //----------------------------------------------------------------------------

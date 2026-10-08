@@ -78,6 +78,10 @@ module hp715 #(
     input  logic        ee_dirty_clr,
     // debug
     input  logic [7:0]  dbg_ctl,            // simulator trace switches: [0] GSC accesses, [1] I-cache, [2] SCSI
+    // debug events for the board's recorder (rtl/mister/trace_ddr3.sv):
+    // {type, aux, addr, data}, one per cycle at most
+    output logic        dbg_ev_valid,
+    output logic [111:0] dbg_ev,
     output logic        dbg_retire, dbg_nullified,
     output logic [31:0] dbg_iaoq_f, dbg_iaoq_b,
     output logic [31:0] dbg_insn,
@@ -229,7 +233,58 @@ module hp715 #(
         .dma_ack(dma_ack), .dma_err(dma_err), .dma_rdata(dma_rdata),
         .sb_sel(sb_sel), .sb_sel_id(sb_sel_id), .sb_sel_atn(sb_sel_atn), .sb_sel_done(sb_sel_done),
         .sb_sel_fail(sb_sel_fail), .sb_bsy(sb_bsy), .sb_req(sb_req), .sb_phase(sb_phase), .sb_tdata(sb_tdata),
-        .sb_ack(sb_ack), .sb_idata(sb_idata), .sb_ackhold(sb_ackhold), .sb_atn(sb_atn), .sb_rst(sb_rst));
+        .sb_ack(sb_ack), .sb_idata(sb_idata), .sb_ackhold(sb_ackhold), .sb_atn(sb_atn), .sb_rst(sb_rst),
+        .dbg_dec(s_dec), .dbg_dsp(s_dsp), .dbg_ins(s_ins), .dbg_dsps(s_dsps), .dbg_dstat(s_dstat),
+        .dbg_sstat0(s_sstat0));
+
+    // ---------------------------------------------------- debug events
+    // types: 1 SCSI bus byte (aux = phase), 2 SCRIPTS instruction (addr =
+    // DSP, data = {DCMD/DBC, DSPS}), 3 SCSI interrupt (data = {DSTAT,
+    // SSTAT0, DSPS}), 4/5 DMA read/write done (aux = byte enables), 6/7 CPU
+    // line read/write accepted, 8/9 CPU uncached read/write of RAM or the
+    // 53C710 (aux = byte enables, data as read/written), 10 selection
+    // (aux = ID, data = 1 answered / 0 nobody). Each source has a one-deep
+    // slot; the lowest-numbered full slot goes out each cycle.
+    logic        s_dec;
+    logic [31:0] s_dsp, s_ins, s_dsps;
+    logic [7:0]  s_dstat, s_sstat0;
+    logic        ev_ack_q, ev_irq_q, ev_dec_q;
+    logic [32:0] ev_line_q;
+    logic [9:0]  ev_full;
+    logic [111:0] ev_slot [10];
+    always_ff @(posedge clk) begin
+        logic [9:0]   set;
+        logic [111:0] e [10];
+        set = '0;
+        for (int i = 0; i < 10; i++) e[i] = '0;
+        ev_ack_q <= sb_ack; ev_irq_q <= s_irq; ev_dec_q <= s_dec;
+        if (sb_ack && !ev_ack_q) begin set[0] = 1; e[0] = {8'd1, 5'd0, sb_phase, 32'd0, 56'd0, sb_phase[0] ? sb_tdata : sb_idata}; end
+        if (s_dec && !ev_dec_q) begin set[1] = 1; e[1] = {8'd2, 8'd0, s_dsp, s_ins, s_dsps}; end
+        if (s_irq && !ev_irq_q) begin set[2] = 1; e[2] = {8'd3, 8'd0, 32'd0, s_dstat, s_sstat0, 16'd0, s_dsps}; end
+        if (dma_ack) begin set[3] = 1; e[3] = {dma_we ? 8'd5 : 8'd4, dma_be, dma_addr, dma_we ? dma_wdata : dma_rdata}; end
+        // a line read repeating the previous one (a polling loop) is not recorded
+        if (mem_req && mem_ack) begin
+            ev_line_q <= {mem_we, mem_addr};
+            if ({mem_we, mem_addr} != ev_line_q) begin set[4] = 1; e[4] = {mem_we ? 8'd7 : 8'd6, 8'd0, mem_addr, 64'd0}; end
+        end
+        if (io_req && io_ack && !io_ifetch && (io_addr[31:12] == 20'hF0106 || io_addr[31:28] != 4'hF)) begin
+            set[5] = 1; e[5] = {io_we ? 8'd9 : 8'd8, io_be, io_addr, io_we ? io_wdata : io_rdata};
+        end
+        if (sb_sel_done || sb_sel_fail) begin set[6] = 1; e[6] = {8'd10, 5'd0, sb_sel_id, 32'd0, 63'd0, sb_sel_done}; end
+        dbg_ev_valid <= 1'b0;
+        if (!rst_n) ev_full <= '0;
+        else begin
+            logic sent;
+            sent = 1'b0;
+            for (int i = 0; i < 10; i++) begin
+                if (ev_full[i] && !sent) begin
+                    dbg_ev_valid <= 1'b1; dbg_ev <= ev_slot[i]; sent = 1'b1;
+                    ev_full[i] <= 1'b0;
+                end
+            end
+            for (int i = 0; i < 10; i++) if (set[i]) begin ev_full[i] <= 1'b1; ev_slot[i] <= e[i]; end
+        end
+    end
 
     scsi_targets u_targets (
         .clk(clk), .rst(!rst_n),

@@ -36,5 +36,6 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/mister/ddr3_port.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mister/eeprom_save.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mister/serial_term.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mister/ps2_ascii.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/mister/trace_ddr3.sv
 set_global_assignment -name SDC_FILE HP9K715.sdc
 set_global_assignment -name SYSTEMVERILOG_FILE HP9K715.sv

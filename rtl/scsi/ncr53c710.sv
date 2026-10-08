@@ -60,7 +60,15 @@ module ncr53c710 #(
     output logic [7:0]  sb_idata,
     output logic        sb_ackhold,
     output logic        sb_atn,
-    output logic        sb_rst
+    output logic        sb_rst,
+    // debug (the board's event recorder): an instruction decoded, and the
+    // interrupt status
+    output logic        dbg_dec,
+    output logic [31:0] dbg_dsp,
+    output logic [31:0] dbg_ins,
+    output logic [31:0] dbg_dsps,
+    output logic [7:0]  dbg_dstat,
+    output logic [7:0]  dbg_sstat0
 );
     // --------------------------------------------------------- registers
     logic [7:0]  scntl0, scntl1, sdid, sien, scid, sxfer, sodl, socl, sfbr, sidl, sbcl_w;
@@ -102,6 +110,12 @@ module ncr53c710 #(
     wire  [7:0]  ctest8 = {4'h2, ctest8_w[3], 1'b0, ctest8_w[1:0]};   // revision 2
 
     assign irq = ((sstat0_st & sien) != 8'd0) || ((dstat_st[6:0] & dien[6:0]) != 7'd0);
+    assign dbg_dec = est == E_DECODE;
+    assign dbg_dsp = dsp - (ins0[31:30] == 2'b11 ? 32'd12 : 32'd8);
+    assign dbg_ins = ins0;
+    assign dbg_dsps = dsps;
+    assign dbg_dstat = dstat;
+    assign dbg_sstat0 = sstat0_st;
 
     // register read (LE address), and whether reading it has a side effect
     function automatic logic [7:0] reg_rd(input logic [5:0] a);

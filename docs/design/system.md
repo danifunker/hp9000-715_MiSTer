@@ -271,6 +271,7 @@ loads the same file through the same loader (`verilator/sim.v`).
 | Serial | LASI RS-232 on the MiSTer UART (UART_TXD/RXD), which the framework wires to the HPS UART: `/dev/ttyS1` on the MiSTer's Linux (`tools/mister/board.sh console`, or `picocom -b 9600 /dev/ttyS1`); CONF_STR offers 9600-115200 to the Main |
 | Video | until Artist: the RS-232 console as 80 x 29 text with the LEDs and the power LED on a status line, 640x480 (`rtl/mister/serial_term.sv`, STUBS S-018); the MiSTer keyboard also types into the console (`rtl/mister/ps2_ascii.sv`) |
 | SDRAM | `rtl/mister/sdram64.sv`, SDRAM_CLK = clk + 270 degrees; read capture an OSD option (O[9:8], default edge 3 after the READ; S-019) |
+| Debug recorder | `rtl/mister/trace_ddr3.sv`: the machine's debug events (`hp715` `dbg_ev`: SCRIPTS instructions, SCSI bus bytes, interrupts, selections, DMA, the CPU's line requests -- a repeat of the previous line read is left out -- and its uncached accesses to RAM and the 53C710) as 32-byte records in a 64K ring at DDR3 0x3200_0000, lowest priority on `ddr3_port`; `tools/mister/trace_dump.py clear|dump` reads it on the MiSTer, `decode` turns romsim's `--evtrace` into the same text |
 | LEDs | LED_USER = front-panel LED4 (the OS heartbeat), LED_DISK = LED3, LED_POWER = LASI's power LED |
 
 ## 10. Builds (whole core, Quartus 17.0.2)
@@ -295,7 +296,14 @@ loads the same file through the same loader (`verilator/sim.v`).
   devices (`--disk0` ID 6, `--disk1` ID 5, `--cd` ID 2; `--snapshot` keeps
   writes in memory; `disks/README.md` has the HP-UX 10.20 image), and a
   SCSI trace (`--scsitrace`: SCRIPTS instructions, selections, interrupts,
-  bus bytes).
+  bus bytes), the MIOC's transactions (`--miotrace`) and the board
+  recorder's events (`--evtrace`, the same records `tools/mister/trace_dump.py`
+  reads from a board).
+* `ROMSIM_SDRAM=1` (`make -C verilator romsim ROMSIM_DIR=obj_dir_roms
+  ROMSIM_SDRAM=1`): system RAM is `rtl/mister/sdram64.sv` on a chip model
+  (`verilator/sim_sdram_chip.sv`) instead of the ideal array -- slower, but
+  it has the board's latency, refresh stalls and burst order (it found
+  cpu-requests #6).
   Whole-model checkpoints (`--save-at CYCLE`, `--save-on STR`, `--restore`; valid only for the
   build that made them), trace switches through an input port so they work
   after a restore (`--gsctrace`, `--l1trace`, `--flags-from`), and a
