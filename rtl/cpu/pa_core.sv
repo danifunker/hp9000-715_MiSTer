@@ -27,7 +27,7 @@
 module pa_core
     import pa_pkg::*;
 #(
-    parameter logic [5:0] CPU_REVISION = 6'd0       // DR0 bits 0:5 (cpu-requests #2)
+    parameter logic [5:0] CPU_REVISION = 6'd2       // DR0 bits 0:5 (cpu-requests #2)
 ) (
     input  logic        clk,
     input  logic        rst_n,
@@ -52,7 +52,8 @@ module pa_core
     output logic [31:0] redir_target, redir_back,
     output logic [15:0] redir_space, redir_back_space,
     output logic        redir_new_space,
-    output logic [31:0] redir_slot,
+    output logic [31:0] redir_slot_e, redir_slot_d,   // E's / D's branch delay-slot address
+    output logic        redir_from_e,
 
     // TLB (pa_tlb)
     output logic [15:0] tlb_lk_space,
@@ -196,6 +197,8 @@ module pa_core
     logic [4:0]  m_hash;
     logic [1:0]  m_pl, m_ppl;
     logic        m_xlate;               // the access translates (TLB lookup in M)
+    logic        m_need;                // = m_valid && !m_nul && m_xlate, registered at E -> M so the
+                                        //   TLB port select is one LUT from flops (cpu-timing.md 4.3 cut M2)
     ctrl_t       m_c;
     // ---- W
     logic        w_valid, w_nul, w_err, w_taken, w_nullify, w_new_space;
@@ -547,7 +550,9 @@ module pa_core
     wire e_redir = adv && e_mispred;
     assign redir          = e_redir || d_redir;
     assign redir_new_space = e_redir && e_taken && br_new_space;
-    assign redir_slot     = e_redir ? e_iaoq_b : d_iaoq_b;
+    assign redir_slot_e   = e_iaoq_b;
+    assign redir_slot_d   = d_iaoq_b;
+    assign redir_from_e   = e_redir;
 
     // ================================================================ M stage
     // TLB lookup: the instruction in M when it translates, else the fetch unit's refill
@@ -556,7 +561,6 @@ module pa_core
     wire m_is_rd   = m_c.fu == FU_LOAD;
     wire m_probe   = m_c.fu == FU_MMU && m_c.sysop == MM_PROBE;
     wire m_lpa     = m_c.fu == FU_MMU && m_c.sysop == MM_LPA;
-    wire m_need    = m_valid && !m_nul && m_xlate;
     assign tlb_lk_space = m_need ? m_space : it_space;
     assign tlb_lk_vpn   = m_need ? m_ea[31:12] : it_vpn;
     assign tlb_lk_use   = m_need && adv;
@@ -875,7 +879,7 @@ module pa_core
     // psw after this cycle's W action (for the nullify / taken state on a redirect)
     always_ff @(posedge clk) begin
         if (!rst_n) begin
-            d_valid <= 1'b0; e_valid <= 1'b0; m_valid <= 1'b0; w_valid <= 1'b0;
+            d_valid <= 1'b0; e_valid <= 1'b0; m_valid <= 1'b0; w_valid <= 1'b0; m_need <= 1'b0;
             d_ferr <= 0; d_fperr <= 0; e_fperr <= 0; m_fperr <= 0; w_fperr <= 0; d_insn <= 0; d_iaoq_f <= 0; d_iaoq_b <= 0; d_iasq_f <= 0; d_iasq_b <= 0;
             e_nul <= 0; e_err <= 0; e_pred <= 0; e_bflag <= 0; e_insn <= 0; e_iaoq_f <= 0; e_iaoq_b <= 0;
             e_iasq_f <= 0; e_iasq_b <= 0; e_gra <= 0; e_grb <= 0; e_target <= 0; e_c <= '0;
@@ -896,7 +900,7 @@ module pa_core
         end else begin
             // ---- W redirect kills everything younger (and W leaves)
             if (w_redir) begin
-                d_valid <= 1'b0; e_valid <= 1'b0; m_valid <= 1'b0; w_valid <= 1'b0;
+                d_valid <= 1'b0; e_valid <= 1'b0; m_valid <= 1'b0; w_valid <= 1'b0; m_need <= 1'b0;
                 pending_nul <= psw_next[P_N];
                 prev_taken  <= psw_next[P_B];
             end else begin
@@ -911,7 +915,7 @@ module pa_core
                     w_fperr <= m_fperr; w_cached <= m_cached_c; w_hit <= dc_m_hit; w_dirty <= dc_m_dirty;
                     w_dperr <= dc_m_perr; w_stdw <= m_stdw; w_opflush <= 1'b0;
                     w_rpn <= m_rpn; w_hash <= m_hash; w_walk <= m_walk_ok;
-                    if (m_cached_c) w_ld <= m_ld;
+                    w_ld <= m_ld;                   // an uncached load overwrites it at its ack
 
                     m_valid <= e_valid; m_nul <= e_nul; m_err <= e_err; m_taken <= e_taken;
                     m_nullify <= e_nullify; m_new_space <= e_taken && br_new_space; m_insn <= e_insn;
@@ -921,6 +925,7 @@ module pa_core
                     m_be <= ls_be; m_stdata <= ls_wd_eff; m_c <= e_c;
                     m_fperr <= e_fperr;
                     m_space <= e_sp; m_hash <= e_hash; m_pl <= cur_pl; m_xlate <= e_xlate;
+                    m_need <= e_valid && !e_nul && e_xlate;
                     m_ppl <= e_c.a_imm ? e_c.imm[1:0] : fa[1:0];
                     if (e_valid) begin
                         pending_nul <= e_nullify;
@@ -962,7 +967,7 @@ module pa_core
                     if (e_redir) begin
                         // E's delay slot: D's instruction if D held one, else the one
                         // entering from F2; anything else is the wrong path
-                        if (!d_valid && f2_valid && f2_iaoq_f == redir_slot) begin
+                        if (!d_valid && f2_valid && f2_iaoq_f == e_iaoq_b) begin
                             d_iaoq_b <= redir_target;
                             if (redir_new_space) d_iasq_b <= redir_space;
                         end else

@@ -3,7 +3,7 @@
 module pa_cpu
     import pa_pkg::*;
 #(
-    parameter logic [5:0] CPU_REVISION = 6'd0
+    parameter logic [5:0] CPU_REVISION = 6'd2      // DR0 bits 0:5 (user, 2026-10-07: 1..0xB; cpu-requests #2)
 ) (
     input  logic        clk,
     input  logic        rst_n,
@@ -91,7 +91,8 @@ module pa_cpu
     logic [31:0] f2_insn, f2_iaoq_f, f2_iaoq_b;
     logic [15:0] f2_iasq_f, f2_iasq_b;
     logic        redir, redir_kill_all, redir_new_space;
-    logic [31:0] redir_target, redir_back, redir_slot;
+    logic [31:0] redir_target, redir_back, redir_slot_e, redir_slot_d;
+    logic        redir_from_e;
     logic [15:0] redir_space, redir_back_space;
     logic        f_req, f_beat, f_done, f_err;
     logic [31:0] f_addr;
@@ -109,7 +110,7 @@ module pa_cpu
         .it_xok(it_xok), .it_type(it_type),
         .redir(redir), .redir_kill_all(redir_kill_all), .redir_target(redir_target), .redir_back(redir_back),
         .redir_space(redir_space), .redir_back_space(redir_back_space), .redir_new_space(redir_new_space),
-        .redir_slot(redir_slot),
+        .redir_slot_e(redir_slot_e), .redir_slot_d(redir_slot_d), .redir_from_e(redir_from_e),
         .f2_valid(f2_valid), .f2_insn(f2_insn), .f2_iaoq_f(f2_iaoq_f), .f2_iaoq_b(f2_iaoq_b),
         .f2_iasq_f(f2_iasq_f), .f2_iasq_b(f2_iasq_b), .f2_err(f2_err), .f2_perr(f2_perr),
         .f2_itlb(f2_itlb), .f2_imp(f2_imp), .f2_type(f2_type),
@@ -182,7 +183,7 @@ module pa_cpu
         .ic_rd_dr27(ic_rd_dr27), .ic_rd_dr28(ic_rd_dr28), .ic_rd_dr29(ic_rd_dr29), .ic_l1_en(ic_l1_en),
         .redir(redir), .redir_kill_all(redir_kill_all), .redir_target(redir_target), .redir_back(redir_back),
         .redir_space(redir_space), .redir_back_space(redir_back_space), .redir_new_space(redir_new_space),
-        .redir_slot(redir_slot),
+        .redir_slot_e(redir_slot_e), .redir_slot_d(redir_slot_d), .redir_from_e(redir_from_e),
         .d_req(d_req), .d_we(d_we), .d_addr(d_addr), .d_be(d_be), .d_wdata(d_wdata), .d_rclr(d_rclr),
         .d_ack(d_ack), .d_err(d_err), .d_rdata(d_rdata), .sb_empty(sb_empty), .sb_err(sb_err),
         .eir_set(eir_set), .eir_num(eir_num), .toc_req(toc_req), .hpmc_req(hpmc_req), .lpmc_req(lpmc_req),

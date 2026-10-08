@@ -19,6 +19,8 @@ same device); the paths are what to judge by.
 | 2 | 2026-10-07 | pipelined `pa_cpu` (uncached fetch and data, no caches/TLB/FPU) | `top_pipe` | **72.5 MHz** | +1.83 ns | 4,849 | 6,179 | 0 | 0 | 64 MHz met; section 2.2 |
 | 3 | 2026-10-07 | + 128 KB L2-I, 1 KB L1-I, 128 KB L2-D with diagnose access, fills/write-backs on the line port | `top_pipe` | **71.0 MHz** | +1.53 ns | 6,507 | 7,862 | 291 | 0 | 64 MHz met; section 3.2 |
 | 4 | 2026-10-07 | + UTLB (64 page + 8 block entries, DR8), virtual mode in both caches (space hash), protection checks, PROBE/LPA, the hardware walker, the I-LAB | `top_pipe` | **56.3 MHz** | -2.13 ns | 10,385 | 11,723 | 291 | 0 | 64 MHz **missed**; section 4.2 |
+| 4b | 2026-10-07 | fit 4's RTL with register retiming off (diagnostic) | `top_pipe` (`cpu_fmax_pipe_nort`) | 51.5 MHz | -3.79 ns | 9,107 | 9,828 | 291 | 0 | per-stage slacks; section 4.3 |
+| 5 | 2026-10-07 | + cuts F, A, M1, M2, M3 of section 4.3; CPU revision 2 | `top_pipe` | **62.8 MHz** | -0.31 ns | 12,070 | 14,923 | 291 | 0 | 1.2 MHz short; section 4.3 |
 
 ## 1. Baseline: the sequential core (fit 1)
 
@@ -208,6 +210,71 @@ ten suites pass on this RTL):
 5. **A registered translation** (translate in E for the common case, M
    only checks): the real PCX-L way, but it moves the address generation
    earlier and costs a bubble on every base-register forward; last resort.
+
+### 4.3 Diagnosis without retiming, and the cuts (fit 5)
+
+Fit 4's report is a retimed netlist: Quartus had moved the M/W registers
+(`w_ld`, `w_cached`) forward into E's operand path and the E/M lookup
+operands forward through the port mux, so its worst chain crossed two RTL
+stages and said little about which stage is long. A diagnostic fit of the
+same RTL with `PHYSICAL_SYNTHESIS_REGISTER_RETIMING OFF` (revision
+`cpu_fmax_pipe_nort`, 51.5 MHz, 9,107 ALMs) gives the stages themselves,
+worst setup slack per destination:
+
+| Stage (destination registers) | Slack | Worst path |
+|---|---:|---|
+| fetch F1 (`f1_iaoq_b`), F2 (`f2_iaoq_b`) | **-3.79 / -3.10** | W result forwarded into E (`wd0` -> `fa` -> ALU operand) -> adder -> `result == 0` -> condition -> `e_taken` -> `redir_slot` mux -> **32-bit compare `n_f1_iaoq_f == redir_slot`** -> the IAOQ-back select -> `f1_iaoq_b` (sload). 18.7 ns, of which ~8 ns is routing |
+| M -> W (`w_ld`) | **-2.92** | `m_valid` -> `m_need` -> TLB port mux -> CAM -> hit encode -> payload MLAB -> RPN -> `m_io` -> `m_cached_c` as the **enable of `w_ld`** |
+| M -> W from the TLB entries (`w_result`, `w_ld`) | -1.52 | the lookup itself plus one mux (LPA's PA, the enable) |
+| D -> E (`e_iaoq_b`) | -0.89 | the same E branch decision into D's slot handling |
+| TLB operations (`targets`) | -0.97 | `w_trap` -> the walker's insert request |
+| I-cache RAM address | -0.54 | `w_trap` (ITLB) -> redirect -> fetch -> RAM address |
+| E -> M (`m_result`), D-cache RAM | +0.05, +0.03 | fine |
+
+So two stages miss, by 3.8 and 2.9 ns, and they are independent of each
+other. The TLB lookup (CAM + encode + MLAB) is ~9 ns from its own
+flip-flops; the branch path has grown from fit 2 mostly in routing (the
+3.9k-ALM TLB sits between the core and the fetch unit).
+
+Cuts applied for fit 5 (all suites and the lockstep co-simulation pass):
+
+| Cut | What | Where | Saves |
+|---|---|---|---|
+| **F** | the delay-slot compares run from registers, in parallel with the branch decision: `f2_iaoq_f`, `f1_iaoq_f` and `nf` are each compared with both candidate slots (E's `e_iaoq_b`, D's `d_iaoq_b`), and `e_redir` / `adv_f2` / `issue` only select among the six results; the core passes `redir_slot_e`, `redir_slot_d`, `redir_from_e` instead of the muxed `redir_slot` | `pa_fetch.sv`, `pa_core.sv`, `pa_cpu.sv` | the 32-bit compare after `e_taken`: ~2 ns + routing |
+| **A** | the ALU's zero flag from the operands, not the sum: a + b + cin == 0 iff (a ^ b) == ((a \| b) << 1 \| cin), two LUT levels in parallel with the carry chain (the logical class keeps `lres == 0`) | `pa_alu.sv` | the adder + result mux + 32-bit zero reduce on every `=`/`<>` branch: ~2.5 ns; `<` and `<<` still wait for the chain |
+| **M1** | `w_ld` captures the aligned cache word unconditionally (an uncached load overwrites it at its ack), so the translated PA is no longer the enable of 32 flip-flops | `pa_core.sv` | the TLB out of the data path; `m_cached_c` now only feeds `w_cached` |
+| **M2** | `m_need` (the instruction in M translates) is a register set at E -> M, so the TLB port mux is one LUT from flip-flops instead of `m_valid` (high fanout) -> decode -> mux | `pa_core.sv` | ~1.4 ns at the head of the lookup |
+| **M3** | the payload (RPN + protection, 46 bits) in flip-flops, read by an AND-OR over the one-hot `match & valid` instead of a hit encoder addressing two MLABs; the used-bit update is `used \| sel` | `pa_tlb.sv` | the encoder, the routing to the MLAB and the MLAB read: ~2.5 ns; costs 64 x 46 flip-flops and ~1k LUTs |
+
+Not applied: sharing the W-stage operations' 64 comparators with the
+lookup CAM (area only, -1.5k ALMs, see 4.2 cut 2); registering the E
+redirect (one more bubble per mispredicted branch, ~2 % of cycles) if F + A
+are not enough; the D-cache tag compare in W if M3 is not enough.
+
+#### Result
+
+**62.8 MHz, -0.31 ns; 12,070 ALMs / 14,923 registers** (`pa_tlb` 5,377 ALMs /
+7,108 registers: cut M3's 64 x 46 payload flip-flops and their AND-OR cost
++1.5k ALMs; `pa_core` 4,429, `pa_fetch` 764). From 56.3 to 62.8 MHz, and
+the fetch unit's PC registers are no longer in the 40 worst paths.
+
+The remaining chain is again retimed across stages: Quartus moved the
+lookup operand register forward through the CAM to the one-hot `sel`, and
+the W result register forward through the forwarding muxes into the
+shifter. From `sel`: the payload AND-OR (3 levels, 4.6 ns with routing)
+-> `lk_aid` -> the PID compare (`pid_rd_ok`) -> PROBE's result
+(`m_result2`) -> `w_result` -> MTSAR's value forwarded into the shift
+amount (`sar_in` -> `sh_amount`) -> the shifter's first mux. 15.2 ns of
+data delay against the 15.6 ns budget, lost to the clock skew (-0.5 ns)
+and setup. In RTL terms the two halves (M: lookup + PID check + result
+mux; W -> E: result forward + shift-amount select) are each inside a cycle;
+their sum is 0.3 ns over two.
+
+Next: the area cut (share the lookup CAM with the W-stage operations, 4.2
+cut 2) -- it also relieves the placement around the TLB -- then a second
+seed; failing that, make PROBE's result a registered late result (it has
+the load-use interlock already, so a forward from M is never used).
+
 
 ## 5. Open items
 

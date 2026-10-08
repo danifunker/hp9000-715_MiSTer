@@ -57,7 +57,11 @@ module pa_fetch (
     input  logic [31:0] redir_back,     // kill-all: the IAOQ back of the first new instruction
     input  logic [15:0] redir_space, redir_back_space,
     input  logic        redir_new_space,
-    input  logic [31:0] redir_slot,     // IAOQ front of the branch's delay slot
+    // IAOQ front of the branch's delay slot, as the two candidates (E's and D's
+    // branch) plus the select, so the slot compares run from registers in
+    // parallel with the E-stage branch decision (cpu-timing.md 4.3 cut F)
+    input  logic [31:0] redir_slot_e, redir_slot_d,
+    input  logic        redir_from_e,
     // F2 -> D
     output logic        f2_valid,
     output logic [31:0] f2_insn,
@@ -161,6 +165,17 @@ module pa_fetch (
     logic [15:0] n_nsf, n_nsb;
     logic        f1_consumed;
 
+    // slot compares from registers (n_f2_iaoq_f is f1's or f2's front, n_f1_iaoq_f
+    // is nf or f1's), selected by the advance decisions and the redirect source
+    wire sl_f2_e = f2_iaoq_f == redir_slot_e, sl_f2_d = f2_iaoq_f == redir_slot_d;
+    wire sl_f1_e = f1_iaoq_f == redir_slot_e, sl_f1_d = f1_iaoq_f == redir_slot_d;
+    wire sl_nf_e = nf == redir_slot_e,        sl_nf_d = nf == redir_slot_d;
+    wire sl_f2 = redir_from_e ? sl_f2_e : sl_f2_d;
+    wire sl_f1 = redir_from_e ? sl_f1_e : sl_f1_d;
+    wire sl_nf = redir_from_e ? sl_nf_e : sl_nf_d;
+    wire n_f2_slot = adv_f2 ? sl_f1 : sl_f2;
+    logic n_f1_slot;                                 // issue ? sl_nf : sl_f1, set below
+
     always_comb begin
         n_f1_valid = f1_valid; n_f1_iaoq_f = f1_iaoq_f; n_f1_iaoq_b = f1_iaoq_b;
         n_f1_iasq_f = f1_iasq_f; n_f1_iasq_b = f1_iasq_b;
@@ -180,6 +195,7 @@ module pa_fetch (
             f1_consumed = f1_ready;
         end
         issue = !f1_valid || f1_consumed;
+        n_f1_slot = issue ? sl_nf : sl_f1;
         if (issue) begin
             n_f1_valid = 1'b1;
             n_f1_iaoq_f = nf; n_f1_iaoq_b = nb; n_f1_iasq_f = nsf; n_f1_iasq_b = nsb;
@@ -192,12 +208,12 @@ module pa_fetch (
             n_nf = redir_target; n_nb = redir_back;
             n_nsf = redir_space; n_nsb = redir_back_space;
         end else if (redir) begin
-            if (n_f2_valid && n_f2_iaoq_f == redir_slot) begin
+            if (n_f2_valid && n_f2_slot) begin
                 n_f2_iaoq_b = redir_target;
                 if (redir_new_space) n_f2_iasq_b = redir_space;
             end else
                 n_f2_valid = 1'b0;
-            if (n_f1_valid && n_f1_iaoq_f == redir_slot) begin
+            if (n_f1_valid && n_f1_slot) begin
                 n_f1_iaoq_b = redir_target;
                 if (redir_new_space) n_f1_iasq_b = redir_space;
             end else

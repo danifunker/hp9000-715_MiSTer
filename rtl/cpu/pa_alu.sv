@@ -121,8 +121,13 @@ module pa_alu (
     assign result = logic_op ? lres : sum;
 
     // ------------------------------------------------------------ condition
-    logic zero;
-    assign zero = (result == 32'd0);
+    // zero without waiting for the adder: a + b + cin == 0 (mod 2^32) iff
+    // (a ^ b) == ((a | b) << 1 | cin) -- every bit's carry-in must equal its
+    // half-sum, and with a zero sum the carry out of bit i is a[i] | b[i]
+    logic zero, zero_a, zero_l;
+    assign zero_a = ~|((opa_sh ^ y) ^ {opa_sh[30:0] | y[30:0], cin});
+    assign zero_l = (lres == 32'd0);
+    assign zero   = logic_op ? zero_l : zero_a;
     logic sat;
     always_comb begin
         sat = 1'b0;

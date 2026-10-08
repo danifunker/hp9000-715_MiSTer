@@ -5,7 +5,7 @@
 //
 // Page entry: tag {space[15:0], vpn[19:0]} + lock-out, lock-in, E (valid),
 // used in flip-flops (compared every cycle); the payload {rpn, ar, aid,
-// t, d, b, u} in an MLAB indexed by the encoded hit. Block entry: all in
+// t, d, b, u} in flip-flops too, selected by the one-hot hit. Block entry: all in
 // flip-flops, VPN bits 6:12 (PA numbering) compared where the mask says so,
 // the RPN assembled from TRANS and the uncompared VPN bits. A page hit wins
 // over a block hit (software must not create both).
@@ -47,11 +47,11 @@ module pa_tlb
     // ---------------------------------------------------------------- page entries
     logic [35:0] tag [64];
     logic [63:0] lockout, lockin, valid, used;
-    // payload in two MLABs, each with one read port (at the encoded hit) and one
-    // write port: the RPN (written by IxTLBA) and the protection (cleared by
-    // IxTLBA, written by IxTLBP)
-    (* ramstyle = "MLAB, no_rw_check" *) logic [19:0] rpn_mem [64];
-    (* ramstyle = "MLAB, no_rw_check" *) logic [25:0] prot_mem [64];   // {ar 7, aid 15, t, d, b, u}
+    // payload {rpn 20, ar 7, aid 15, t, d, b, u} in flip-flops, read through an
+    // AND-OR over the one-hot hit (no hit encoder, no RAM in the lookup path;
+    // cpu-timing.md 4.3 cut M3). The RPN is written by IxTLBA (which clears the
+    // protection), the protection by IxTLBP.
+    logic [45:0] pay [64];
 
     // ---------------------------------------------------------------- block entries
     logic [15:0] b_space [8];
@@ -74,14 +74,15 @@ module pa_tlb
                         b_vpn[i][12:7] == lk_vpn[19:14] &&
                         ((b_vpn[i][6:0] ^ lk_vpn[13:7]) & b_mask[i]) == 7'd0;
     end
-    wire pg_hit = |(match & valid);
-    logic [5:0] pg_idx;
+    wire [63:0] sel = match & valid;
+    wire pg_hit = |sel;
+    logic [45:0] pl_all;
     always_comb begin
-        pg_idx = 6'd0;
-        for (int i = 0; i < 64; i++) if (match[i] && valid[i]) pg_idx = pg_idx | 6'(i);
+        pl_all = 46'd0;
+        for (int i = 0; i < 64; i++) pl_all = pl_all | (pay[i] & {46{sel[i]}});
     end
-    wire [19:0] pl_rpn = rpn_mem[pg_idx];
-    wire [25:0] pl = prot_mem[pg_idx];
+    wire [19:0] pl_rpn = pl_all[45:26];
+    wire [25:0] pl = pl_all[25:0];
     logic [2:0] b_idx;
     always_comb begin
         b_idx = 3'd0;
@@ -145,13 +146,13 @@ module pa_tlb
             st <= S_IDLE; op_done <= 1'b0; targets <= 64'd0; blk_target <= 1'b0;
             lockout <= {64{1'b1}}; lockin <= {64{1'b1}}; valid <= 64'd0; used <= 64'd0;
             b_lockout <= 8'hFF; b_valid <= 8'd0;
-            for (int i = 0; i < 64; i++) tag[i] <= 36'd0;
+            for (int i = 0; i < 64; i++) begin tag[i] <= 36'd0; pay[i] <= 46'd0; end
             for (int i = 0; i < 8; i++) begin
                 b_space[i] <= 0; b_vpn[i] <= 0; b_mask[i] <= 0; b_trans[i] <= 0; b_ar[i] <= 0; b_aid[i] <= 0; b_flags[i] <= 0;
             end
         end else begin
             op_done <= 1'b0;
-            if (lk_use && pg_hit) used[pg_idx] <= 1'b1;
+            if (lk_use) used <= used | sel;
             case (st)
                 S_IDLE: if (op_req && !op_done) begin
                     st <= S_SELECT;
@@ -185,11 +186,10 @@ module pa_tlb
                             valid[cur] <= 1'b0;
                             lockout[cur] <= dr8_lockout;
                             lockin[cur] <= dr8_lockin;
-                            rpn_mem[cur] <= op_gr[24:5];
-                            prot_mem[cur] <= 26'd0;
+                            pay[cur] <= {op_gr[24:5], 26'd0};
                         end else if (is_ins_p) begin
                             valid[cur] <= 1'b1;
-                            prot_mem[cur] <= {op_gr[26:20], op_gr[15:1], op_gr[29], op_gr[28], op_gr[27], op_gr[19]};
+                            pay[cur][25:0] <= {op_gr[26:20], op_gr[15:1], op_gr[29], op_gr[28], op_gr[27], op_gr[19]};
                         end else if (is_purge) begin
                             valid[cur] <= 1'b0;
                         end
