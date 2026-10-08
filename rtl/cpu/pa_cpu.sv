@@ -45,6 +45,7 @@ module pa_cpu
     output logic [31:0] dbg_gr_data0, dbg_gr_data1,
     output logic [31:0] dbg_psw,
     output logic        dbg_halted,
+    output logic        dbg_fp_stall,
     output logic [31:0] dbg_gr [32]
 );
     // caches
@@ -196,7 +197,7 @@ module pa_cpu
         .dbg_retire(dbg_retire), .dbg_nullified(dbg_nullified), .dbg_iaoq_f(dbg_iaoq_f), .dbg_iaoq_b(dbg_iaoq_b),
         .dbg_iasq_f(dbg_iasq_f), .dbg_insn(dbg_insn), .dbg_trap(dbg_trap), .dbg_trap_vec(dbg_trap_vec),
         .dbg_gr_we(dbg_gr_we), .dbg_gr_num0(dbg_gr_num0), .dbg_gr_num1(dbg_gr_num1),
-        .dbg_gr_data0(dbg_gr_data0), .dbg_gr_data1(dbg_gr_data1), .dbg_psw(dbg_psw), .dbg_halted(dbg_halted),
+        .dbg_gr_data0(dbg_gr_data0), .dbg_gr_data1(dbg_gr_data1), .dbg_psw(dbg_psw), .dbg_halted(dbg_halted), .dbg_fp_stall(dbg_fp_stall),
         .dbg_gr(dbg_gr));
 
     pa_fpunit u_fpu (

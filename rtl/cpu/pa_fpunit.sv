@@ -4,12 +4,19 @@
 // ERS ch. 7; ACD ch. 6.
 //
 // Everything happens in program order at the core's W stage: an operation
-// (FU_FP) is issued when its instruction commits, its operands read from the
-// register file in that cycle; an FP load writes its target when it commits;
-// an FP store reads its source in W. The core holds any FP instruction in D
-// while an operation is in E/M/W or in flight here (`busy`), so there are no
-// register hazards to track (the simplest correct version; P-016 notes the
-// lost overlap). One operation at a time.
+// (FU_FP) is accepted when its instruction commits (S_RD: the register
+// numbers are captured, the operands are read from the register file during
+// the next cycle into hold registers, and the engine starts the cycle after
+// that, from flip-flops -- cpu-timing.md 4.5); an FP load writes its target
+// when it commits; an FP store reads its source in W. The core holds any FP
+// instruction in D while an operation is in E/M/W or in flight here
+// (`busy`), so there are no register hazards to track (the simplest correct
+// version; P-016 notes the lost overlap). One operation at a time.
+//
+// The register file fr4..fr31 is MLAB LUT-RAM with asynchronous reads, one
+// copy per read port (two operands, the store source), every write going to
+// all three (the pa_regfile scheme; one array with three read ports would
+// not infer a memory and cost 1.8k flip-flops plus the read muxes, fit 10).
 //
 // FPSR (fr0L) in Verilog bits: flags V Z O U I = [31:27], C = [26], the
 // compare queue PA 10:20 = [21:11] (also the model/revision written by
@@ -35,8 +42,9 @@ module pa_fpunit
     // ---------------------------------------------------------------- registers
     logic [31:0] fpsr;
     logic [31:0] xr [7];                // exception registers 1..7 = fr0R, fr1L, fr1R, fr2L, fr2R, fr3L, fr3R
-    (* ramstyle = "MLAB" *) logic [31:0] frl [32];   // fr4..fr31 left halves (0..3 unused)
-    (* ramstyle = "MLAB" *) logic [31:0] frr [32];   // right halves
+    // fr4..fr31 (entries 0..3 unused): left and right halves, one copy per read port
+    (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] frl_a [32], frl_b [32], frl_s [32];
+    (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] frr_a [32], frr_b [32], frr_s [32];
     assign fpsr_t = fpsr[6];
     assign fpsr_o = fpsr;
 
@@ -51,9 +59,9 @@ module pa_fpunit
     // three read ports: the two operands and the store source
     logic [4:0]  rd_a_n, rd_b_n, rd_s_n;
     logic [63:0] rd_a, rd_b, rd_s;
-    assign rd_a = (rd_a_n < 5'd4) ? rd_ff(rd_a_n) : {frl[rd_a_n], frr[rd_a_n]};
-    assign rd_b = (rd_b_n < 5'd4) ? rd_ff(rd_b_n) : {frl[rd_b_n], frr[rd_b_n]};
-    assign rd_s = (rd_s_n < 5'd4) ? rd_ff(rd_s_n) : {frl[rd_s_n], frr[rd_s_n]};
+    assign rd_a = (rd_a_n < 5'd4) ? rd_ff(rd_a_n) : {frl_a[rd_a_n], frr_a[rd_a_n]};
+    assign rd_b = (rd_b_n < 5'd4) ? rd_ff(rd_b_n) : {frl_b[rd_b_n], frr_b[rd_b_n]};
+    assign rd_s = (rd_s_n < 5'd4) ? rd_ff(rd_s_n) : {frl_s[rd_s_n], frr_s[rd_s_n]};
     // a single operand (left-justified for the engine) from the selected half
     function automatic logic [63:0] opnd(input logic [63:0] r, input logic single, input logic half);
         return (single && half) ? {r[31:0], 32'd0} : r;
@@ -170,58 +178,58 @@ module pa_fpunit
         .unimpl(eng_unimpl), .cmp_c(eng_cmp));
 
     // ---------------------------------------------------------------- sequencing
-    typedef enum logic [2:0] { S_IDLE, S_OP, S_FMA_MPY, S_FMA_ADD, S_FMA_WR } st_e;
+    typedef enum logic [2:0] { S_IDLE, S_RD, S_OP, S_FMA_MPY, S_FMA_RD, S_FMA_ADD, S_FMA_WR } st_e;
     st_e st;
     assign busy = st != S_IDLE;
     // the operation in flight
     logic [31:0] cur_insn;
     logic [5:0]  cur_code;
-    logic [4:0]  cur_t;
-    logic        cur_ht, cur_sdest, cur_cmp;
+    logic [4:0]  cur_r1, cur_r2, cur_t;
+    logic        cur_h1, cur_h2, cur_ht, cur_sdest, cur_cmp, cur_fma, cur_dsgl;
+    fpu_op_e     cur_op;
+    logic [4:0]  cur_cond;
     logic [4:0]  cur_tm, cur_ra, cur_ta;
     logic        cur_htm, cur_hra, cur_hta, cur_fsub, cur_cfxt, cur_sgl;
     logic [63:0] fma_res1;
     logic        fma_we1, fma_unimpl;
     logic [4:0]  fma_flags;
 
-    // operand read ports: at issue the operation's r1/r2, for the second FMA step ra/ta
+    // operand read ports, addressed from the captured operation: r1/r2 for the
+    // operation (or the multiply of a multi-op), ra/ta for the second FMA step
     always_comb begin
-        if (st == S_FMA_MPY) begin rd_a_n = cur_cfxt ? cur_ta : cur_ra; rd_b_n = cur_ta; end
-        else                 begin rd_a_n = d_r1; rd_b_n = d_r2; end
+        if (st == S_FMA_RD) begin rd_a_n = cur_cfxt ? cur_ta : cur_ra; rd_b_n = cur_ta; end
+        else                begin rd_a_n = cur_r1; rd_b_n = cur_r2; end
     end
     // The engine reads op / formats / operands throughout the operation, so they
-    // are presented in the start cycle and then held in registers until it is done.
-    fpu_op_e     nx_op, hold_op;
-    logic        nx_sgl, nx_dsgl, hold_sgl, hold_dsgl;
-    logic [4:0]  nx_cond, hold_cond;
-    logic [63:0] nx_a, nx_b, hold_a, hold_b;
-    always_comb begin
-        eng_start = 1'b0; nx_op = d_op; nx_sgl = d_sgl; nx_dsgl = d_dsgl; nx_cond = d_cond;
-        nx_a = opnd(rd_a, d_sgl, d_h1); nx_b = opnd(rd_b, d_sgl, d_h2);
-        if (st == S_IDLE && issue && (d_kind == K_OP || d_kind == K_FMA)) begin
-            eng_start = 1'b1;
-            if (d_kind == K_FMA) nx_op = F_MPY;
-        end else if (st == S_FMA_MPY && eng_done) begin
-            eng_start = 1'b1;
-            nx_sgl = cur_sgl;
+    // are captured in the read cycle (S_RD, S_FMA_RD) and held until it is done;
+    // the start pulse follows one cycle later, so the engine starts from flip-flops.
+    fpu_op_e     hold_op;
+    logic        hold_sgl, hold_dsgl;
+    logic [4:0]  hold_cond;
+    logic [63:0] hold_a, hold_b;
+    logic        start_r;
+    assign eng_start = start_r;
+    assign eng_op = hold_op; assign eng_sgl = hold_sgl; assign eng_dsgl = hold_dsgl; assign eng_cond = hold_cond;
+    assign eng_a = hold_a; assign eng_b = hold_b;
+    always_ff @(posedge clk) begin
+        if (!rst_n) start_r <= 1'b0;
+        else start_r <= (st == S_RD) || (st == S_FMA_RD);
+        if (st == S_RD) begin
+            hold_op <= cur_fma ? F_MPY : cur_op; hold_sgl <= cur_sgl; hold_dsgl <= cur_dsgl; hold_cond <= cur_cond;
+            hold_a <= opnd(rd_a, cur_sgl, cur_h1); hold_b <= opnd(rd_b, cur_sgl, cur_h2);
+        end else if (st == S_FMA_RD) begin
+            hold_sgl <= cur_sgl; hold_cond <= cur_cond;
             if (cur_cfxt) begin                                             // ta <- FCNVFXT(ta), 32-bit integer
-                nx_op = F_CNVFXT; nx_dsgl = 1'b1;
-                nx_a = opnd(rd_a, cur_sgl, cur_hta);
+                hold_op <= F_CNVFXT; hold_dsgl <= 1'b1;
+                hold_a <= opnd(rd_a, cur_sgl, cur_hta); hold_b <= 64'd0;
             end else begin
-                nx_op = cur_fsub ? F_SUB : F_ADD;                           // ta <- ra + ta, or ta - ra (FMPYSUB)
-                if (cur_fsub) begin nx_a = opnd(rd_b, cur_sgl, cur_hta); nx_b = opnd(rd_a, cur_sgl, cur_hra); end
-                else          begin nx_a = opnd(rd_a, cur_sgl, cur_hra); nx_b = opnd(rd_b, cur_sgl, cur_hta); end
+                hold_op <= cur_fsub ? F_SUB : F_ADD;                        // ta <- ra + ta, or ta - ra (FMPYSUB)
+                hold_dsgl <= cur_sgl;
+                if (cur_fsub) begin hold_a <= opnd(rd_b, cur_sgl, cur_hta); hold_b <= opnd(rd_a, cur_sgl, cur_hra); end
+                else          begin hold_a <= opnd(rd_a, cur_sgl, cur_hra); hold_b <= opnd(rd_b, cur_sgl, cur_hta); end
             end
         end
-        eng_op = eng_start ? nx_op : hold_op;   eng_sgl = eng_start ? nx_sgl : hold_sgl;
-        eng_dsgl = eng_start ? nx_dsgl : hold_dsgl; eng_cond = eng_start ? nx_cond : hold_cond;
-        eng_a = eng_start ? nx_a : hold_a;      eng_b = eng_start ? nx_b : hold_b;
     end
-    always_ff @(posedge clk)
-        if (eng_start) begin
-            hold_op <= nx_op; hold_sgl <= nx_sgl; hold_dsgl <= nx_dsgl; hold_cond <= nx_cond;
-            hold_a <= nx_a; hold_b <= nx_b;
-        end
 
     // register writes (one per cycle: loads never commit while an operation is in flight)
     logic        wr_en, wr_single, wr_half;
@@ -248,15 +256,16 @@ module pa_fpunit
     wire [31:0] wr_rv = wr_single ? wr_data[63:32] : wr_data[31:0];
 
     always_ff @(posedge clk) begin
-        if (wr_l && wr_n >= 5'd4) frl[wr_n] <= wr_lv;
-        if (wr_r && wr_n >= 5'd4) frr[wr_n] <= wr_rv;
+        if (wr_l && wr_n >= 5'd4) begin frl_a[wr_n] <= wr_lv; frl_b[wr_n] <= wr_lv; frl_s[wr_n] <= wr_lv; end
+        if (wr_r && wr_n >= 5'd4) begin frr_a[wr_n] <= wr_rv; frr_b[wr_n] <= wr_rv; frr_s[wr_n] <= wr_rv; end
     end
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             st <= S_IDLE; fpsr <= 32'd0;
             for (int i = 0; i < 7; i++) xr[i] <= 32'd0;
-            cur_insn <= 0; cur_code <= 0; cur_t <= 0; cur_ht <= 0; cur_sdest <= 0; cur_cmp <= 0;
+            cur_insn <= 0; cur_code <= 0; cur_r1 <= 0; cur_r2 <= 0; cur_t <= 0; cur_h1 <= 0; cur_h2 <= 0; cur_ht <= 0;
+            cur_sdest <= 0; cur_cmp <= 0; cur_fma <= 0; cur_dsgl <= 0; cur_op <= F_RESERVED; cur_cond <= 0;
             cur_tm <= 0; cur_ra <= 0; cur_ta <= 0; cur_htm <= 0; cur_hra <= 0; cur_hta <= 0;
             cur_fsub <= 0; cur_cfxt <= 0; cur_sgl <= 0; fma_res1 <= 0; fma_we1 <= 0; fma_unimpl <= 0; fma_flags <= 0;
         end else begin
@@ -275,23 +284,27 @@ module pa_fpunit
             case (st)
                 S_IDLE: if (issue) begin
                     cur_insn <= insn; cur_code <= d_code;
+                    cur_r1 <= d_r1; cur_r2 <= d_r2; cur_h1 <= d_h1; cur_h2 <= d_h2;
+                    cur_op <= d_op; cur_sgl <= d_sgl; cur_dsgl <= d_dsgl; cur_cond <= d_cond;
+                    cur_fma <= d_kind == K_FMA;
                     case (d_kind)
                         K_FID: fpsr[21:11] <= {6'h0D, 5'h01};                   // model 0x0D, revision 1 (ERS s.7.1)
                         K_FTEST: ;                                               // nullification is decided in E
                         K_UNIMPL: begin fpsr[6] <= 1'b1; xr[1] <= {d_code, insn[25:0]}; end
                         K_OP: begin
                             cur_t <= d_t; cur_ht <= d_ht; cur_sdest <= d_sdest; cur_cmp <= d_op == F_CMP;
-                            st <= S_OP;
+                            st <= S_RD;
                         end
                         default: begin                                           // K_FMA
                             cur_tm <= d_tm; cur_ra <= d_ra; cur_ta <= d_ta;
                             cur_htm <= d_htm; cur_hra <= d_hra; cur_hta <= d_hta;
-                            cur_fsub <= d_fsub; cur_cfxt <= d_cfxt; cur_sgl <= d_sgl;
+                            cur_fsub <= d_fsub; cur_cfxt <= d_cfxt;
                             fma_unimpl <= 1'b0; fma_we1 <= 1'b0;
-                            st <= S_FMA_MPY;
+                            st <= S_RD;
                         end
                     endcase
                 end
+                S_RD: st <= cur_fma ? S_FMA_MPY : S_OP;                          // operands captured, start follows
                 S_OP: if (eng_done) begin
                     st <= S_IDLE;
                     if (eng_unimpl) begin fpsr[6] <= 1'b1; xr[1] <= {cur_code, cur_insn[25:0]}; end
@@ -302,10 +315,11 @@ module pa_fpunit
                         end
                     end
                 end
-                S_FMA_MPY: if (eng_done) begin                                   // the add starts this cycle
+                S_FMA_MPY: if (eng_done) begin                                   // then read ra/ta for the add
                     fma_res1 <= eng_result; fma_we1 <= eng_we; fma_unimpl <= eng_unimpl; fma_flags <= eng_flags;
-                    st <= S_FMA_ADD;
+                    st <= S_FMA_RD;
                 end
+                S_FMA_RD: st <= S_FMA_ADD;
                 S_FMA_ADD: if (eng_done) begin
                     if (eng_unimpl || fma_unimpl) begin                          // neither result, no flag
                         fpsr[6] <= 1'b1; xr[1] <= {cur_code, cur_insn[25:0]};

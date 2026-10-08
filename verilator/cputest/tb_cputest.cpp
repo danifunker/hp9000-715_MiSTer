@@ -20,7 +20,7 @@ int main(int argc, char** argv) {
 	FILE* log = logpath ? fopen(logpath, "w") : stdout;
 	Vcputest_top* top = new Vcputest_top;
 	std::string tail;
-	unsigned long long cyc = 0, retired = 0, traps = 0, traced = 0;
+	unsigned long long cyc = 0, retired = 0, traps = 0, traced = 0, fp_stall = 0;
 	top->clk = 0; top->rst_n = 0;
 	for (; cyc < max_cycles; cyc++) {
 		top->rst_n = cyc > 4;
@@ -38,6 +38,7 @@ int main(int argc, char** argv) {
 				break;
 			}
 		}
+		if (top->dbg_fp_stall) fp_stall++;
 		if (top->dbg_retire) {
 			retired++;
 			if (traced < trace) {
@@ -53,8 +54,8 @@ int main(int argc, char** argv) {
 		top->clk = 0; top->eval();
 	}
 	fflush(log);
-	fprintf(stderr, "cputest: %llu cycles, %llu instructions retired, %llu interruptions%s\n",
-	        cyc, retired, traps, cyc >= max_cycles ? " -- CYCLE LIMIT" : "");
+	fprintf(stderr, "cputest: %llu cycles, %llu instructions retired, %llu interruptions, %llu FP stall cycles%s\n",
+	        cyc, retired, traps, fp_stall, cyc >= max_cycles ? " -- CYCLE LIMIT" : "");
 	if (logpath) fclose(log);
 	delete top;
 	return cyc >= max_cycles ? 1 : 0;

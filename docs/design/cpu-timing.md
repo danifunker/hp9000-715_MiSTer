@@ -26,6 +26,7 @@ same device); the paths are what to judge by.
 | 8 | 2026-10-07 | + the operation's tag registered in the TLB at acceptance | `top_pipe` | **63.1 MHz** | -0.23 ns | 11,443 | 14,989 | 291 | 0 | best so far, 0.9 MHz short; section 4.4 |
 | 9 | 2026-10-07 | fit 8's RTL, fitter seed 2 | `top_pipe` | **65.1 MHz** | +0.25 ns | 11,373 | 14,764 | 291 | 0 | **64 MHz met**; section 4.4 |
 | 10 | 2026-10-07 | 1365246 + the FPU (`pa_fpunit` + `pa_fpu`, seed 2) | `top_pipe` | **55.8 MHz** | -2.28 ns | 17,545 | 21,254 | 293 | 4 | 64 MHz **missed**: +6.2k ALMs, the TLB path spread out; section 4.5 |
+| 11 | 2026-10-07 | + fpedge fixes, FR file as MLAB copies, registered operand read (`S_RD`) | `top_pipe` | **57.3 MHz** | -1.82 ns | 14,276 | 17,131 | 291 | 4 | FPU 3.2k ALMs; the TLB -> `wd0` -> ALU chain is back as the worst; section 4.6 |
 
 ## 1. Baseline: the sequential core (fit 1)
 
@@ -393,9 +394,38 @@ Cuts for fit 11, in order:
    seeds 1 and 3 before any RTL change there (fit 8 -> 9 moved 2 MHz on
    the seed alone).
 
+### 4.6 Fit 11: the FPU at 3.2k ALMs, the TLB chain again
+
+Cuts 1 and 2 of 4.5 (plus the five fpedge fixes, commit 360e1d0): **57.3 MHz,
+-1.82 ns; 14,276 ALMs / 17,131 registers** (-3.3k ALMs, -4.1k registers).
+`pa_fpunit` is now 3,223 ALMs / 2,110 registers: 680 / 606 in the wrapper
+(six 32 x 32 MLABs for the FR file, the hold registers, FPSR and exception
+registers, decode) and 2,422 / 1,494 in the engine. The FPU's own worst
+path is -0.47 ns (the operation select `hold_op` into the engine's first
+state), so it is nearly in budget on its own.
+
+The 40 worst paths are **all** the fit-8/9 chain, 16.7 ns: `lk_tag` -> CAM
+`match` -> `sel` -> the payload AND-OR -> `lk_rpn` -> `dc_m_rpn` ->
+`m_cached_c` -> `w_cached` (retimed forward) -> the W write-data select
+`w_wd0_val` -> `wd0` -> E's operand mux -> the ALU. At fit 9 this chain had
++0.25 ns at 11.4k ALMs; at 14.3k the routing is longer. It is the chain the
+fit-9 note said to cut for real margin:
+
+- **Cut (fit 12)**: the write-data select no longer looks at `w_cached`. A
+  load in W takes `w_ld` whenever it is a load (`wst == W_DONE || w_is_load`)
+  instead of only when cached or done: an uncached load in W_RUN is held
+  (`w_hold`) until its data arrives, so nothing consumes `wd0` while it is
+  stale (the GR write and the E/D forwards all advance with `adv`), and the
+  cached-load case is unchanged. The TLB's RPN then reaches only control
+  (`w_hold`, the cache operations) and the D-cache tag compare.
+- Also in fit 12: the engine cuts of 4.5 item 3 (FCNVXF normalised through
+  `S_NORM`'s shifter, one right shifter shared by the alignment and FCNVFX;
+  FCNVXF 4 -> 5 cycles) and the `dbg_fp_stall` output.
+
 ## 5. Open items
 
-- **Fit 11**: the FPU cuts of 4.5; 64 MHz with the FPU is the gate.
+- **Fit 12**: the `w_wd0_val` cut; 64 MHz with the FPU is the gate. If the
+  chain stays, seeds 1 and 3, then the registered-translation idea of 4.2.
 
 - Prediction in F2 instead of D (see 2.1) once the real F2 (tag compare +
   select) exists and its slack is known.

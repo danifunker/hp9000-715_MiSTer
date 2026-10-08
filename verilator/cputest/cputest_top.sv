@@ -19,6 +19,7 @@ module cputest_top #(
     output logic        dbg_trap,
     output logic [5:0]  dbg_trap_vec,
     output logic [31:0] dbg_psw,
+    output logic        dbg_fp_stall,       // pipelined core: D held an FP instruction for the FPU
     output logic [31:0] dbg_gr [32]
 );
     localparam int ROM_WORDS = 32768;        // 256 KB
@@ -50,6 +51,7 @@ module cputest_top #(
             .dbg_iaoq_b(unused_b), .dbg_insn(dbg_insn), .dbg_trap(dbg_trap),
             .dbg_trap_vec(dbg_trap_vec), .dbg_psw(dbg_psw), .dbg_halted(unused_h), .dbg_gr(dbg_gr));
         assign io_burst = 1'b0;
+        assign dbg_fp_stall = 1'b0;
     end else begin : g_pipe
         pa_cpu u_cpu (
             .clk(clk), .rst_n(rst_n), .cfg_tq(16'd1), .cfg_tr(16'd0), .cfg_td(16'd1),
@@ -64,7 +66,7 @@ module cputest_top #(
             .dbg_retire(dbg_retire), .dbg_nullified(dbg_nullified), .dbg_iaoq_f(dbg_iaoq_f),
             .dbg_iaoq_b(unused_b), .dbg_iasq_f(), .dbg_insn(dbg_insn), .dbg_trap(dbg_trap),
             .dbg_trap_vec(dbg_trap_vec), .dbg_gr_we(), .dbg_gr_num0(), .dbg_gr_num1(), .dbg_gr_data0(),
-            .dbg_gr_data1(), .dbg_psw(dbg_psw), .dbg_halted(unused_h), .dbg_gr(dbg_gr));
+            .dbg_gr_data1(), .dbg_psw(dbg_psw), .dbg_halted(unused_h), .dbg_fp_stall(dbg_fp_stall), .dbg_gr(dbg_gr));
     end endgenerate
 
     // cacheable line port: RAM at 0 in 32-byte lines (4 doublewords, critical

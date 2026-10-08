@@ -155,6 +155,7 @@ module pa_core
     output logic [31:0] dbg_gr_data0, dbg_gr_data1,
     output logic [31:0] dbg_psw,
     output logic        dbg_halted,
+    output logic        dbg_fp_stall,   // D held an FP instruction this cycle only because of the FPU (S-012)
     output logic [31:0] dbg_gr [32]
 );
     // ================================================================ architectural state
@@ -305,6 +306,7 @@ module pa_core
                       (m_valid && (m_c.fu == FU_FP || fp_ctl_access(m_c, m_insn))) ||
                       (w_valid && (w_c.fu == FU_FP || fp_ctl_access(w_c, w_insn)));
     wire d_stall = d_valid && (ld_use || ser_pending || (d_is_fp && fp_pending));
+    assign dbg_fp_stall = adv && d_valid && d_is_fp && fp_pending && !ld_use && !ser_pending;
     wire adv_d = adv && !d_stall;              // D -> E this cycle
     assign adv_f2 = adv_d;                     // F2 -> D (also when D is empty)
 
