@@ -3,6 +3,7 @@
 unit benches (verilator/tb_alu.cpp, tb_shift.cpp).
 
 usage: unit_vectors.py alu|shift REFLOG [REFLOG...] -o OUT
+       unit_vectors.py fp REFLOG -o OUT | fpmodel -o OUT | max1 -o OUT | mem REFLOG -o OUT
 
 The mapping from mnemonic+condition to the module's control inputs here is
 a reference decoder for the unit tests only; the CPU's real decoder is
@@ -19,8 +20,11 @@ shift line: r1 r2 t_old imm5 op sign zero_fill use_imm amount len cond_c check
             | exp_result exp_cond                                     (hex)
 max1 line:  a b op sat sa | exp_result                                (hex)
 fp line:    op sgl dsgl rm cond a_hi a_lo b_hi b_lo check | exp_hi exp_lo
-            exp_flags exp_c   (hex; check bit 0 64-bit result, bit 1 upper
-            word only (single result), bit 2 flags V Z O U I, bit 3 compare)
+            exp_flags exp_c exp_unimpl   (hex; check bit 0 64-bit result,
+            bit 1 upper word only (single result), bit 2 flags V Z O U I,
+            bit 3 compare, bit 4 the unimplemented exception)
+            `fp REFLOG` takes QEMU's results (fp suite); `fpmodel` takes
+            model.py's for the fp and fpedge suites' vectors
 mem line:   base index disp use_index scale ea_is_base base_trunc size stbys
             st_src kind base_we | 16 window words before | exp_r5 exp_r3off
             | 16 window words after   (hex; kind 0 load, 1 store, 2 ldcw)
@@ -306,9 +310,48 @@ def fp_lines(groups, suite="fp"):
                 chk |= 8
             else:
                 chk |= 2 if dsgl else 1
-            lines.append("%x %d %d %d %x %08x %08x %08x %08x %x | %08x %08x %x %d # %s" % (
+            lines.append("%x %d %d %d %x %08x %08x %08x %08x %x | %08x %08x %x %d 0 # %s" % (
                 FP_OPS[mn], sgl, dsgl, rm, cond, a >> 32, a & 0xFFFFFFFF, b >> 32, b & 0xFFFFFFFF,
                 chk, row[0], row[1], flags, c, name))
+    return lines
+
+
+def fpmodel_lines(suites=("fp", "fpedge")):
+    """Engine vectors for the fp and fpedge suites with model.py's
+    expectations (ERS s.7.3), including whether the operation is
+    unimplemented. The single-engine-op groups only."""
+    lines = []
+    for suite in suites:
+        with open(os.path.join(HERE, "build", "gen_%s.json" % suite)) as f:
+            gen = json.load(f)
+        for g in gen:
+            name = g["group"]
+            mn = name.split(",")[0].split(".")[0]
+            if mn not in FP_OPS or mn == "xmpyu":
+                continue
+            mn, sgl, dsgl, rm, cond = model.fp_parse_group(name)
+            for vin in g["inputs"]:
+                r = model.fp_operate(mn, sgl, dsgl, vin["a"], vin.get("b", 0), cond or 0, rm << 9)
+                a = vin["a"] << 32 if sgl else vin["a"]
+                b = vin.get("b", 0)
+                b = b << 32 if sgl else b
+                chk = 16
+                eh = el = flags = c = 0
+                if not r.unimpl:
+                    chk |= 4
+                    flags = sum(1 << {"V": 4, "Z": 3, "O": 2, "U": 1, "I": 0}[f] for f in r.flags)
+                    if mn == "fcmp":
+                        chk |= 8
+                        c = r.cmp
+                    elif r.single:
+                        chk |= 2
+                        eh = r.value
+                    else:
+                        chk |= 1
+                        eh, el = r.value >> 32, r.value & 0xFFFFFFFF
+                lines.append("%x %d %d %d %x %08x %08x %08x %08x %x | %08x %08x %x %d %d # %s" % (
+                    FP_OPS[mn], sgl, dsgl, rm, cond or 0, a >> 32, a & 0xFFFFFFFF, b >> 32, b & 0xFFFFFFFF,
+                    chk, eh, el, flags, c, int(r.unimpl), name))
     return lines
 
 
@@ -320,6 +363,12 @@ def main(argv):
         with open(argv[o + 1], "w") as f:
             f.write("\n".join(lines) + "\n")
         print("fp: %d vectors -> %s" % (len(lines), argv[o + 1]))
+        return
+    if len(argv) >= 4 and argv[1] == "fpmodel" and argv[2] == "-o":
+        lines = fpmodel_lines()
+        with open(argv[3], "w") as f:
+            f.write("\n".join(lines) + "\n")
+        print("fpmodel: %d vectors -> %s" % (len(lines), argv[3]))
         return
     if len(argv) >= 5 and argv[1] == "mem" and "-o" in argv:
         o = argv.index("-o")

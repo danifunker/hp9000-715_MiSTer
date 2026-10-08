@@ -706,7 +706,8 @@ def gen_trap(rng):
 # ---------------------------------------------------------------------------
 import struct
 
-FP_WORDS = 4      # target (2 words), status, pad: fstds needs 8-byte alignment
+FP_WORDS = 4      # fp: target (2 words), status, pad: fstds needs 8-byte alignment
+FPEDGE_WORDS = 8  # fpedge: status, fr0R, target (2 words), fr1L (exception register 2), fr1R, 2 pads
 RM_NAMES = ["rn", "rz", "rp", "rm"]
 
 
@@ -727,17 +728,49 @@ def fp_edge_values(sgl):
         return [0x00000000, 0x80000000, 0x7F800000, 0xFF800000,       # +-0, +-inf
                 0x7FC00000, 0x7FA00000, 0x7F800001, 0xFFFFFFFF,       # NaNs, both senses
                 0x00000001, 0x007FFFFF, 0x80400000,                   # denormals
-                0x7F7FFFFF, 0x00800000, 0x3F800000, 0xBF800000]       # max, min normal, +-1
+                0x7F7FFFFF, 0x00800000, 0x3F800000, 0xBF800000,       # max, min normal, +-1
+                0x40000000, 0x3F000000, 0x40400000, 0xBFC00000,       # 2, 0.5, 3, -1.5
+                0x7F000000, 0x00FFFFFF]                               # 2^127, 2^-126 * 1.11..1
     return [0x0, 0x8000000000000000, 0x7FF0000000000000, 0xFFF0000000000000,
             0x7FF8000000000000, 0x7FF4000000000000, 0x7FF0000000000001, 0xFFFFFFFFFFFFFFFF,
             0x0000000000000001, 0x000FFFFFFFFFFFFF, 0x8008000000000000,
-            0x7FEFFFFFFFFFFFFF, 0x0010000000000000, 0x3FF0000000000000, 0xBFF0000000000000]
+            0x7FEFFFFFFFFFFFFF, 0x0010000000000000, 0x3FF0000000000000, 0xBFF0000000000000,
+            0x4000000000000000, 0x3FE0000000000000, 0x4008000000000000, 0xBFF8000000000000,
+            0x7FE0000000000000, 0x001FFFFFFFFFFFFF]
+
+
+def fp_cvt_edge_values(sgl):
+    """Sources for the fpedge conversions: the edge values plus the integer
+    boundaries (2^31, 2^63 and their neighbours), halves for the rounding
+    modes and a value only int64 can hold."""
+    if sgl:
+        return fp_edge_values(True) + [
+            0x4F000000, 0xCF000000, 0x4EFFFFFF, 0xCF000001,           # 2^31, -2^31, 2^31-128, -2^31-256
+            0x5F000000, 0xDF000000, 0x3FC00000, 0x40200000,           # 2^63, -2^63, 1.5, 2.5
+            0xBF000000, 0x3F000000, 0x501502F9,                       # -0.5, 0.5, 1e10
+            0x4B800001]                                               # 2^24 + 2
+    return fp_edge_values(False) + [
+        0x41E0000000000000, 0xC1E0000000000000,                       # 2^31, -2^31
+        0x41DFFFFFFFC00000, 0xC1E0000000200000,                       # 2^31 - 1, -2^31 - 1
+        0x41DFFFFFFFE00000, 0xC1E0000000100000,                       # 2^31 - 0.5, -2^31 - 0.5
+        0x43E0000000000000, 0xC3E0000000000000, 0x43DFFFFFFFFFFFFF,   # 2^63, -2^63, 2^63 - 1024
+        0x3FF8000000000000, 0x4004000000000000, 0xBFE0000000000000,   # 1.5, 2.5, -0.5
+        0x4202A05F20000000, 0x4330000000000001]                       # 1e10, 2^52 + 1
 
 
 class FpGroup:
-    """Builds one group: a data table plus the per-vector code."""
-    def __init__(self, suite, name):
-        self.suite, self.name = suite, name
+    """Builds one group: a data table plus the per-vector code.
+
+    fp stores target (2 words), status, pad. fpedge (edge=True) must survive
+    the PCX-L unimplemented exception (cpu.md 3.5): once FPSR.T is set every
+    FP instruction but FSTD fr0 traps 14, so it stores fr0 first (status
+    with T and fr0R; the store clears T), then the target, then fr1
+    (exception register 2 = {code, insn bits 6:31} when the operation was
+    unimplemented, else the {status, 0} doubleword loaded into it before the
+    operation). model.py predict_fpedge gives the expectations; the vector
+    JSON carries the instruction word(s) under "insn" for them."""
+    def __init__(self, suite, name, edge=False):
+        self.suite, self.name, self.edge = suite, name, edge
         self.body, self.data, self.ins = [], [], []
         self.label = "fpt_%s_%d" % (suite.name, len(suite.groups))
 
@@ -752,14 +785,28 @@ class FpGroup:
         self.body += ["\tldil\tL%%%s+%d, %%r3" % (self.label, 32 * k),
                       "\tldo\tR%%%s+%d(%%r3), %%r3" % (self.label, 32 * k),
                       "\tldo\t16(%r3), %r4",
-                      "\tfldws\t0(%r3), %fr0",             # status: RM only
+                      "\tfldds\t0(%r3), %fr0" if self.edge else   # status: RM only (edge: fr0R := 0 too)
+                      "\tfldws\t0(%r3), %fr0",
                       "\tfldds\t8(%r3), %fr4",
                       "\tfldds\t0(%r4), %fr5",
                       "\tfldds\t8(%r4), %fr6",
                       "\tfldds\t8(%r4), %fr7"]
+        if self.edge:
+            self.body += ["\tfldds\t0(%r3), %fr1"]        # exception register 2 := {status, 0}
         if sgl_load:                                       # singles live in the left halves
             self.body += ["\tfldws\t8(%r3), %fr4L", "\tfldws\t0(%r4), %fr5L"]
-        self.body += ["\tldi\t0, %r6"] + op_lines + ["\tldi\t1, %r6",
+        if self.edge:
+            self.body += op_lines + [
+                      "\tfstds\t%fr0, 0(%r9)",             # first: status with T (clears T), fr0R
+                      "\tfstds\t%fr6, 8(%r9)",
+                      "\tldo\t16(%r9), %r9",               # (5-bit displacements)
+                      "\tfstds\t%fr1, 0(%r9)",
+                      "\tstw\t%r0, 8(%r9)",
+                      "\tstw\t%r0, 12(%r9)",
+                      "\tldo\t16(%r9), %r9"]
+            vin = dict(vin, insn=encode_level11(op_lines))
+        else:
+            self.body += ["\tldi\t0, %r6"] + op_lines + ["\tldi\t1, %r6",
                       "\tfstds\t%fr6, 0(%r9)",
                       "\tfstws\t%fr0, 8(%r9)",
                       "\tstw\t%r0, 12(%r9)",
@@ -767,7 +814,8 @@ class FpGroup:
         self.ins.append(vin)
 
     def finish(self):
-        self.suite.add(self.name, len(self.ins), FP_WORDS, self.body, self.ins)
+        self.suite.add(self.name, len(self.ins), FPEDGE_WORDS if self.edge else FP_WORDS,
+                       self.body, self.ins)
         self.suite.prologue += ["\t.section .rodata", "\t.align\t8", "%s:" % self.label] + \
             self.data + ["\t.text"]
 
@@ -796,7 +844,7 @@ def gen_fp_common(rng, name, edge):
         for fmt in ("sgl", "dbl"):
             rms = range(4) if op in ("fadd", "fsub", "fmpy", "fdiv", "fsqrt", "frnd") else [0]
             for rm in rms:
-                g = FpGroup(suite, "%s,%s.%s" % (op, fmt, RM_NAMES[rm]))
+                g = FpGroup(suite, "%s,%s.%s" % (op, fmt, RM_NAMES[rm]), edge)
                 for v in range(N):
                     a, b = operand(fmt == "sgl"), operand(fmt == "sgl")
                     if op == "fsqrt" and not edge:
@@ -820,7 +868,7 @@ def gen_fp_common(rng, name, edge):
              ("fcnvfxt", "sgl", "dbl"), ("fcnvfxt", "dbl", "dbl")]
     for op, sf, df in convs:
         for rm in (range(4) if op != "fcnvfxt" else [0]):
-            g = FpGroup(suite, "%s,%s,%s.%s" % (op, sf, df, RM_NAMES[rm]))
+            g = FpGroup(suite, "%s,%s,%s.%s" % (op, sf, df, RM_NAMES[rm]), edge)
             for v in range(N):
                 if op == "fcnvxf":         # integer source
                     a = rng.choice([0, 1, -1, 0x7FFFFFFF, 0x80000000, rng.getrandbits(32),
@@ -830,7 +878,7 @@ def gen_fp_common(rng, name, edge):
                                         (rng.randint(-10**12, 10**12)) & 0xFFFFFFFFFFFFFFFF])
                     a &= 0xFFFFFFFF if sf == "sgl" else 0xFFFFFFFFFFFFFFFF
                 elif edge:
-                    a = rng.choice(fp_edge_values(sf == "sgl"))
+                    a = rng.choice(fp_cvt_edge_values(sf == "sgl"))
                 else:                      # keep fixed-point results in range
                     x = rng.choice([-1, 1]) * rng.uniform(0, 2.0 ** rng.randint(0, 30))
                     a = f2w(x) if sf == "sgl" else d2w(x)
@@ -846,7 +894,7 @@ def gen_fp_common(rng, name, edge):
              "!<", "!?=", "<>", "!=", "!=t", "!?", "<=>", "true?", "true"]
     probe = [((c, f), "\tfcmp,%s,%s\t%%fr4, %%fr5" % (f, c)) for c in conds for f in ("sgl", "dbl")]
     for (c, fmt), _ in filter_valid(probe):
-        g = FpGroup(suite, "fcmp,%s,%s" % (fmt, c))
+        g = FpGroup(suite, "fcmp,%s,%s" % (fmt, c), edge)
         for v in range(6):
             a = operand(fmt == "sgl")
             b = a if v == 0 else operand(fmt == "sgl")
@@ -893,12 +941,17 @@ def gen_fpedge(rng):
 # (translate.c:3099), so the reference for this suite is tests/cpu/model.py.
 # Stored per vector: result, nullify flag, carry map (as the alu suites).
 # ---------------------------------------------------------------------------
-def encode_level20(lines):
+def encode_level11(lines):
+    """Assemble lines (PA 1.1) and return their instruction words."""
+    return encode_level20(lines, level="1.1")
+
+
+def encode_level20(lines, level="2.0"):
     """Assemble lines at .level 2.0 and return their instruction words."""
     with tempfile.TemporaryDirectory() as d:
         src, obj, binf = (os.path.join(d, n) for n in ("t.s", "t.o", "t.bin"))
         with open(src, "w") as f:
-            f.write("\t.level 2.0\n\t.text\n" + "\n".join(lines) + "\n")
+            f.write("\t.level %s\n\t.text\n" % level + "\n".join(lines) + "\n")
         subprocess.run([AS, "-o", obj, src], check=True)
         subprocess.run([AS.replace("-as", "-objcopy"), "-O", "binary", "-j", ".text", obj, binf],
                        check=True)

@@ -455,7 +455,11 @@ clears T and does not trap. With traps disabled, IEEE exceptions set flags and
 return the default results (ACD table 6-20). ROM test 0x44082 checks exactly
 this (the store after the excepting op must trap and then store 0, BOOT
 s.4.4). QEMU traps immediately (Q fpu_helper.c:134), so it cannot be the
-reference here.
+reference here; `tests/cpu/model.py` (`fp_operate`) is, and the `fpedge`
+suite checks it. The trap check runs in E on the live FPSR.T, so the core
+holds an FP instruction in D while an FP load or store of fr0-fr3 is in
+E/M/W (FSTD fr0 clears T, FLD fr0 rewrites the status at W commit) -- the
+real chip's 4-cycle interlock on those (ERS s.7.5.6).
 
 ---
 ## 4. Instruction set
@@ -1229,8 +1233,8 @@ rom.dis f00158e0-f00158fc) -- a patched ROM, so only if needed (Q1).
 
 | Item | Design | Source |
 |---|---|---|
-| Registers | fr4-fr31 as two 32-bit MLAB halves (L, R), 3 read ports (2 for operations, 1 for FP stores) and 2 write ports (FPU result, FP load) via banks + LVT; fr0-fr3 (status + 7 exception registers) in flip-flops | ACD p.6-5 |
-| Issue | one operation at a time (multi-cycle, not pipelined). **Implemented (2026-10-07, `pa_fpunit`, STUBS S-012):** the operation issues at W commit with its operands read from the FR file in W; any FP instruction waits in D while an FP operation is in E/M/W or in flight, so no scoreboard is needed; the integer pipeline continues. Planned refinement: issue from E with a per-register busy bit; FLDD/FSTD of fr0-fr3 and COPR wait for the FPU to drain; FTEST waits for a pending FCMP | ACD p.6-27 |
+| Registers | fr4-fr31 as two 32-bit MLAB halves (L, R), 3 read ports (2 for operations, 1 for FP stores: one MLAB copy per port, every write to all three) and 1 write port (FPU result or FP load: they never coincide while one operation at a time, S-012; the 2-port banks + LVT scheme comes with the overlap); fr0-fr3 (status + 7 exception registers) in flip-flops | ACD p.6-5 |
+| Issue | one operation at a time (multi-cycle, not pipelined). **Implemented (2026-10-07, `pa_fpunit`, STUBS S-012):** the operation issues at W commit with its operands read from the FR file in W; any FP instruction waits in D while an FP operation is in E/M/W or in flight (and while an FP load/store of fr0-fr3 is in E/M/W, sec. 3.5), so no scoreboard is needed; the integer pipeline continues. Planned refinement: issue from E with a per-register busy bit; FLDD/FSTD of fr0-fr3 and COPR wait for the FPU to drain; FTEST waits for a pending FCMP | ACD p.6-27 |
 | Unpack/classify | zero, normal, denormal, inf, qNaN, sNaN per operand; **NaN or denormal (D = 0) input -> unimplemented exception immediately** (no compute) | ERS s.7.3 |
 | Add/sub/compare/convert | 55-bit alignment shifter, adder, leading-zero count, normaliser, IEEE rounding (4 modes, FPSR.RM); FCNVxx through the same shifters | |
 | Multiply | 53x53 from **four 27x27 DSPs**, 2 cycles + normalise/round; XMPYU (32x32 unsigned) on the same array | ERS s.7.5.2: XMPYU uses the MPY unit |
@@ -1239,7 +1243,7 @@ rom.dis f00158e0-f00158fc) -- a patched ROM, so only if needed (Q1).
 | Unimplemented exception | destination and flags untouched, fr1L <- {code, insn{6:31}}, FPSR.T <- 1 | sec. 3.5 |
 | Compare | 5-bit FCMP condition; C -> FPSR{5}, queue FPSR{10:20} shifted (ERS s.7.4.3); sNaN input or qNaN with a trapping condition -> unimplemented | |
 | FMPYADD/FMPYSUB/FMPYCFXT | multiply then add (or FCNVFXT of ta) as two sequenced steps; if either would trap, neither result is written | ERS s.7.3, s.7.4.2 |
-| Latency (ours) | FADD/FSUB/FCMP/FCNV/FCPY/FABS 3, FMPY sgl 3 / dbl 4, XMPYU 3, FMPYADD ~7, FDIV/FSQRT 28/57 | P-016 |
+| Latency (ours) | measured 2026-10-07 (`make -C verilator tb_fpu`, `tb_fpu ... -v`), engine start -> done: FCPY/FABS/FCMP 2, FCNVxx 4, FADD/FSUB/FMPY/XMPYU 6, FDIV 60, FSQRT 59 (singles take the full double-length recurrence), FMPYADD/SUB/CFXT = multiply + add + 1; plus 3 cycles in `pa_fpunit` (the operand read cycle, the registered start, done -> idle) during which the next FP instruction waits in D (S-012) | P-016 |
 
 ---
 ## 7. Verification plan hooks

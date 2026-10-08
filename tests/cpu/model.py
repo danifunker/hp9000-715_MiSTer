@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Independent reference model of the PA-RISC 1.1 integer instructions that
-the pacputest alu1, alu2 and shift suites exercise, and of the PA-7100LC's
-MAX-1 halfword instructions (max1 suite) -- tests/cpu/README.md.
+the pacputest alu1, alu2 and shift suites exercise, of the PA-7100LC's
+MAX-1 halfword instructions (max1 suite) and of its floating-point unit on
+the edge cases (fpedge suite) -- tests/cpu/README.md.
 
 Source: "PA-RISC 1.1 Architecture and Instruction Set Reference Manual",
 3rd edition (docs/reference/txt/Pa11_acd.txt), cited below as [ACD p.N]
@@ -671,7 +672,520 @@ SHIFT = {"shd", "vshd", "extru", "extrs", "vextru", "vextrs", "zdep", "dep",
 LONGIMM = {"ldil", "addil", "ldo"}
 MAX1 = {"hadd", "hsub", "havg", "hshladd", "hshradd"}
 
-SUITES = ("alu1", "alu2", "shift", "max1", "cache", "tlbx")
+# ---------------------------------------------------------------------------
+# fpedge: the PA-7100LC floating-point unit on the edge cases
+#
+# Sources: [ACD ch.6] for the formats, the IEEE default results (Table 6-20
+# p.6-29), the compare conditions (Table 6-13 p.6-17), the exception codes
+# (Table 6-18 p.6-25) and tininess "detected on a nonzero result ... rounded
+# as if the exponent range were unbounded" (p.6-34); [PCXL ERS s.7.2-7.4]
+# for which cases the PCX-L hands to software: it raises only the
+# unimplemented exception, as a delayed trap (FPSR.T set, exception
+# register 2 = {code, instruction bits 6:31}, destination and flags
+# untouched), and the lists of s.7.3 say when. Everything else returns the
+# IEEE default result with the flag. Arithmetic is exact (fractions.Fraction)
+# and rounded once to the destination format, so singles are not rounded
+# twice the way Python floats would.
+#
+# The fpedge vector (gen_tests.py FpGroup, edge): FPSR := {status, 0}
+# (status = RM << 9: no enables, D = 0, no flags), fr1 := {status, 0},
+# fr4 := a, fr5 := b, fr6 := sentinel, then the operation, then
+#     fstds fr0 -> words 0,1   (status with T; the store clears T)
+#     fstds fr6 -> words 2,3   (the result; a single result lands in word 2)
+#     fstds fr1 -> words 4,5   (exception register 2 after an unimplemented
+#                               exception, else the {status, 0} loaded)
+#     0, 0      -> words 6,7
+# fcmp groups run "fcmp ; ftest ; fcpy,dbl fr4,fr6": with T set the ftest
+# and the fcpy each take trap 14 (the handler skips them), so an
+# unimplemented compare leaves fr6 the sentinel and costs two traps.
+# ---------------------------------------------------------------------------
+
+from fractions import Fraction
+
+M64 = 0xFFFFFFFFFFFFFFFF
+FP_SENTINEL = 0x5A5A5A5A5A5A5A5A
+# FPSR bits, Verilog numbering (PA bit i = Verilog bit 31 - i)
+FPSR_V, FPSR_Z, FPSR_O, FPSR_U, FPSR_I = 1 << 31, 1 << 30, 1 << 29, 1 << 28, 1 << 27
+FPSR_C, FPSR_T, FPSR_D = 1 << 26, 1 << 6, 1 << 5
+FPSR_FLAGS = {"V": FPSR_V, "Z": FPSR_Z, "O": FPSR_O, "U": FPSR_U, "I": FPSR_I}
+# exception register 2 codes for the unimplemented exception [ACD Table 6-18]
+FP_UNIMPL_CODE = {0x0C: 0b001001, 0x0E: 0b001011, 0x06: 0b000011, 0x26: 0b100011}
+# format: precision p, Emax, Emin, exponent bits, fraction bits
+FP_FMT = {True: (24, 127, -126, 8, 23), False: (53, 1023, -1022, 11, 52)}
+
+
+class FpNum:
+    """One operand: sign, class ('zero', 'denorm', 'norm', 'inf', 'qnan',
+    'snan') and the exact value (Fraction) of a finite one."""
+
+    def __init__(self, s, c, v=None):
+        self.s, self.c, self.v = s, c, v
+
+    def __repr__(self):
+        return "FpNum(%s%s%s)" % ("-" if self.s else "+", self.c,
+                                  "" if self.v is None else " %s" % self.v)
+
+    @property
+    def nan(self):
+        return self.c in ("qnan", "snan")
+
+
+def fp_unpack(w, sgl):
+    """Classify an operand word (the single in bits 63:32 of a doubleword is
+    passed as its 32-bit word). PA-RISC marks a signalling NaN with the
+    fraction MSB set; the default quiet NaN is 0x7FF4... / 0x7FA0...
+    [ACD p.6-8, ERS s.7.3]."""
+    p, emax, emin, eb, fb = FP_FMT[sgl]
+    s = (w >> (eb + fb)) & 1
+    e = (w >> fb) & ((1 << eb) - 1)
+    f = w & ((1 << fb) - 1)
+    if e == (1 << eb) - 1:
+        if f == 0:
+            return FpNum(s, "inf")
+        return FpNum(s, "snan" if f >> (fb - 1) else "qnan")
+    if e == 0:
+        if f == 0:
+            return FpNum(s, "zero", Fraction(0))
+        return FpNum(s, "denorm", Fraction(f, 1 << fb) * Fraction(2) ** emin)
+    return FpNum(s, "norm", Fraction((1 << fb) | f, 1 << fb) * Fraction(2) ** (e - emax))
+
+
+def fp_pack_special(s, kind, sgl):
+    """'inf', 'max' (largest finite), 'zero' or 'qnan' as a format word."""
+    p, emax, emin, eb, fb = FP_FMT[sgl]
+    if kind == "inf":
+        return (s << (eb + fb)) | (((1 << eb) - 1) << fb)
+    if kind == "max":
+        return (s << (eb + fb)) | (((1 << eb) - 2) << fb) | ((1 << fb) - 1)
+    if kind == "zero":
+        return s << (eb + fb)
+    if kind == "qnan":
+        return (((1 << eb) - 1) << fb) | (1 << (fb - 2))
+    raise ValueError(kind)
+
+
+def _floor_log2(x):
+    """floor(log2(x)) for a positive Fraction, exactly."""
+    n, d = x.numerator, x.denominator
+    e = n.bit_length() - d.bit_length()
+    # 2^e <= x < 2^(e+1) ?
+    if (n << max(0, -e)) < (d << max(0, e)):
+        e -= 1
+    return e
+
+
+def fp_round(x, sticky, sgl, rm, sign):
+    """Round the positive magnitude x (Fraction; `sticky` says the true
+    value is a hair above x, for an irrational square root) to the format.
+    Returns (n, e, inexact): the p-bit integer significand n (leading one at
+    bit p-1), the exponent e (value = n * 2^(e-p+1)) and whether anything
+    was lost. The exponent is unbounded: the caller checks overflow and
+    tininess [ACD p.6-34]. rm: 0 nearest even, 1 zero, 2 +inf, 3 -inf."""
+    p = FP_FMT[sgl][0]
+    e = _floor_log2(x)
+    q = x * Fraction(2) ** (p - 1 - e)
+    n = q.numerator // q.denominator
+    rem = q - n
+    half = Fraction(1, 2)
+    inexact = rem != 0 or sticky
+    if rm == 0:
+        up = rem > half or (rem == half and (sticky or (n & 1)))
+    elif rm == 1:
+        up = False
+    elif rm == 2:
+        up = inexact and not sign
+    else:
+        up = inexact and bool(sign)
+    if up:
+        n += 1
+        if n == 1 << p:
+            n >>= 1
+            e += 1
+    return n, e, inexact
+
+
+class FpResult:
+    """What one operation does: `unimpl` (the delayed trap; nothing else
+    changes), or `value` (a format word, or None when the destination is
+    left alone), `flags` (set of 'V','Z','O','U','I'), `cmp` (FCMP's C)."""
+
+    def __init__(self, value=None, flags=(), unimpl=False, cmp=None, single=False):
+        self.value, self.flags, self.unimpl, self.cmp, self.single = \
+            value, set(flags), unimpl, cmp, single
+
+
+UNIMPL = FpResult(unimpl=True)
+
+
+def fp_finish(sign, x, sticky, sgl, rm, en, dmode, extra_flags=()):
+    """A finite nonzero exact result x (magnitude) through rounding and the
+    PCX-L exception rules [ERS s.7.3-7.4.1, ACD Table 6-20]."""
+    p, emax, emin, eb, fb = FP_FMT[sgl]
+    n, e, inexact = fp_round(x, sticky, sgl, rm, sign)
+    flags = set(extra_flags)
+    if e > emax:                                    # overflow
+        if "O" in en:
+            return UNIMPL
+        if rm == 0:
+            to_inf = True
+        elif rm == 1:
+            to_inf = False
+        elif rm == 2:
+            to_inf = not sign
+        else:
+            to_inf = bool(sign)
+        flags |= {"O", "I"}
+        return FpResult(fp_pack_special(sign, "inf" if to_inf else "max", sgl), flags, single=sgl)
+    if e < emin:                                    # tiny
+        if not dmode:
+            return UNIMPL                           # software makes the denormal
+        if "I" in en:
+            return UNIMPL                           # flushed to zero, inexact enabled
+        flags |= {"I"}
+        return FpResult(fp_pack_special(sign, "zero", sgl), flags, single=sgl)
+    if inexact:
+        if "I" in en:
+            return UNIMPL
+        flags |= {"I"}
+    word = (sign << (eb + fb)) | ((e + emax) << fb) | (n & ((1 << fb) - 1))
+    return FpResult(word, flags, single=sgl)
+
+
+def fp_exact(sign, x, sgl, rm, en, dmode):
+    """An exact rational result (possibly zero) to the format."""
+    if x == 0:
+        return FpResult(fp_pack_special(sign, "zero", sgl), single=sgl)
+    return fp_finish(sign, x, False, sgl, rm, en, dmode)
+
+
+def fp_invalid(sgl, en):
+    """IEEE invalid operation: unimplemented if V is enabled, else the
+    default quiet NaN with V [ERS s.7.3.3, ACD Table 6-20]."""
+    if "V" in en:
+        return UNIMPL
+    return FpResult(fp_pack_special(0, "qnan", sgl), {"V"}, single=sgl)
+
+
+def fp_status_fields(status):
+    """(rm, enables set, D) from an FPSR word."""
+    rm = (status >> 9) & 3
+    en = {f for f, bit in zip("VZOUI", (4, 3, 2, 1, 0)) if (status >> bit) & 1}
+    return rm, en, bool(status & FPSR_D)
+
+
+def fp_operate(mn, sgl, dsgl, a, b, cond, status):
+    """One PCX-L floating-point operation [ERS s.7.3]. a, b: the operand
+    words of the source format (a 32-bit word for singles); cond: FCMP's
+    5-bit condition; status: the FPSR before. Returns an FpResult."""
+    rm, en, dmode = fp_status_fields(status)
+    if mn == "frnd":
+        return UNIMPL                                   # emulated [ERS s.7.2.2]
+    if mn == "fcpy":
+        return FpResult(a, single=sgl)                  # bit copies, denormals untouched [s.7.4.1]
+    if mn == "fabs":
+        return FpResult(a & ((1 << (32 if sgl else 64)) - 1) >> 1, single=sgl)
+    if mn == "fcnvxf":
+        bits = 32 if sgl else 64
+        v = a - (1 << bits) if a >> (bits - 1) else a
+        return fp_exact(int(v < 0), Fraction(abs(v)), dsgl, rm, en, dmode)
+
+    A = fp_unpack(a, sgl)
+    B = fp_unpack(b, sgl) if mn in ("fadd", "fsub", "fmpy", "fdiv", "fcmp") else None
+    if mn == "fsub":
+        B.s ^= 1                                        # FSUB = FADD of the negated b
+    if dmode:                                           # hardware underflow mode: denormals are signed zeroes
+        for n in (A, B):
+            if n is not None and n.c == "denorm":
+                n.c, n.v = "zero", Fraction(0)
+
+    if mn == "fcmp":
+        # [ACD Table 6-13]: cond bits (PA 27:31) = {>, <, =, unordered, trap on unordered}
+        if A.c == "snan" or B.c == "snan":
+            return UNIMPL
+        if (A.nan or B.nan) and cond & 1:
+            return UNIMPL
+        if A.nan or B.nan:
+            rel = "un"
+        else:
+            # infinities compare by sign; zeroes of either sign are equal
+            def key(n):
+                mag = float("inf") if n.c == "inf" else n.v
+                return -mag if n.s else mag
+            va, vb = key(A), key(B)
+            rel = "eq" if va == vb else ("lt" if va < vb else "gt")
+        c = {"gt": 16, "lt": 8, "eq": 4, "un": 2}[rel] & cond
+        return FpResult(cmp=int(c != 0))
+
+    if A.nan or (B is not None and B.nan):
+        return UNIMPL                                   # every operation: input NaN
+
+    if mn in ("fadd", "fsub"):
+        if (A.c == "denorm" and B.c != "inf") or (B.c == "denorm" and A.c != "inf"):
+            return UNIMPL                               # input denorm (!D) unless the other is inf
+        if A.c == "inf" and B.c == "inf":
+            if A.s != B.s:
+                return fp_invalid(sgl, en)              # inf - inf
+            return FpResult(fp_pack_special(A.s, "inf", sgl), single=sgl)
+        if A.c == "inf":
+            return FpResult(fp_pack_special(A.s, "inf", sgl), single=sgl)
+        if B.c == "inf":
+            return FpResult(fp_pack_special(B.s, "inf", sgl), single=sgl)
+        va = -A.v if A.s else A.v
+        vb = -B.v if B.s else B.v
+        x = va + vb
+        if x == 0:
+            # exact zero: both operands zero of the same sign keep it, else
+            # +0, or -0 in round-to-minus-infinity [ACD p.6-13 IEEE 6.3]
+            if A.c == "zero" and B.c == "zero" and A.s == B.s:
+                s = A.s
+            else:
+                s = int(rm == 3)
+            return FpResult(fp_pack_special(s, "zero", sgl), single=sgl)
+        return fp_finish(int(x < 0), abs(x), False, sgl, rm, en, dmode)
+
+    if mn == "fmpy":
+        s = A.s ^ B.s
+        if (A.c == "denorm" and B.c not in ("zero", "inf")) or \
+           (B.c == "denorm" and A.c not in ("zero", "inf")):
+            return UNIMPL                               # input denorm (!D) unless the other is zero or inf
+        if (A.c == "inf" and B.c == "zero") or (A.c == "zero" and B.c == "inf"):
+            return fp_invalid(sgl, en)
+        if A.c == "inf" or B.c == "inf":
+            return FpResult(fp_pack_special(s, "inf", sgl), single=sgl)
+        if A.c == "zero" or B.c == "zero":
+            return FpResult(fp_pack_special(s, "zero", sgl), single=sgl)
+        return fp_finish(s, A.v * B.v, False, sgl, rm, en, dmode)
+
+    if mn == "fdiv":
+        s = A.s ^ B.s
+        # the (!D) denorm cases the ERS lists: denorm/denorm, denorm/norm,
+        # norm/denorm are unimplemented; denorm/zero is a division by zero;
+        # the trivial ones (zero/denorm, inf/denorm, denorm/inf) are not
+        # listed and so complete with the IEEE result (STUBS S-013)
+        if (A.c == "denorm" and B.c in ("denorm", "norm")) or (B.c == "denorm" and A.c == "norm"):
+            return UNIMPL
+        if (A.c == "inf" and B.c == "inf") or (A.c == "zero" and B.c == "zero"):
+            return fp_invalid(sgl, en)
+        if B.c == "zero":                               # x / 0, x finite nonzero
+            if "Z" in en:
+                return UNIMPL
+            return FpResult(fp_pack_special(s, "inf", sgl), {"Z"}, single=sgl)
+        if A.c == "inf":
+            return FpResult(fp_pack_special(s, "inf", sgl), single=sgl)
+        if B.c == "inf" or A.c == "zero":
+            return FpResult(fp_pack_special(s, "zero", sgl), single=sgl)
+        return fp_finish(s, A.v / B.v, False, sgl, rm, en, dmode)
+
+    if mn == "fsqrt":
+        if A.c == "zero":
+            return FpResult(fp_pack_special(A.s, "zero", sgl), single=sgl)
+        if A.s:                                         # negative norm, inf or denorm (!D): invalid
+            return fp_invalid(sgl, en)
+        if A.c == "denorm":
+            return UNIMPL                               # positive denorm (!D)
+        if A.c == "inf":
+            return FpResult(fp_pack_special(0, "inf", sgl), single=sgl)
+        # sqrt(n/d) = sqrt(n*d)/d: an integer root with 2p+8 significant bits,
+        # the remainder as the sticky bit
+        n, d = A.v.numerator, A.v.denominator
+        k = max(0, (2 * FP_FMT[sgl][0] + 8) - (n * d).bit_length() // 2)
+        big = n * d << (2 * k)
+        r = _isqrt(big)
+        sticky = r * r != big
+        return fp_finish(0, Fraction(r, d << k), sticky, sgl, rm, en, dmode)
+
+    if mn == "fcnvff":
+        if A.c == "denorm":
+            return UNIMPL
+        if A.c == "inf":
+            return FpResult(fp_pack_special(A.s, "inf", dsgl), single=dsgl)
+        return fp_exact(A.s, A.v, dsgl, rm, en, dmode)
+
+    if mn in ("fcnvfx", "fcnvfxt"):
+        if A.c in ("inf", "denorm"):
+            return UNIMPL
+        if A.c == "zero":
+            return FpResult(0, single=dsgl)
+        q = A.v
+        n = q.numerator // q.denominator
+        rem = q - n
+        if mn == "fcnvfxt" or rm == 1:
+            up = False
+        elif rm == 0:
+            up = rem > Fraction(1, 2) or (rem == Fraction(1, 2) and (n & 1))
+        elif rm == 2:
+            up = rem != 0 and not A.s
+        else:
+            up = rem != 0 and bool(A.s)
+        n += int(up)
+        v = -n if A.s else n
+        bits = 32 if dsgl else 64
+        if not (-(1 << (bits - 1)) <= v <= (1 << (bits - 1)) - 1):
+            return UNIMPL                               # overflow: always unimplemented
+        if dsgl and not sgl and v == -(1 << 31):
+            return UNIMPL                               # [ERS s.7.3 **]: dbl -> sgl of the most negative int
+        inexact = rem != 0
+        if inexact and "I" in en:
+            return UNIMPL
+        return FpResult(v & ((1 << bits) - 1), {"I"} if inexact else (), single=dsgl)
+
+    raise KeyError("fp model does not know %r" % mn)
+
+
+def _isqrt(n):
+    try:
+        from math import isqrt
+        return isqrt(n)
+    except ImportError:                                 # Python < 3.8
+        x = 1 << ((n.bit_length() + 1) // 2)
+        while True:
+            y = (x + n // x) // 2
+            if y >= x:
+                return x
+            x = y
+
+
+def fp_parse_group(name):
+    """'fadd,sgl.rn' -> ('fadd', True, True, 0, None); 'fcnvfx,dbl,sgl.rz'
+    -> ('fcnvfx', False, True, 1, None); 'fcmp,sgl,!<=>' -> ('fcmp', True,
+    True, 0, 3)."""
+    base, _, rmn = name.partition(".")
+    parts = base.split(",")
+    mn = parts[0]
+    rm = {"rn": 0, "rz": 1, "rp": 2, "rm": 3}.get(rmn, 0)
+    cond = None
+    if mn == "fcmp":
+        sgl = parts[1] == "sgl"
+        dsgl = sgl
+        cond = FP_CONDS.index(",".join(parts[2:]))
+    elif mn.startswith("fcnv"):
+        sgl, dsgl = parts[1] == "sgl", parts[2] == "sgl"
+    else:
+        sgl = parts[1] == "sgl"
+        dsgl = sgl
+    return mn, sgl, dsgl, rm, cond
+
+
+FP_CONDS = ["false?", "false", "?", "!<=>", "=", "=t", "?=", "!<>", "!?>=", "<", "?<",
+            "!>=", "!?>", "<=", "?<=", "!>", "!?<=", ">", "?>", "!<=", "!?<", ">=", "?>=",
+            "!<", "!?=", "<>", "!=", "!=t", "!?", "<=>", "true?", "true"]   # [ACD Table 6-13], by code
+
+
+def fp_vector_outcome(group, v):
+    """(FpResult, status before) of one fpedge vector."""
+    mn, sgl, dsgl, rm, cond = fp_parse_group(group)
+    status = rm << 9
+    a, b = v["a"], v.get("b", 0)
+    return fp_operate(mn, sgl, dsgl, a, b, cond, status), status, mn, sgl, dsgl
+
+
+def predict_fpedge(group, v):
+    """The eight words of one fpedge vector (see the section comment) and
+    the interruptions it takes."""
+    r, status, mn, sgl, dsgl = fp_vector_outcome(group, v)
+    insn = v["insn"][0]
+    notes = []
+    traps = 0
+    fr6 = FP_SENTINEL
+    fr1l = status
+    st = status
+    if r.unimpl:
+        st |= FPSR_T
+        code = FP_UNIMPL_CODE[insn >> 26]
+        fr1l = (code << 26) | (insn & 0x03FFFFFF)
+        notes.append("unimplemented exception: T set, fr1L = {%s, insn}, destination untouched"
+                     % format(code, "06b"))
+        if mn == "fcmp":
+            traps = 2                                   # the ftest and the fcpy take trap 14
+            notes.append("ftest and fcpy trap 14 (T set): fr6 stays the sentinel")
+    else:
+        for f in r.flags:
+            st |= FPSR_FLAGS[f]
+        if mn == "fcmp":
+            st |= FPSR_C if r.cmp else 0                # the queue was empty: only C [ERS s.7.4.3]
+            if not r.cmp:
+                fr6 = v["a"] if not sgl else (v["a"] << 32)   # fcpy fr4 -> fr6 ran
+            notes.append("C = %d; fcpy %s" % (r.cmp, "nullified" if r.cmp else "executed"))
+        elif r.value is not None:
+            if r.single:
+                fr6 = (r.value << 32) | (FP_SENTINEL & M32)   # fr6L written, fr6R kept
+            else:
+                fr6 = r.value
+        if r.flags:
+            notes.append("flags " + "".join(sorted(r.flags)))
+    words = [st, 0, fr6 >> 32, fr6 & M32, fr1l, 0, 0, 0]
+    p = Prediction(words, notes)
+    p.traps = traps
+    return p
+
+
+def fp_selftest():
+    rn = 0
+    # [ACD p.6-13] +0 + -0 = +0 except toward -inf
+    assert fp_operate("fadd", False, False, 0, 1 << 63, 0, 0).value == 0
+    assert fp_operate("fadd", False, False, 0, 1 << 63, 0, 3 << 9).value == 1 << 63
+    # inf - inf: invalid, default NaN
+    r = fp_operate("fsub", False, False, 0x7FF0000000000000, 0x7FF0000000000000, 0, 0)
+    assert r.value == 0x7FF4000000000000 and r.flags == {"V"}
+    # 1/0: division by zero -> inf with Z
+    r = fp_operate("fdiv", True, True, 0x3F800000, 0x80000000, 0, 0)
+    assert r.value == 0xFF800000 and r.flags == {"Z"}
+    # max + max: overflow -> inf (rn), max (rz), O and I
+    r = fp_operate("fadd", True, True, 0x7F7FFFFF, 0x7F7FFFFF, 0, 0)
+    assert r.value == 0x7F800000 and r.flags == {"O", "I"}
+    r = fp_operate("fadd", True, True, 0x7F7FFFFF, 0x7F7FFFFF, 0, 1 << 9)
+    assert r.value == 0x7F7FFFFF and r.flags == {"O", "I"}
+    # 1/3 single: inexact, 0x3EAAAAAB (rn), 0x3EAAAAAA (rz)
+    r = fp_operate("fdiv", True, True, 0x3F800000, 0x40400000, 0, 0)
+    assert r.value == 0x3EAAAAAB and r.flags == {"I"}
+    r = fp_operate("fdiv", True, True, 0x3F800000, 0x40400000, 0, 1 << 9)
+    assert r.value == 0x3EAAAAAA
+    # sqrt(2) double = 0x3FF6A09E667F3BCD, inexact; sqrt(4) exact
+    r = fp_operate("fsqrt", False, False, 0x4000000000000000, 0, 0, 0)
+    assert r.value == 0x3FF6A09E667F3BCD and r.flags == {"I"}, hex(r.value)
+    r = fp_operate("fsqrt", False, False, 0x4010000000000000, 0, 0, 0)
+    assert r.value == 0x4000000000000000 and not r.flags
+    # min normal / 2: tiny -> unimplemented (D = 0); with D: +0 and I
+    r = fp_operate("fdiv", True, True, 0x00800000, 0x40000000, 0, 0)
+    assert r.unimpl
+    r = fp_operate("fdiv", True, True, 0x00800000, 0x40000000, 0, FPSR_D)
+    assert r.value == 0 and r.flags == {"I"}
+    # denormal operand (D = 0) -> unimplemented; denorm * 0 = 0
+    assert fp_operate("fadd", True, True, 0x00000001, 0x3F800000, 0, 0).unimpl
+    assert fp_operate("fmpy", True, True, 0x00000001, 0x80000000, 0, 0).value == 0x80000000
+    # compares: 1 < 2 with '<' (code 9, traps on unordered) -> C; NaN with '<' -> unimplemented
+    assert fp_operate("fcmp", True, True, 0x3F800000, 0x40000000, 9, 0).cmp == 1
+    # (PA-RISC: 0x7FA00000 is the quiet NaN, 0x7FC00000 -- fraction MSB set -- a signalling one)
+    assert fp_operate("fcmp", True, True, 0x7FA00000, 0x40000000, 9, 0).unimpl
+    assert fp_operate("fcmp", True, True, 0x7FA00000, 0x40000000, 2, 0).cmp == 1     # '?'
+    assert fp_operate("fcmp", True, True, 0x7FC00000, 0x40000000, 2, 0).unimpl       # sNaN
+    assert fp_operate("fcmp", False, False, 0, 1 << 63, 4, 0).cmp == 1                # +0 = -0
+    assert fp_operate("fcmp", True, True, 0xFF800000, 0x7F800000, 9, 0).cmp == 1      # -inf < +inf
+    assert fp_operate("fcmp", True, True, 0x7F800000, 0x7F800000, 4, 0).cmp == 1      # inf = inf
+    assert fp_operate("fcmp", True, True, 0x7F7FFFFF, 0x7F800000, 17, 0).cmp == 0     # max > inf is false
+    # conversions: 2.5 -> 2 (rn, even), 3 (rp); -2^31 dbl->sgl unimplemented; 2^31 overflow
+    assert fp_operate("fcnvfx", False, True, 0x4004000000000000, 0, 0, 0).value == 2
+    assert fp_operate("fcnvfx", False, True, 0x4004000000000000, 0, 0, 2 << 9).value == 3
+    assert fp_operate("fcnvfxt", False, True, 0xC004000000000000, 0, 0, 0).value == 0xFFFFFFFE
+    assert fp_operate("fcnvfx", False, True, 0xC1E0000000000000, 0, 0, 0).unimpl
+    assert fp_operate("fcnvfx", True, True, 0xCF000000, 0, 0, 0).value == 0x80000000
+    assert fp_operate("fcnvfx", False, True, 0x41E0000000000000, 0, 0, 0).unimpl
+    assert fp_operate("fcnvfx", False, False, 0x41E0000000000000, 0, 0, 0).value == 1 << 31
+    # int -> float: 2^24 + 1 single is inexact
+    r = fp_operate("fcnvxf", True, True, 0x01000001, 0, 0, 0)
+    assert r.value == 0x4B800000 and r.flags == {"I"}
+    r = fp_operate("fcnvxf", False, False, 0xFFFFFFFFFFFFFFFF, 0, 0, 0)
+    assert r.value == 0xBFF0000000000000 and not r.flags
+    # dbl -> sgl: 1e-50 is tiny (unimplemented), 1e40 overflows
+    assert fp_operate("fcnvff", False, True, 0x2B2BFF2EE48E0530, 0, 0, 0).unimpl
+    r = fp_operate("fcnvff", False, True, 0x483D6329F1C35CA5, 0, 0, 0)
+    assert r.value == 0x7F800000 and r.flags == {"O", "I"}
+    # frnd always unimplemented; fabs/fcpy pass denormals through
+    assert fp_operate("frnd", False, False, 0x3FF0000000000000, 0, 0, 0).unimpl
+    assert fp_operate("fabs", True, True, 0x80000001, 0, 0, 0).value == 1
+
+
+SUITES = ("alu1", "alu2", "shift", "max1", "cache", "tlbx", "fpedge")
 
 
 def parse_group(name):
@@ -757,6 +1271,8 @@ def predict(suite, group, v):
         # a list of alternatives in the JSON means any one of them
         return Prediction([frozenset(w) if isinstance(w, list) else w for w in v["expect"]],
                           ("expected words from gen_tests.py gen_cache",))
+    if suite == "fpedge":
+        return predict_fpedge(group, v)
     o, cb_before = execute(group, v)
     executed = None if o.cond is None else (0 if o.cond else 1)
     if o.cb is not None:
@@ -826,6 +1342,8 @@ def expected_traps(suite, group, vectors, inputs=None):
         return vectors
     if suite == "tlbx" and inputs is not None:
         return sum(v.get("traps", 0) for v in inputs)
+    if suite == "fpedge" and inputs is not None:
+        return sum(predict_fpedge(group, v).traps for v in inputs)
     return 0
 
 
@@ -984,6 +1502,7 @@ def _selftest():
     assert mx("hshladd", 2, 0xE0001000, 0x00007000) == 0x80007FFF
     assert mx("hshradd", 1, 0xFFFF8000, 0x00008000) == 0xFFFF8000     # -1>>1 = -1
     assert mx("hshradd", 3, 0x7FFF0010, 0x7FFF0001) == 0x7FFF0003
+    fp_selftest()
     print("model self test passed")
 
 

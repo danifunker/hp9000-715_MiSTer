@@ -66,7 +66,7 @@ WORD_NAMES.update({
     "cache": ["w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7"],
     "tlbx": ["w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7"],
     "fp": ["fhi", "flo", "status", "pad"],
-    "fpedge": ["fhi", "flo", "status", "pad"],
+    "fpedge": ["status", "fr0R", "fhi", "flo", "xr2", "fr1R", "pad0", "pad1"],
 })
 
 

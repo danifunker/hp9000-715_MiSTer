@@ -104,9 +104,17 @@ obj_dir_tb/fp_vectors.txt: $(CPUT)/unit_vectors.py $(CPUT)/ref/qemu/fp.log
 	$(MAKE) -C $(CPUT) build/gen_fp.json >/dev/null
 	python3 $(CPUT)/unit_vectors.py fp $(CPUT)/ref/qemu/fp.log -o $@
 
-tb_fpu: obj_dir_tb/fp_vectors.txt
+# the same vectors (fp) plus the fpedge suite's, with model.py's expectations
+# (ERS s.7.3: results, flags and the unimplemented exception)
+obj_dir_tb/fpmodel_vectors.txt: $(CPUT)/unit_vectors.py $(CPUT)/model.py $(CPUT)/gen_tests.py
+	@mkdir -p obj_dir_tb
+	$(MAKE) -C $(CPUT) build/gen_fp.json build/gen_fpedge.json >/dev/null
+	python3 $(CPUT)/unit_vectors.py fpmodel -o $@
+
+tb_fpu: obj_dir_tb/fp_vectors.txt obj_dir_tb/fpmodel_vectors.txt
 	$(TB_V) --top-module pa_fpu -o tb_fpu $(RTL)/cpu/pa_pkg.sv $(RTL)/cpu/pa_fpu.sv tb/tb_fpu.cpp
 	./obj_dir_tb/tb_fpu obj_dir_tb/fp_vectors.txt
+	./obj_dir_tb/tb_fpu obj_dir_tb/fpmodel_vectors.txt
 
 .PHONY: tb_fpu
 

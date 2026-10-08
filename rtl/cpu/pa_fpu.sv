@@ -132,6 +132,10 @@ module pa_fpu
             if (ua.c == C_DENORM) ua.c = C_ZERO;
             if (ub.c == C_DENORM) ub.c = C_ZERO;
         end
+        // a zero (or a flushed denormal) that reaches the add/subtract datapath
+        // (x + 0) must weigh nothing: no implicit leading one
+        if (ua.c == C_ZERO) ua.sig = 53'd0;
+        if (ub.c == C_ZERO) ub.sig = 53'd0;
     end
     wire a_nan = ua.c == C_QNAN || ua.c == C_SNAN, b_nan = ub.c == C_QNAN || ub.c == C_SNAN;
     wire a_den = ua.c == C_DENORM, b_den = ub.c == C_DENORM;
@@ -191,8 +195,11 @@ module pa_fpu
                 else if (a_zero || b_zero) begin early_done = 1'b1; early_we = 1'b1; early_result = pack_zero(ua.s ^ ub.s, sgl); end
             end
             F_DIV: begin
+                // ERS s.7.3 lists denorm/denorm, denorm/norm and norm/denorm (D = 0) as
+                // unimplemented; denorm/zero is a division by zero, and the trivial
+                // zero/denorm, inf/denorm, denorm/inf complete (STUBS S-013)
                 if (a_nan || b_nan) begin early_done = 1'b1; early_unimpl = 1'b1; end
-                else if (a_den || b_den) begin early_done = 1'b1; early_unimpl = 1'b1; end
+                else if ((a_den && (b_den || ub.c == C_NORM)) || (b_den && ua.c == C_NORM)) begin early_done = 1'b1; early_unimpl = 1'b1; end
                 else if ((a_inf && b_inf) || (a_zero && b_zero)) begin
                     early_done = 1'b1;
                     if (en_v) early_unimpl = 1'b1;
@@ -205,14 +212,16 @@ module pa_fpu
                 else if (b_inf || a_zero) begin early_done = 1'b1; early_we = 1'b1; early_result = pack_zero(ua.s ^ ub.s, sgl); end
             end
             F_SQRT: begin
+                // ERS s.7.3: a negative denormal (D = 0) is an invalid operation like a
+                // negative normal; only a positive denormal is unimplemented
                 if (a_nan) begin early_done = 1'b1; early_unimpl = 1'b1; end
-                else if (a_den) begin early_done = 1'b1; early_unimpl = 1'b1; end
                 else if (a_zero) begin early_done = 1'b1; early_we = 1'b1; early_result = pack_zero(ua.s, sgl); end
                 else if (ua.s) begin                             // negative: invalid
                     early_done = 1'b1;
                     if (en_v) early_unimpl = 1'b1;
                     else begin early_we = 1'b1; early_result = sgl ? QNAN_S : QNAN_D; early_flags[4] = 1'b1; end
-                end else if (a_inf) begin early_done = 1'b1; early_we = 1'b1; early_result = pack_inf(1'b0, sgl); end
+                end else if (a_den) begin early_done = 1'b1; early_unimpl = 1'b1; end
+                else if (a_inf) begin early_done = 1'b1; early_we = 1'b1; early_result = pack_inf(1'b0, sgl); end
             end
             F_CNVFF: begin
                 if (a_nan || a_den) begin early_done = 1'b1; early_unimpl = 1'b1; end
@@ -419,6 +428,9 @@ module pa_fpu
                             is_int_result <= 1'b1;
                             if (dsgl) begin                        // 32-bit integer
                                 if (na.s ? (ival > 64'h8000_0000) : (ival > 64'h7FFF_FFFF)) int_ovf <= 1'b1;
+                                // ERS s.7.3 **: FCNVFX(T),dbl,sgl of -2^31 raises the unimplemented
+                                // exception "even though this is not strictly necessary"
+                                if (!sgl && na.s && ival == 64'h8000_0000) int_ovf <= 1'b1;
                                 int_result <= {(na.s ? -ival[31:0] : ival[31:0]), 32'd0};
                             end else begin
                                 if (na.s ? (ival > 64'h8000_0000_0000_0000) : ival[63]) int_ovf <= 1'b1;

@@ -292,10 +292,18 @@ module pa_core
     endfunction
     wire ser_pending = (e_valid && ser_stall(e_c)) || (m_valid && ser_stall(m_c)) || (w_valid && ser_stall(w_c));
     // an FP instruction waits in D while an FP operation is in E/M/W or in the unit
-    // (operands are read and results written in order at W, so nothing else is needed)
+    // (operands are read and results written in order at W, so nothing else is
+    // needed), and while an FP load or store of fr0-fr3 is in E/M/W: FSTD fr0
+    // clears T and FLD fr0 rewrites the whole status at W commit, and the next
+    // FP instruction's trap-14 check in E must see the result (sec. 3.5; the
+    // real chip interlocks these for 4 cycles, ERS s.7.5.6)
     wire d_is_fp = dc.fu == FU_FP || dc.fpm;
-    wire fp_pending = fp_busy || (e_valid && e_c.fu == FU_FP) || (m_valid && m_c.fu == FU_FP) ||
-                      (w_valid && w_c.fu == FU_FP);
+    function automatic logic fp_ctl_access(input ctrl_t c, input logic [31:0] insn);
+        fp_ctl_access = c.fpm && insn[4:0] < 5'd4;
+    endfunction
+    wire fp_pending = fp_busy || (e_valid && (e_c.fu == FU_FP || fp_ctl_access(e_c, e_insn))) ||
+                      (m_valid && (m_c.fu == FU_FP || fp_ctl_access(m_c, m_insn))) ||
+                      (w_valid && (w_c.fu == FU_FP || fp_ctl_access(w_c, w_insn)));
     wire d_stall = d_valid && (ld_use || ser_pending || (d_is_fp && fp_pending));
     wire adv_d = adv && !d_stall;              // D -> E this cycle
     assign adv_f2 = adv_d;                     // F2 -> D (also when D is empty)
