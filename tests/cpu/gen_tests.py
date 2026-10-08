@@ -791,6 +791,8 @@ def gen_fp_common(rng, name, edge):
     arith = [("fadd", 2), ("fsub", 2), ("fmpy", 2), ("fdiv", 2), ("fsqrt", 1),
              ("frnd", 1), ("fabs", 1), ("fcpy", 1)]
     for op, nops in arith:
+        if op == "frnd" and not edge:
+            continue        # FRND is unimplemented on the PCX-L (trap 14 via FPSR.T); QEMU rounds -- fpedge only
         for fmt in ("sgl", "dbl"):
             rms = range(4) if op in ("fadd", "fsub", "fmpy", "fdiv", "fsqrt", "frnd") else [0]
             for rm in rms:

@@ -141,6 +141,7 @@ CPU_RTL = $(RTL)/cpu/pa_pkg.sv $(RTL)/cpu/pa_decode.sv $(RTL)/cpu/pa_alu.sv $(RT
 	$(RTL)/cpu/pa_max1.sv $(RTL)/cpu/pa_ldst.sv $(RTL)/cpu/pa_regfile.sv $(RTL)/cpu/pa_cr16.sv \
 	$(RTL)/cpu/pa_biu.sv $(RTL)/cpu/pa_fetch.sv $(RTL)/cpu/pa_core.sv $(RTL)/cpu/pa_cpu.sv \
 	$(RTL)/cpu/pa_cache_ram.sv $(RTL)/cpu/pa_dcache.sv $(RTL)/cpu/pa_icache.sv $(RTL)/cpu/pa_tlb.sv \
+	$(RTL)/cpu/pa_fpu.sv $(RTL)/cpu/pa_fpunit.sv \
 	$(RTL)/cpu/pa_core_seq.sv
 CT_RTL = $(CPU_RTL) cputest/cputest_top.sv
 CORE ?= pipe

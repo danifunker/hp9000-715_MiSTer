@@ -2,14 +2,14 @@
 # Run the pacputest suite ROMs (tests/cpu) on the RTL CPU (verilator/cputest)
 # and check each log: against tests/cpu/model.py for the suites it covers,
 # against QEMU's reference log for the rest (known QEMU bugs excused).
-#   [CORE=seq|pipe] tests/run-cputest.sh [suite ...]   default: every integer suite
+#   [CORE=seq|pipe] tests/run-cputest.sh [suite ...]   default: every suite but fpedge (fp needs CORE=pipe)
 # CORE selects the core (default pipe, the pipelined pa_cpu; seq = pa_core_seq).
 # Exits non-zero if any suite fails.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 V=$HERE/../verilator
 CPUT=$HERE/cpu
-SUITES=${*:-alu1 alu2 shift max1 mem branch trap sys cache tlbx}
+SUITES=${*:-alu1 alu2 shift max1 mem branch trap sys cache tlbx fp}
 CORE=${CORE:-pipe}
 export CORE
 make -s -C "$CPUT" >/dev/null || exit 1

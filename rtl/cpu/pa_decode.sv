@@ -7,8 +7,8 @@
 //
 // Not decoded yet (they raise trap 8 or 22 until their units exist): the
 // PCX-L explicit-endian word loads/stores (03/3, 03/B), the TLB/probe ops of
-// major 01, RDTLB's translation, and the FPU (every FP instruction raises
-// assist emulation) -- docs/STUBS.md S-005.
+// major 01 and RDTLB's translation. FP instructions decode to FU_FP (operations:
+// pa_fpunit decodes the word again in W) or FU_LOAD/FU_STORE with fpm.
 module pa_decode
     import pa_pkg::*;
 (
@@ -461,11 +461,41 @@ module pa_decode
             endcase
         end
 
-        // ------------------------------------------------------ floating point (S-005)
-        6'h06, 6'h09, 6'h0B, 6'h0C, 6'h0E, 6'h26: begin
-            c.fu = FU_FP;
-            c.assist = 1'b1;
+        // ------------------------------------------------------ FP loads / stores (09 word, 0B doubleword)
+        // Same layout as major 03: b, x / im5, s, a, bit 19 short, cc, ext (bit 22 = store,
+        // bits 23:24 = uid, bit 25 = register half), m, t. Coprocessor uids other than 0
+        // (1 for the doubleword forms) are CLDx/CSTx: trap 22.
+        6'h09, 6'h0B: begin
+            c.rb = f6_10;
+            c.s2 = insn[15:14];
+            c.cc = insn[11:10];
+            c.fpm = 1'b1;
+            c.size = (insn[31:26] == 6'h0B) ? 2'd3 : 2'd2;
+            c.rt = f27_31;                                          // FR number (half: insn[6])
+            c.fu = insn[9] ? FU_STORE : FU_LOAD;
+            if (!f19) begin                                         // indexed
+                c.ra = f11_15;
+                c.use_index = 1'b1;
+                c.scale = insn[13];
+                c.ea_is_base = f26;
+                c.base_we = f26;
+            end else begin                                          // short displacement
+                c.imm = low_sext5(f11_15);
+                c.ea_is_base = f26 & ~insn[13];                     // ,ma / ,mb
+                c.base_we = f26;
+            end
+            if (insn[8:7] != 2'b00 || (insn[31:26] == 6'h0B && insn[6])) c.assist = 1'b1;
         end
+
+        // ------------------------------------------------------ FP operations (pa_fpunit decodes the rest in W)
+        6'h0C, 6'h0E: begin
+            c.fu = FU_FP;
+            if (insn[31:26] == 6'h0C) begin
+                if (insn[8:6] != 3'b000) c.assist = 1'b1;           // uid != 0: COPR, PMDIS/PMENB -> trap 22
+                else if (insn[10:9] == 2'b10 && insn[5]) c.fp_ftest = 1'b1;
+            end
+        end
+        6'h06, 6'h26: c.fu = FU_FP;                                 // FMPYADD / FMPYSUB / FMPYCFXT
 
         default: c.illegal = 1'b1;                              // undefined / PA 2.0 majors
         endcase

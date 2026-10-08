@@ -74,6 +74,9 @@ module pa_cpu
     tlb_op_e     tlb_op;
     logic [31:0] tlb_op_off, tlb_op_gr;
     logic        it_req, it_ack, it_hit;
+    logic        fp_issue, fp_ld_we, fp_st_commit, fp_busy, fp_t;
+    logic [31:0] fp_insn, fpsr;
+    logic [63:0] fp_ld_data, fp_st_data;
     logic [31:0] dr8;
     logic [3:0]  it_xok;
     logic [2:0]  it_type;
@@ -166,6 +169,8 @@ module pa_cpu
         .tlb_lk_d(tlb_lk_d), .tlb_lk_b(tlb_lk_b), .tlb_lk_u(tlb_lk_u),
         .tlb_op_req(tlb_op_req), .tlb_op(tlb_op), .tlb_op_space(tlb_op_space), .tlb_op_off(tlb_op_off),
         .tlb_op_gr(tlb_op_gr), .tlb_op_done(tlb_op_done), .tlb_op_cam(tlb_op_cam),
+        .fp_issue(fp_issue), .fp_insn(fp_insn), .fp_ld_we(fp_ld_we), .fp_ld_data(fp_ld_data),
+        .fp_st_commit(fp_st_commit), .fp_st_data(fp_st_data), .fp_busy(fp_busy), .fp_t(fp_t), .fpsr(fpsr),
         .it_req(it_req), .it_space(it_space), .it_vpn(it_vpn), .it_ack(it_ack), .it_hit(it_hit), .it_rpn(it_rpn),
         .it_xok(it_xok), .it_type(it_type),
         .dc_ready(dc_ready), .dc_lk_en(dc_lk_en), .dc_lk_addr(dc_lk_addr), .dc_m_addr(dc_m_addr),
@@ -193,6 +198,11 @@ module pa_cpu
         .dbg_gr_we(dbg_gr_we), .dbg_gr_num0(dbg_gr_num0), .dbg_gr_num1(dbg_gr_num1),
         .dbg_gr_data0(dbg_gr_data0), .dbg_gr_data1(dbg_gr_data1), .dbg_psw(dbg_psw), .dbg_halted(dbg_halted),
         .dbg_gr(dbg_gr));
+
+    pa_fpunit u_fpu (
+        .clk(clk), .rst_n(rst_n),
+        .issue(fp_issue), .insn(fp_insn), .ld_we(fp_ld_we), .ld_data(fp_ld_data),
+        .st_commit(fp_st_commit), .st_data(fp_st_data), .busy(fp_busy), .fpsr_t(fp_t), .fpsr_o(fpsr));
 
     pa_biu u_biu (
         .clk(clk), .rst_n(rst_n),

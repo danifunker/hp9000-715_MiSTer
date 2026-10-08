@@ -64,6 +64,17 @@ module pa_core
     input  logic [6:0]  tlb_lk_ar,
     input  logic [14:0] tlb_lk_aid,
     input  logic        tlb_lk_t, tlb_lk_d, tlb_lk_b, tlb_lk_u,
+    // FP unit (pa_fpunit): operations issue at W commit, loads write at W commit,
+    // stores read in W; the unit's busy / FPSR.T / FPSR feed D's stall and E's traps
+    output logic        fp_issue,
+    output logic [31:0] fp_insn,
+    output logic        fp_ld_we,
+    output logic [63:0] fp_ld_data,
+    output logic        fp_st_commit,
+    input  logic [63:0] fp_st_data,
+    input  logic        fp_busy,
+    input  logic        fp_t,
+    input  logic [31:0] fpsr,
     output logic        tlb_op_req,
     output tlb_op_e     tlb_op,
     output logic [15:0] tlb_op_space,
@@ -219,7 +230,7 @@ module pa_core
     logic [3:0]  w_dperr;
     logic [63:0] w_stdw;
     ctrl_t       w_c;
-    logic [31:0] w_ld;
+    logic [63:0] w_ld;                  // load data: the word in [31:0], a doubleword (FLDD) whole
     logic        w_lderr;
     logic [31:0] set_tag;                // SET_TAG latch (ERS s.8.3.5)
     logic [31:0] dr27, dr28, dr29;
@@ -274,13 +285,18 @@ module pa_core
     wire [4:0] d_f11_15 = d_insn[20:16];
     wire e_late = e_c.fu == FU_LOAD || (e_c.fu == FU_SYS && e_c.sysop == SYS_LDSID) ||
                   (e_c.fu == FU_MMU && (e_c.sysop == MM_PROBE || e_c.sysop == MM_LPA || e_c.sysop == MM_LCI));
-    wire ld_use = e_valid && !e_nul && e_late && e_c.rt != 0 &&
+    wire ld_use = e_valid && !e_nul && e_late && !e_c.fpm && e_c.rt != 0 &&
                   (e_c.rt == d_f6_10 || e_c.rt == d_f11_15);
     function automatic logic ser_stall(input ctrl_t c);
         ser_stall = (c.fu == FU_SYS) && (c.sysop == SYS_MTSP || (c.sysop == SYS_MTCTL && c.cr != 5'd11));
     endfunction
     wire ser_pending = (e_valid && ser_stall(e_c)) || (m_valid && ser_stall(m_c)) || (w_valid && ser_stall(w_c));
-    wire d_stall = d_valid && (ld_use || ser_pending);
+    // an FP instruction waits in D while an FP operation is in E/M/W or in the unit
+    // (operands are read and results written in order at W, so nothing else is needed)
+    wire d_is_fp = dc.fu == FU_FP || dc.fpm;
+    wire fp_pending = fp_busy || (e_valid && e_c.fu == FU_FP) || (m_valid && m_c.fu == FU_FP) ||
+                      (w_valid && w_c.fu == FU_FP);
+    wire d_stall = d_valid && (ld_use || ser_pending || (d_is_fp && fp_pending));
     wire adv_d = adv && !d_stall;              // D -> E this cycle
     assign adv_f2 = adv_d;                     // F2 -> D (also when D is empty)
 
@@ -385,6 +401,8 @@ module pa_core
     assign dc_lk_hash = e_hash;
     assign dc_m_addr  = m_ea;
     wire [31:0] ls_wd_eff = e_c.ldcw ? 32'd0 : ls_wd;          // LDCW clears the word
+    wire e_unal = (e_c.size == 2'd3) ? |e_va[2:0] : ls_unaligned; // doublewords: 8-byte aligned
+    wire e_fstd_fr0 = e_c.fpm && e_c.fu == FU_STORE && e_c.size == 2'd3 && e_insn[4:0] == 5'd0;
 
     // ---- branches
     logic        br_taken, br_new_space, movb_cond, bit_val;
@@ -439,6 +457,7 @@ module pa_core
             FU_ALU:    e_nullify = e_c.nullify_cond & alu_cond;
             FU_SHIFT:  e_nullify = sh_cond;
             FU_BRANCH: e_nullify = br_nullify;
+            FU_FP:     e_nullify = e_c.fp_ftest && ftest_valid(e_insn[4:0]) && ftest_cond(fpsr, e_insn[4:0]);
             default: ;
         endcase
     end
@@ -527,8 +546,12 @@ module pa_core
             e_trap = TRAP_ILLEGAL;
         else if (e_c.priv && cur_pl != 2'd0)
             e_trap = TRAP_PRIV_OP;
-        else if (e_c.assist || e_c.fu == FU_FP)
+        else if (e_c.assist)
             e_trap = TRAP_ASSIST_EM;
+        else if ((e_c.fu == FU_FP || e_c.fpm) && ccr[7:6] != 2'b11)   // FPU disabled (ACD table 6-7)
+            e_trap = TRAP_ASSIST_EM;
+        else if ((e_c.fu == FU_FP || e_c.fpm) && fp_t && !e_fstd_fr0)  // delayed FP trap (sec. 3.5)
+            e_trap = TRAP_ASSIST_EX;
         else case (e_c.fu)
             FU_ALU: begin
                 if (e_c.trap_ovf && alu_sv)        e_trap = TRAP_OVERFLOW;
@@ -541,7 +564,7 @@ module pa_core
                 SYS_MFCTL: if (cr_priv_read(e_c.cr, psw[P_S]) && cur_pl != 0)  e_trap = TRAP_PRIV_REG;
                 default: ;
             endcase
-            FU_LOAD, FU_STORE: if (ls_unaligned) begin e_trap = TRAP_UNALIGNED; e_trap_data = 1'b1; end
+            FU_LOAD, FU_STORE: if (e_unal) begin e_trap = TRAP_UNALIGNED; e_trap_data = 1'b1; end
             default: ;
         endcase
     end
@@ -630,7 +653,7 @@ module pa_core
         default: m_ld = m_word;
     endcase
     logic [63:0] m_stdw;
-    wire [7:0] m_lanes = m_ea[2] ? {4'b0000, m_be} : {m_be, 4'b0000};   // [7] = byte 0
+    wire [7:0] m_lanes = (m_c.size == 2'd3) ? 8'hFF : m_ea[2] ? {4'b0000, m_be} : {m_be, 4'b0000};   // [7] = byte 0
     always_comb
         for (int b = 0; b < 8; b++)
             m_stdw[63 - 8*b -: 8] = m_lanes[7 - b] ? m_stdata[31 - 8*(b & 3) -: 8] : dc_m_rdata[63 - 8*b -: 8];
@@ -702,9 +725,12 @@ module pa_core
     always_comb begin
         d_req = 1'b0; d_we = 1'b0; d_rclr = 1'b0;
         d_addr = {w_rpn, w_ea[11:0]};                   // the physical address (translated in M)
-        d_be = 8'd0; d_wdata = {w_stdata, w_stdata};
-        if (w_c.fu == FU_STORE) d_be = w_ea[2] ? {4'b0000, w_be} : {w_be, 4'b0000};
-        else                    d_be = w_ea[2] ? 8'h0F : 8'hF0;
+        d_be = 8'd0;
+        d_wdata = (w_c.fpm && w_c.size == 2'd3) ? fp_st_data :
+                  w_c.fpm ? {fp_st_data[31:0], fp_st_data[31:0]} : {w_stdata, w_stdata};
+        if (w_c.size == 2'd3)        d_be = 8'hFF;
+        else if (w_c.fu == FU_STORE) d_be = w_ea[2] ? {4'b0000, w_be} : {w_be, 4'b0000};
+        else                         d_be = w_ea[2] ? 8'h0F : 8'hF0;
         if (w_umem_go) begin
             d_req = 1'b1; d_we = (w_c.fu == FU_STORE); d_rclr = w_c.ldcw;
         end else if (wst == W_WAIT) begin
@@ -811,7 +837,16 @@ module pa_core
     assign dc_st_we   = (w_cache_hit_go && (w_c.fu == FU_STORE || w_c.ldcw)) ||
                         (w_valid && wst == W_DONE && w_c.ldcw && w_cached && !w_lderr && w_opflush);
     assign dc_st_addr = w_ea;
-    assign dc_st_data = w_stdw;
+    // FP stores: the FR data replaces the store lanes merged in M (FSTD: all eight)
+    assign dc_st_data = !w_c.fpm ? w_stdw :
+                        (w_c.size == 2'd3) ? fp_st_data :
+                        w_ea[2] ? {w_stdw[63:32], fp_st_data[31:0]} : {fp_st_data[31:0], w_stdw[31:0]};
+    // ---- FP unit interface (sec. 6.11): everything happens at W commit, in order
+    assign fp_issue     = w_commit && !w_nul && w_c.fu == FU_FP;
+    assign fp_insn      = w_insn;
+    assign fp_ld_we     = w_commit && !w_nul && w_c.fpm && w_c.fu == FU_LOAD;
+    assign fp_ld_data   = w_ld;
+    assign fp_st_commit = w_commit && !w_nul && w_c.fpm && w_c.fu == FU_STORE;
 
     // W holds while an access or an engine operation is in flight
     always_comb begin
@@ -830,7 +865,7 @@ module pa_core
     wire w_replay = w_valid && wst == W_REPLAY;
 
     // ---- GR write ports
-    wire [31:0] w_wd0_val = (wst == W_DONE || (w_is_cmem && w_is_load)) ? w_ld :
+    wire [31:0] w_wd0_val = (wst == W_DONE || (w_is_cmem && w_is_load)) ? w_ld[31:0] :
                             (w_c.fu == FU_SYS && (w_c.sysop == SYS_SSM || w_c.sysop == SYS_RSM)) ? {25'd0, psw[6:0]} :
                             w_result;
     always_comb begin
@@ -916,7 +951,7 @@ module pa_core
                     w_fperr <= m_fperr; w_cached <= m_cached_c; w_hit <= dc_m_hit; w_dirty <= dc_m_dirty;
                     w_dperr <= dc_m_perr; w_stdw <= m_stdw; w_opflush <= 1'b0;
                     w_rpn <= m_rpn; w_hash <= m_hash; w_walk <= m_walk_ok;
-                    w_ld <= m_ld;                   // an uncached load overwrites it at its ack
+                    w_ld <= (m_c.size == 2'd3) ? dc_m_rdata : {32'd0, m_ld};   // an uncached load overwrites it at its ack
 
                     m_valid <= e_valid; m_nul <= e_nul; m_err <= e_err; m_taken <= e_taken;
                     m_nullify <= e_nullify; m_new_space <= e_taken && br_new_space; m_insn <= e_insn;
@@ -997,7 +1032,7 @@ module pa_core
             else if (wst == W_WALK_RD3 && dc_op_done) begin wst <= W_WFAIL; w_cr28_val <= pdir_w3; end
             else if (wst == W_WALK_A && tlb_op_done) wst <= W_WALK_P;
             else if (wst == W_WALK_P && tlb_op_done) wst <= W_REPLAY;
-            else if (wst == W_WAIT && d_ack) begin wst <= W_DONE; w_ld <= ld_data; w_lderr <= d_err; end
+            else if (wst == W_WAIT && d_ack) begin wst <= W_DONE; w_ld <= (w_c.size == 2'd3) ? d_rdata : {32'd0, ld_data}; w_lderr <= d_err; end
             else if (wst == W_OP && w_op_done) begin
                 if (w_is_mem) begin
                     if (dc_op == DC_LDCW) begin
@@ -1010,7 +1045,7 @@ module pa_core
                     else wst <= W_REPLAY;
                 end else begin
                     wst <= W_DONE; w_lderr <= 1'b0;
-                    if (w_diag_rd) w_ld <= w_op_isd ? dc_op_rdata : ic_op_rdata;
+                    if (w_diag_rd) w_ld <= {32'd0, w_op_isd ? dc_op_rdata : ic_op_rdata};
                 end
             end
         end

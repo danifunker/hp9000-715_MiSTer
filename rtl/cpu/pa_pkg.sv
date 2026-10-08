@@ -142,7 +142,9 @@ package pa_pkg;
         logic [1:0]  mx_sa;
 
         // loads / stores
-        logic [1:0]  size;         // 0 byte, 1 half, 2 word
+        logic [1:0]  size;         // 0 byte, 1 half, 2 word, 3 doubleword (FP only)
+        logic        fpm;          // FP load/store: FR target/source (half: insn bit 25), no GR write
+        logic        fp_ftest;     // 0C class 2 with the N bit: FTEST (nullifies from E) or an undefined look-alike
         logic        use_index;
         logic        scale;
         logic        ea_is_base;   // post-modify (or LDWM/STWM with disp >= 0)
@@ -171,6 +173,29 @@ package pa_pkg;
         logic [4:0]  cr;           // CR / DR number
         logic [9:0]  sm_imm;       // SSM/RSM immediate
     } ctrl_t;
+
+    // ------------------------------------------------------------ FTEST (ERS s.7.4.3)
+    // FPSR in Verilog bits: PA bit k = s[31-k]; C = s[26], the compare queue PA 10:20 = s[21:11]
+    function automatic logic ftest_valid(input logic [4:0] c);
+        case (c)
+            5'h00, 5'h01, 5'h05, 5'h09, 5'h0D, 5'h11, 5'h02, 5'h06: ftest_valid = 1'b1;
+            default: ftest_valid = 1'b0;
+        endcase
+    endfunction
+    function automatic logic ftest_cond(input logic [31:0] s, input logic [4:0] c);
+        case (c)
+            5'h00: ftest_cond = s[26];                                   // C
+            5'h01: ftest_cond = ~(s[26] | (|s[21:11]));                  // ,acc
+            5'h05: ftest_cond = ~(s[26] | (|s[21:15]));                  // ,acc8
+            5'h09: ftest_cond = ~(s[26] | (|s[21:17]));                  // ,acc6
+            5'h0D: ftest_cond = ~(s[26] | (|s[21:19]));                  // ,acc4
+            5'h11: ftest_cond = ~(s[26] | s[21]);                        // ,acc2
+            5'h02: ftest_cond = (s[26] & s[16]) | (s[21] & s[15]) | (s[20] & s[14]) |
+                                (s[19] & s[13]) | (s[18] & s[12]) | (s[17] & s[11]);   // ,rej
+            5'h06: ftest_cond = (s[26] & s[18]) | (s[21] & s[17]) | (s[20] & s[16]) | (s[19] & s[15]);  // ,rej8
+            default: ftest_cond = 1'b0;
+        endcase
+    endfunction
 
     // ------------------------------------------------------------ helpers
     // low_sign_ext: the sign bit is the field's rightmost bit (ACD p.5-8)
