@@ -12,7 +12,8 @@
 //                    [--turbo N [--turbo-after CYCLE]]  (CR16 N x faster after CYCLE, default 30M:
 //                    shortens the ROM's delays; selftest1's timer test needs the real rate)
 //                    [--disk0 IMG] [--disk1 IMG] [--cd ISO]   (SCSI IDs 6, 5, 2; disks are written
-//                    unless --snapshot: then writes stay in memory, like QEMU's -snapshot)
+//                    unless --snapshot: then writes stay in memory, like QEMU's -snapshot;
+//                    --sdtrace logs every block request)
 //                    [--save-at CYCLE FILE] [--save-on STR FILE] [--restore FILE]   (whole-model
 //                    checkpoints, at a cycle or when the console first prints STR; a restored
 //                    run keeps the cycle count, and needs the same build)
@@ -40,6 +41,7 @@ struct BlkDev {
 };
 static BlkDev blk[3];
 static bool snapshot = false;
+static bool sdtrace = false;    // --sdtrace: every block-device request
 
 static void blk_read(BlkDev& d, uint64_t lba, uint8_t* p, size_t n) {
 	if (d.f) { fseeko(d.f, (off_t)lba * 512, SEEK_SET); size_t got = fread(p, 1, n, d.f); (void)got; }
@@ -74,6 +76,9 @@ static void sd_step() {
 			if (((top->sd_rd | top->sd_wr) >> n) & 1) {
 				sd.n = n; sd.lba = top->sd_lba[n];
 				sd.words = (top->sd_blk_cnt[n] + 1) * 256; sd.w = 0; sd.phase = 0;
+				if (sdtrace)
+					fprintf(stderr, "[%12llu] sd%d %s lba %llu x%u\n", (unsigned long long)cyc, n,
+					        ((top->sd_rd >> n) & 1) ? "rd" : "wr", (unsigned long long)sd.lba, sd.words / 256);
 				sd.buf.assign(sd.words * 2, 0);
 				top->sd_ack = 1 << n;
 				if ((top->sd_rd >> n) & 1) {
@@ -161,6 +166,7 @@ int main(int argc, char** argv) {
 		else if (a == "--save-at") { save_at = strtoull(next(), 0, 0); save_file = next(); }
 		else if (a == "--save-on") { save_on = next(); save_file = next(); }
 		else if (a == "--snapshot") snapshot = true;
+		else if (a == "--sdtrace") sdtrace = true;
 		else if (a == "--restore") restore_file = next();
 		else if (a == "--sample") sample = strtoull(next(), 0, 0);
 		else if (a == "--trace") trace = strtoull(next(), 0, 0);

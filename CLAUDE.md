@@ -67,6 +67,8 @@ yet run on a board); SCSI (`rtl/scsi/`) is being brought up against the ROM.
 | `docs/reference/` | PDFs and their text extracts (not committed; `README.md` there has the sources) |
 | `roms/` | firmware (not committed; `README.md` there has the recipe and hashes) |
 | `disks/` | SCSI disk/CD images (not committed; `README.md` there has the recipe): `hpux1020.img`, HP-UX 10.20 from tenox's qcow2, 4 GiB raw |
+| `tools/eeprom/` | `mkeeprom.py` (bootstrap image for the sim), `mkrelease.sh` -> `hp715_default.eep`, the image the core ships with (STUBS S-016) |
+| `tools/mister/board.sh` | the board over ssh (MiSTer at 192.168.99.92, key login): `setup` (RAM + remembered mounts), `push`, `load`, `console` (the core's UART is the MiSTer's `/dev/ttyS1`), `type`, `shot`, `menu` |
 | `tools/sim/console_png.py` | renders a romsim `--stamp` console log as a terminal screenshot (the machine's only screen until Artist) |
 | `tools/hpfw/hpfw.py` | unpacks HP firmware tapes (LIF) and checks the image header checksum |
 | `docs/design/cpu.md` | **the CPU specification** (PA-7100LC): state, VM/TLB/walker, interruptions, every instruction, PCX-L specifics, pipeline, interfaces, module plan and budget |
