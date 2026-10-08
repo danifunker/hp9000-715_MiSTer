@@ -960,7 +960,10 @@ module pa_core
     // evicted the data page, and so on (HP-UX 10.20 pa_dma_init, cpu-requests #7).
     wire w_pid_wr = w_c.fu == FU_SYS && w_c.sysop == SYS_MTCTL &&
                     (w_c.cr == 5'd8 || w_c.cr == 5'd9 || w_c.cr == 5'd12 || w_c.cr == 5'd13);
-    wire w_itlb_op = w_c.fu == FU_MMU && w_c.tlb_i && (w_c.sysop == MM_TLB_INS || w_c.sysop == MM_TLB_PURGE);
+    // every TLB insert/purge *instruction* refreshes it: the I and D forms are the same
+    // operation on the unified TLB (ERS s.6.4 "the architected itlb instructions are
+    // identical to the corresponding dtlb instructions"); the walker's inserts are not instructions
+    wire w_itlb_op = w_c.fu == FU_MMU && (w_c.sysop == MM_TLB_INS || w_c.sysop == MM_TLB_PURGE);
     assign ilab_inval = w_trap_take ||
                         (w_commit && !w_nul && (w_c.fu == FU_SYS && (w_c.sysop == SYS_RFI || w_c.sysop == SYS_RFIR ||
                                                     w_c.sysop == SYS_SSM || w_c.sysop == SYS_RSM ||

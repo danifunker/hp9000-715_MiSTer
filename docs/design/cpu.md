@@ -217,8 +217,13 @@ LPA must return the assembled RPN with the size mask removed (BOOT s.4.4
 
 **I-lookaside (I-LAB)**, ERS s.6.4: one entry {VPN, RPN, AR type/PL, AID check
 result, miss/protection flags}; refilled from the UTLB on a page crossing,
-branch to another page or space, PL change, RFI, SSM/RSM/MTSM, ITLB
-insert/purge, MTCTL to a PID, any DR8 write. Architecturally invisible.
+branch to another page or space, PL change, RFI, SSM/RSM/MTSM, any TLB
+insert/purge **instruction** (the I and D forms are the same operation on the
+unified TLB, ERS s.6.4), MTCTL to a PID, any DR8 write. Architecturally
+invisible. It is **not** dropped by the walker's inserts or by a pipeline
+replay (cpu-requests #7: dropping it there livelocked a full TLB -- the data
+page's insert evicted the code page, the refetch's insert evicted the data
+page, and so on), and a refill sets its UTLB entry's used bit like any hit.
 
 ### 2.3 Inserts, purges, replacement (ERS s.6.2, s.6.3; tests 0x41090/0x41093)
 
