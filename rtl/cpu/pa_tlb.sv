@@ -67,7 +67,10 @@ module pa_tlb
 
     typedef enum logic [2:0] { S_IDLE, S_CAM, S_SELECT, S_WALK, S_DONE } st_e;
     st_e st;
-    wire [35:0] op_tag = {op_space, op_off[31:12]};
+    // the operation's tag, captured when the operation is accepted so the CAM
+    // cycle (S_CAM) and the target walk start from flip-flops, not from the
+    // core's walker/offset muxes (fit 7, cpu-timing.md 4.4)
+    logic [35:0] op_tag;
 
     // ---------------------------------------------------------------- lookup
     // one CAM for the lookup and the operations: the cycle after an operation is
@@ -150,7 +153,7 @@ module pa_tlb
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
-            st <= S_IDLE; op_done <= 1'b0; targets <= 64'd0; blk_target <= 1'b0;
+            st <= S_IDLE; op_done <= 1'b0; targets <= 64'd0; blk_target <= 1'b0; op_tag <= 36'd0;
             lockout <= {64{1'b1}}; lockin <= {64{1'b1}}; valid <= 64'd0; used <= 64'd0;
             b_lockout <= 8'hFF; b_valid <= 8'd0;
             for (int i = 0; i < 64; i++) begin tag[i] <= 36'd0; pay[i] <= 46'd0; end
@@ -168,6 +171,7 @@ module pa_tlb
                         st <= S_DONE;
                     end else
                         st <= S_CAM;
+                    op_tag <= {op_space, op_off[31:12]};
                 end
                 S_CAM: begin                            // match = the entries with op_tag
                     st <= S_SELECT;

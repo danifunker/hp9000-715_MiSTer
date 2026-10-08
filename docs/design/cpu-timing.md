@@ -22,7 +22,8 @@ same device); the paths are what to judge by.
 | 4b | 2026-10-07 | fit 4's RTL with register retiming off (diagnostic) | `top_pipe` (`cpu_fmax_pipe_nort`) | 51.5 MHz | -3.79 ns | 9,107 | 9,828 | 291 | 0 | per-stage slacks; section 4.3 |
 | 5 | 2026-10-07 | + cuts F, A, M1, M2, M3 of section 4.3; CPU revision 2 | `top_pipe` | **62.8 MHz** | -0.31 ns | 12,070 | 14,923 | 291 | 0 | 1.2 MHz short; section 4.3 |
 | 6 | 2026-10-07 | + the W-stage TLB operations share the lookup CAM (4.4) | `top_pipe` | **59.0 MHz** | -1.34 ns | 10,635 | 14,162 | 291 | 0 | -1.4k ALMs, but the tag select hurts; section 4.4 |
-| 7 | 2026-10-07 | + the operation's CAM cycle as a registered state (S_CAM), tag select from state only | `top_pipe` | pending | | | | | | |
+| 7 | 2026-10-07 | + the operation's CAM cycle as a registered state (S_CAM), tag select from state only | `top_pipe` | **53.6 MHz** | -3.04 ns | 11,106 | 14,436 | 291 | 0 | worse: the operation's tag path; section 4.4 |
+| 8 | 2026-10-07 | + the operation's tag registered in the TLB at acceptance | `top_pipe` | pending | | | | | | |
 
 ## 1. Baseline: the sequential core (fit 1)
 
@@ -304,6 +305,20 @@ mux -> the CAM sat in one cycle (16.3 ns).
 **Fix (fit 7):** the operation is accepted into a registered state `S_CAM`
 first; `op_cam = (st == S_CAM)` is a state decode, so nothing from W or M
 is in front of the CAM. One cycle more per TLB operation (they take 4+).
+
+**Fit 7: 53.6 MHz, -3.04 ns, 11,106 ALMs.** Worse. The 40 worst paths now
+end on the CAM compare of the *operation's* tag (`Equal17..63`, retimed
+into registers) and start on `lk_tag`; the chain is the lookup (`match` ->
+`sel` -> hit) -> the M trap decision (`m_trap_xd`) -> `w_trap` (retimed
+forward again) -> the walker's offset select (`wk_off`: I- or D-side
+address) -> `tlb_op_off` -> `op_tag` -> the CAM in the S_CAM cycle. The
+operation's tag was a combinational function of W's state and the walker's
+muxes, 36 bits fanned out to 64 comparators.
+
+**Fix (fit 8):** `op_tag` is a register in the TLB, captured with the
+acceptance (S_IDLE -> S_CAM); the CAM cycle and the target walk start from
+flip-flops. If this does not get back above fit 5's 62.8 MHz, the shared
+CAM is reverted (commits 7fc0551, 9bb4514) and the 1.4k ALMs stay.
 
 
 ## 5. Open items
