@@ -68,7 +68,7 @@ module pa_cpu
     // TLB
     logic [15:0] tlb_lk_space, tlb_op_space, it_space;
     logic [19:0] tlb_lk_vpn, tlb_lk_rpn, it_vpn, it_rpn;
-    logic        tlb_lk_use, tlb_lk_hit, tlb_lk_t, tlb_lk_d, tlb_lk_b, tlb_lk_u, tlb_op_req, tlb_op_done;
+    logic        tlb_lk_use, tlb_lk_hit, tlb_lk_t, tlb_lk_d, tlb_lk_b, tlb_lk_u, tlb_op_req, tlb_op_done, tlb_op_cam;
     logic [6:0]  tlb_lk_ar;
     logic [14:0] tlb_lk_aid;
     tlb_op_e     tlb_op;
@@ -153,7 +153,7 @@ module pa_cpu
         .lk_space(tlb_lk_space), .lk_vpn(tlb_lk_vpn), .lk_use(tlb_lk_use), .lk_hit(tlb_lk_hit), .lk_rpn(tlb_lk_rpn),
         .lk_ar(tlb_lk_ar), .lk_aid(tlb_lk_aid), .lk_t(tlb_lk_t), .lk_d(tlb_lk_d), .lk_b(tlb_lk_b), .lk_u(tlb_lk_u),
         .op_req(tlb_op_req), .op(tlb_op), .op_space(tlb_op_space), .op_off(tlb_op_off), .op_gr(tlb_op_gr),
-        .op_done(tlb_op_done));
+        .op_done(tlb_op_done), .op_cam(tlb_op_cam));
 
     pa_core #(.CPU_REVISION(CPU_REVISION)) u_core (
         .clk(clk), .rst_n(rst_n),
@@ -165,7 +165,7 @@ module pa_cpu
         .tlb_lk_rpn(tlb_lk_rpn), .tlb_lk_ar(tlb_lk_ar), .tlb_lk_aid(tlb_lk_aid), .tlb_lk_t(tlb_lk_t),
         .tlb_lk_d(tlb_lk_d), .tlb_lk_b(tlb_lk_b), .tlb_lk_u(tlb_lk_u),
         .tlb_op_req(tlb_op_req), .tlb_op(tlb_op), .tlb_op_space(tlb_op_space), .tlb_op_off(tlb_op_off),
-        .tlb_op_gr(tlb_op_gr), .tlb_op_done(tlb_op_done),
+        .tlb_op_gr(tlb_op_gr), .tlb_op_done(tlb_op_done), .tlb_op_cam(tlb_op_cam),
         .it_req(it_req), .it_space(it_space), .it_vpn(it_vpn), .it_ack(it_ack), .it_hit(it_hit), .it_rpn(it_rpn),
         .it_xok(it_xok), .it_type(it_type),
         .dc_ready(dc_ready), .dc_lk_en(dc_lk_en), .dc_lk_addr(dc_lk_addr), .dc_m_addr(dc_m_addr),

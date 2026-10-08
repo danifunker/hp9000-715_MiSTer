@@ -69,6 +69,7 @@ module pa_core
     output logic [15:0] tlb_op_space,
     output logic [31:0] tlb_op_off, tlb_op_gr,
     input  logic        tlb_op_done,
+    input  logic        tlb_op_cam,         // the TLB's CAM is comparing an operation's tag this cycle
     // the fetch unit's I-LAB refill (served when M does not need the TLB)
     input  logic        it_req,
     input  logic [15:0] it_space,
@@ -564,7 +565,7 @@ module pa_core
     assign tlb_lk_space = m_need ? m_space : it_space;
     assign tlb_lk_vpn   = m_need ? m_ea[31:12] : it_vpn;
     assign tlb_lk_use   = m_need && adv;
-    assign it_ack = it_req && !m_need;
+    assign it_ack = it_req && !m_need && !tlb_op_cam;
     assign it_hit = tlb_lk_hit;
     assign it_rpn = tlb_lk_rpn;
     assign it_type = tlb_lk_ar[6:4];

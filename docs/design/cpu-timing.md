@@ -21,6 +21,7 @@ same device); the paths are what to judge by.
 | 4 | 2026-10-07 | + UTLB (64 page + 8 block entries, DR8), virtual mode in both caches (space hash), protection checks, PROBE/LPA, the hardware walker, the I-LAB | `top_pipe` | **56.3 MHz** | -2.13 ns | 10,385 | 11,723 | 291 | 0 | 64 MHz **missed**; section 4.2 |
 | 4b | 2026-10-07 | fit 4's RTL with register retiming off (diagnostic) | `top_pipe` (`cpu_fmax_pipe_nort`) | 51.5 MHz | -3.79 ns | 9,107 | 9,828 | 291 | 0 | per-stage slacks; section 4.3 |
 | 5 | 2026-10-07 | + cuts F, A, M1, M2, M3 of section 4.3; CPU revision 2 | `top_pipe` | **62.8 MHz** | -0.31 ns | 12,070 | 14,923 | 291 | 0 | 1.2 MHz short; section 4.3 |
+| 6 | 2026-10-07 | + the W-stage TLB operations share the lookup CAM (4.4) | `top_pipe` | pending | | | | | | |
 
 ## 1. Baseline: the sequential core (fit 1)
 
@@ -275,6 +276,22 @@ cut 2) -- it also relieves the placement around the TLB -- then a second
 seed; failing that, make PROBE's result a registered late result (it has
 the load-use interlock already, so a forward from M is never used).
 
+
+### 4.4 Sharing the CAM (fit 6)
+
+The W-stage TLB operations (IxTLBA/IxTLBP, the walker's inserts, PxTLB)
+had their own 64 x 36-bit comparators (`op_match`) to find their targets.
+Now the lookup CAM compares the operation's tag instead in the one cycle
+the operation is accepted (`op_cam`, state S_IDLE with `op_req`): W holds
+the pipeline for the whole operation, so the instruction in M consumes
+nothing that cycle, and the core withholds the I-LAB refill's `it_ack`.
+The tag select is a 3:1 mux (operation / M / I-LAB) that still fits one
+LUT per bit. `pa_tlb.sv`, `pa_core.sv` (`it_ack`), `pa_cpu.sv`. All ten
+suites pass.
+
+#### Result
+
+(fit 6 pending)
 
 ## 5. Open items
 

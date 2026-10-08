@@ -42,7 +42,8 @@ module pa_tlb
     input  logic [15:0] op_space,
     input  logic [31:0] op_off,         // the offset (vpn = [31:12]; block mask from bits 13:19)
     input  logic [31:0] op_gr,          // GR[r]: IxTLBA: rpn at bits 7:26; IxTLBP: ar 5:11, aid 16:30, t 2, d 3, b 4, u 12
-    output logic        op_done
+    output logic        op_done,
+    output logic        op_cam          // this cycle the CAM compares op_tag: the lookup result is invalid
 );
     // ---------------------------------------------------------------- page entries
     logic [35:0] tag [64];
@@ -63,8 +64,16 @@ module pa_tlb
     logic [14:0] b_aid [8];
     logic [3:0]  b_flags [8];           // {t, d, b, u}
 
+    typedef enum logic [1:0] { S_IDLE, S_SELECT, S_WALK, S_DONE } st_e;
+    st_e st;
+    wire [35:0] op_tag = {op_space, op_off[31:12]};
+
     // ---------------------------------------------------------------- lookup
-    wire [35:0] lk_tag = {lk_space, lk_vpn};
+    // one CAM for the lookup and the operations: in the cycle an operation is
+    // accepted (S_IDLE, op_req) it compares op_tag instead -- the pipeline holds
+    // behind the W instruction then, and the core withholds it_ack (cpu-timing.md 4.4)
+    assign op_cam = st == S_IDLE && op_req && !op_done;
+    wire [35:0] lk_tag = op_cam ? op_tag : {lk_space, lk_vpn};
     logic [63:0] match;
     logic [7:0]  bmatch;
     always_comb begin
@@ -106,12 +115,7 @@ module pa_tlb
     wire dr8_lockout = dr8[15], dr8_lockin = dr8[14], dr8_force_dis = dr8[13], dr8_lru_dis = dr8[6], dr8_blk_en = dr8[0];
     wire [5:0] dr8_ptr = dr8[12:7];
     wire [2:0] dr8_bptr = dr8[3:1];
-    wire [35:0] op_tag = {op_space, op_off[31:12]};
-    logic [63:0] op_match;
-    always_comb for (int i = 0; i < 64; i++) op_match[i] = !lockout[i] && tag[i] == op_tag;
 
-    typedef enum logic [1:0] { S_IDLE, S_SELECT, S_WALK, S_DONE } st_e;
-    st_e st;
     logic [63:0] targets;
     logic        blk_target;
     logic [5:0]  cur;
@@ -152,7 +156,7 @@ module pa_tlb
             end
         end else begin
             op_done <= 1'b0;
-            if (lk_use) used <= used | sel;
+            if (lk_use && !op_cam) used <= used | sel;
             case (st)
                 S_IDLE: if (op_req && !op_done) begin
                     st <= S_SELECT;
@@ -161,11 +165,11 @@ module pa_tlb
                         valid <= 64'd0;
                         st <= S_DONE;
                     end else begin
-                        targets <= op_match;
+                        targets <= match;
                         if (blk_sel) blk_target <= 1'b1;
                         if (is_ins_a) begin
-                            if (!dr8_force_dis) targets <= op_match | (64'd1 << dr8_ptr);
-                            else if (op_match == 64'd0 && !dr8_lru_dis && !blk_sel) begin
+                            if (!dr8_force_dis) targets <= match | (64'd1 << dr8_ptr);
+                            else if (match == 64'd0 && !dr8_lru_dis && !blk_sel) begin
                                 // normal replacement
                                 if (low_inv[6])      targets <= 64'd1 << low_inv[5:0];
                                 else if (low_nru[6]) targets <= 64'd1 << low_nru[5:0];
