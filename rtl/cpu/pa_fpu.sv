@@ -81,7 +81,7 @@ module pa_fpu
 
     // ---------------------------------------------------------------- state
     typedef enum logic [3:0] {
-        S_IDLE, S_CLASSIFY, S_ADD_ALIGN, S_ADD_SUM, S_MUL1, S_MUL2, S_DIV, S_SQRT, S_CVT, S_NORM, S_ROUND, S_DONE
+        S_IDLE, S_CLASSIFY, S_ADD_ALIGN, S_ADD_SUM, S_MUL1, S_MUL2, S_DIV, S_SQRT, S_CVT, S_CVT2, S_NORM, S_ROUND, S_DONE
     } st_e;
     st_e st;
     assign busy = st != S_IDLE;
@@ -98,6 +98,8 @@ module pa_fpu
     logic        is_int_result;         // FCNVFX: the integer path
     logic [63:0] int_result;
     logic        int_ovf;
+    logic [63:0] cvt_ival;              // FCNVFX: the shifted magnitude (S_CVT -> S_CVT2)
+    logic        cvt_g, cvt_r, cvt_s;
     // multiply
     logic [105:0] prod;
     logic [52:0]  mul_a, mul_b;
@@ -297,6 +299,7 @@ module pa_fpu
             st <= S_IDLE; done <= 1'b0; result <= 64'd0; result_we <= 1'b0; flags <= 5'd0; unimpl <= 1'b0; cmp_c <= 1'b0;
             na <= '0; nb <= '0; eff_sub <= 0; rs <= 0; re <= 0; rsig <= 0; rsticky <= 0; out_single <= 0;
             r_inexact_in <= 0; is_int_result <= 0; int_result <= 0; int_ovf <= 0; prod <= 0; mul_a <= 0; mul_b <= 0;
+            cvt_ival <= 0; cvt_g <= 0; cvt_r <= 0; cvt_s <= 0;
             iter <= 0; div_r <= 0; div_q <= 0; sq_rem <= 0; sq_root <= 0; sq_rad <= 0;
         end else begin
             done <= 1'b0;
@@ -405,43 +408,47 @@ module pa_fpu
                         st <= S_NORM;
                     end
                     default: begin                                 // F_CNVFX / F_CNVFXT: to a 32- or 64-bit integer
-                        logic [63:0] ival;
-                        logic gi, ri, si, up;
+                        // cycle 1: the shift (the rounding and negation follow in S_CVT2)
                         logic signed [13:0] e;
                         e = na.e;
                         if (e > 14'sd63) begin int_ovf <= 1'b1; st <= S_DONE; unimpl <= 1'b1; end
                         else begin
                             if (e >= 14'sd52) begin
-                                ival = {11'd0, na.sig} << 6'(e - 14'sd52);
-                                gi = 0; ri = 0; si = 0;
+                                cvt_ival <= {11'd0, na.sig} << 6'(e - 14'sd52);
+                                cvt_g <= 0; cvt_r <= 0; cvt_s <= 0;
                             end else begin
                                 // {sig, 2'b00} >> (52 - e) through the shared shifter (sh_in / sh_amt)
-                                ival = {11'd0, sh_out[54:2]}; gi = sh_out[1]; ri = sh_out[0]; si = sh_lost;
+                                cvt_ival <= {11'd0, sh_out[54:2]}; cvt_g <= sh_out[1]; cvt_r <= sh_out[0]; cvt_s <= sh_lost;
                             end
-                            if (op == F_CNVFXT) up = 1'b0;
-                            else case (rm)
-                                2'd0: up = gi & (ri | si | ival[0]);
-                                2'd1: up = 1'b0;
-                                2'd2: up = ~na.s & (gi | ri | si);
-                                default: up = na.s & (gi | ri | si);
-                            endcase
-                            ival = ival + {63'd0, up};
-                            r_inexact_in <= gi | ri | si;
-                            is_int_result <= 1'b1;
-                            if (dsgl) begin                        // 32-bit integer
-                                if (na.s ? (ival > 64'h8000_0000) : (ival > 64'h7FFF_FFFF)) int_ovf <= 1'b1;
-                                // ERS s.7.3 **: FCNVFX(T),dbl,sgl of -2^31 raises the unimplemented
-                                // exception "even though this is not strictly necessary"
-                                if (!sgl && na.s && ival == 64'h8000_0000) int_ovf <= 1'b1;
-                                int_result <= {(na.s ? -ival[31:0] : ival[31:0]), 32'd0};
-                            end else begin
-                                if (na.s ? (ival > 64'h8000_0000_0000_0000) : ival[63]) int_ovf <= 1'b1;
-                                int_result <= na.s ? -ival : ival;
-                            end
-                            st <= S_ROUND;
+                            st <= S_CVT2;
                         end
                     end
                 endcase
+                S_CVT2: begin                                      // F_CNVFX / F_CNVFXT cycle 2: round, negate, range
+                    logic [63:0] ival;
+                    logic up;
+                    if (op == F_CNVFXT) up = 1'b0;
+                    else case (rm)
+                        2'd0: up = cvt_g & (cvt_r | cvt_s | cvt_ival[0]);
+                        2'd1: up = 1'b0;
+                        2'd2: up = ~na.s & (cvt_g | cvt_r | cvt_s);
+                        default: up = na.s & (cvt_g | cvt_r | cvt_s);
+                    endcase
+                    ival = cvt_ival + {63'd0, up};
+                    r_inexact_in <= cvt_g | cvt_r | cvt_s;
+                    is_int_result <= 1'b1;
+                    if (dsgl) begin                                // 32-bit integer
+                        if (na.s ? (ival > 64'h8000_0000) : (ival > 64'h7FFF_FFFF)) int_ovf <= 1'b1;
+                        // ERS s.7.3 **: FCNVFX(T),dbl,sgl of -2^31 raises the unimplemented
+                        // exception "even though this is not strictly necessary"
+                        if (!sgl && na.s && ival == 64'h8000_0000) int_ovf <= 1'b1;
+                        int_result <= {(na.s ? -ival[31:0] : ival[31:0]), 32'd0};
+                    end else begin
+                        if (na.s ? (ival > 64'h8000_0000_0000_0000) : ival[63]) int_ovf <= 1'b1;
+                        int_result <= na.s ? -ival : ival;
+                    end
+                    st <= S_ROUND;
+                end
 
                 // ---- normalise the result significand so the leading one sits at bit 57
                 S_NORM: begin

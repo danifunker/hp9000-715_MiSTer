@@ -1027,8 +1027,8 @@ single-phase classic pipeline with the same hazard profile (1-cycle load-use,
 |---|---|---|
 | F | the next-PC mux (end of the previous cycle) drives the M10K address registers of L1-I and L2-I; this cycle: RAM read, L1/L2 tag compare against the I-LAB RPN (or the real address), select L1 > L2 > uncached buffer, parity check, I-LAB VPN check, execute-rights check result | IR, iaoq_f/b, iasq_f/b, fetch flags (ITLB miss, IMP, parity) |
 | D | full decode to a control word; GR read (2 async MLAB ports + shadowed-GR flip-flops); immediate assembly; PC-relative target adder (IAOQ_F + 8 + disp); static prediction -> fetch redirect; interlock checks (load-use, system-state, FP scoreboard, SR use after MTSP) | D/E register |
-| E | operand forwarding from M and W; ALU, shifter, MAX-1; condition evaluation -> nullify-next / branch taken; mispredict and GR-based branch (BV/BE/BLE/BLR) redirect; AGU: offset, base-modify value, space select, hash, D-cache/TLB address registered at the end of E; MFCTL/MFSP/LDSID/MFCPU reads of committed state; FP op issue | E/M register |
-| M | UTLB CAM (64 page + 8 block compare) -> encoded hit -> payload MLAB (RPN, AR, AID, flags); D-cache tag + data read (M10K, VIPT, address registered at end of E); tag compare with RPN (or real address); protection/alignment/T/D/B checks; parity; load align/sign-extend; store merge data; PROBE/LPA result | M/W register with hit/miss/trap flags |
+| E | operand forwarding from M only (anything older was bypassed into D: the D read sees M's result / base update / a load's cache word and W's write-through, cpu-timing.md 4.8); the UTLB CAM compares E's address (64 page + 8 block) and the hit vector is registered (cpu-timing.md 4.9); ALU, shifter, MAX-1; condition evaluation -> nullify-next / branch taken; mispredict and GR-based branch (BV/BE/BLE/BLR) redirect; AGU: offset, base-modify value, space select, hash, D-cache/TLB address registered at the end of E; MFCTL/MFSP/LDSID/MFCPU reads of committed state; FP op issue | E/M register |
+| M | UTLB payload select from the registered hit (one-hot AND-OR over flip-flops: RPN, AR, AID, flags, the PID match precomputed per entry); D-cache tag + data read (M10K, VIPT, address registered at end of E); tag compare with RPN (or real address); protection/alignment/T/D/B checks; parity; load align/sign-extend; store merge data; PROBE/LPA result | M/W register with hit/miss/trap flags |
 | W | priority-select interruption (group 4 pending, HPMC/TOC, group 2, group 3 from the instruction's flags); else commit: GR writes (target + base modify), store data/tag write to the D-cache RAMs, CR/SR/PSW/DR updates, EIRR, recovery counter; or start a W-operation (below) | architectural state |
 
 ### 6.2 IAOQ, branches, nullification
@@ -1066,10 +1066,10 @@ single-phase classic pipeline with the same hazard profile (1-cycle load-use,
 
 | Producer (in M or W) -> consumer in E | Bubbles | Mechanism |
 |---|---|---|
-| ALU/shift/AGU base-modify/MFCTL/MFSP result | 0 | forward from E/M and M/W registers |
+| ALU/shift/AGU base-modify/MFCTL/MFSP result | 0 | forward from the E/M register into E; bypass from the M/W register (and M's result) into D |
 | load, LPA, PROBE, RDD/RDT/RI2x, MFCPU_T (result at end of M) | **1** (load-use, as the real chip, ERS s.5.3.9) | interlock in D |
 | PSW C/B, V (ADDC, SUBB, DS, DCOR, IDCOR) | 0 | speculative C/B/V forwarded with the result |
-| SAR (MTCTL CR11) -> variable shift/extract/BVB | 0 | forwarded like a GR (ERS s.5.2: CR11 set early) |
+| SAR (MTCTL CR11) -> variable shift/extract/BVB | 0 | forwarded like a GR (ERS s.5.2: CR11 set early): from M into E, from M/W into a SAR copy registered at D -> E |
 | MTSP -> any SR user (memory ops, BE/BLE, MFSP, LDSID) | up to 2 | interlock until MTSP commits |
 | MTCTL (other CRs), MTCPU, SSM/RSM/MTSM, DIAG, TLB/cache ops, RFI | -- | "serialising": commit in W, then flush younger instructions and refetch at iaoq_b (ERS s.5.3.9 interlocks + s.5.3.11 LAB updates) |
 | store in W / W+1 -> load in M, same doubleword | 0 | store-to-load forwarding window of 2 cycles (the M10K returns old data on read-during-write) |
@@ -1087,7 +1087,7 @@ single-phase classic pipeline with the same hazard profile (1-cycle load-use,
   copies + a 32-bit live-value table. Write port 0: result/load target; write
   port 1: base-register modification (loads/stores with ,m/,ma/,mb, LDWM/STWM,
   PDC/FDC/FIC ,m). Both write in W, so commit stays atomic.
-* W-to-D same-cycle write-through bypass (MLAB returns old data).
+* W-to-D same-cycle write-through bypass (MLAB returns old data), and the M-to-D bypass (cpu-timing.md 4.8): a load's word from M is right for a hit; a miss replays; a load completing late in W (uncached, LDCW through memory) refetches the consumer that took it (`e_bp_ld` -> `w_refetch`); PROBE/LPA/LDSID/LCI/DIAG reads hold the consumer in D while in E or M.
 
 ### 6.5 Fetch side
 
@@ -1107,7 +1107,7 @@ single-phase classic pipeline with the same hazard profile (1-cycle load-use,
 | Item | Design |
 |---|---|
 | L2-D | 128 KB: data 16K x 66 bits, tag 4K x 23 bits, M10K simple dual-port; read port in M (and for write-back/diagnose reads while frozen), write port at the end of W (stores, fills, diagnose) |
-| Lookup | VIPT: index from the VA registered at the end of E; the UTLB CAM and payload MLAB run in the same M cycle; tag compare with the payload RPN. Real mode: PA = VA, the TLB is not used |
+| Lookup | VIPT: index from the VA registered at the end of E; the UTLB CAM compares in E and its hit vector is registered, the payload select (flip-flops, one-hot AND-OR) runs in M; tag compare with the payload RPN. Real mode: PA = VA, the TLB is not used |
 | Stores | read-merge-write of a whole doubleword in W (the merge data and the line's dirty state come from the M read); byte-lane writes are therefore never needed, parity is regenerated per word, and STB/STH/STBY need no byte enables (2K x 5 M10K slices have none) |
 | Misses | registered in M, acted on in W: **replay**. W writes back the victim if dirty, fills the line (write-allocate for stores; no store hints), then flushes the pipeline and refetches the missing instruction itself, which now hits. Only one miss outstanding. (The real chip's stall-on-use is a later optimisation, P-016) |
 | Uncached loads/stores | issued from W (non-speculative), in order. Loads stall W until `io_ack`; stores go into a **one-entry uncached store buffer** and W continues; any later uncached access, line transaction or SYNC waits for it to drain |
@@ -1243,7 +1243,7 @@ rom.dis f00158e0-f00158fc) -- a patched ROM, so only if needed (Q1).
 | Unimplemented exception | destination and flags untouched, fr1L <- {code, insn{6:31}}, FPSR.T <- 1 | sec. 3.5 |
 | Compare | 5-bit FCMP condition; C -> FPSR{5}, queue FPSR{10:20} shifted (ERS s.7.4.3); sNaN input or qNaN with a trapping condition -> unimplemented | |
 | FMPYADD/FMPYSUB/FMPYCFXT | multiply then add (or FCNVFXT of ta) as two sequenced steps; if either would trap, neither result is written | ERS s.7.3, s.7.4.2 |
-| Latency (ours) | measured 2026-10-07 (`make -C verilator tb_fpu`, `tb_fpu ... -v`), engine start -> done: FCPY/FABS/FCMP 2, FCNVxx 4, FADD/FSUB/FMPY/XMPYU 6, FDIV 60, FSQRT 59 (singles take the full double-length recurrence), FMPYADD/SUB/CFXT = multiply + add + 1; plus 3 cycles in `pa_fpunit` (the operand read cycle, the registered start, done -> idle) during which the next FP instruction waits in D (S-012) | P-016 |
+| Latency (ours) | measured 2026-10-07 (`make -C verilator tb_fpu`, `tb_fpu ... -v`), engine start -> done: FCPY/FABS/FCMP 2, FCNVFF 4, FCNVXF/FCNVFX/FCNVFXT 5, FADD/FSUB/FMPY/XMPYU 6, FDIV 60, FSQRT 59 (singles take the full double-length recurrence), FMPYADD/SUB/CFXT = multiply + add + 1; plus 3 cycles in `pa_fpunit` (the operand read cycle, the registered start, done -> idle) during which the next FP instruction waits in D (S-012) | P-016 |
 
 ---
 ## 7. Verification plan hooks

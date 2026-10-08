@@ -1,3 +1,36 @@
+# Status 2026-10-08 (night session): all three items done, 64 MHz met
+
+Commits 1c3137b .. (fit 15), in order:
+
+1. **Fit 10** measured the committed core with the FPU: 55.8 MHz, 17.5k
+   ALMs (the FR file had fallen into flip-flops, three read ports).
+2. **fpedge expectations** (`tests/cpu/model.py` `fp_operate` /
+   `predict_fpedge`, ERS s.7.2-7.4 + ACD table 6-20, exact rational
+   arithmetic): 160 groups / 1,344 vectors pass on the RTL incl. the trap
+   counts; `tb_fpu` replays fp + fpedge with the model's expectations.
+   Found and fixed five FPU bugs (FSTD fr0's T clear invisible to the next
+   FP instruction; zero operands with an implicit leading one in add/sub;
+   FDIV/FSQRT denormal cases; FCNVFX,dbl,sgl of -2^31). S-013 retired.
+3. **S-012 measured**: the FP stall costs 0.15 % of the fp suite's cycles
+   (`dbg_fp_stall`), nothing in integer code -- left as is.
+4. **Fits 11-15** (`docs/design/cpu-timing.md` 4.5-4.11): FR file as MLAB
+   copies and a registered operand read (fit 11); the `wd0` select cut and
+   engine area cuts (12); the lookup-tag register and "E forwards from M
+   only, D bypasses from M and W, load-word bypass with refetch" (13); the
+   TLB CAM in E with the hit vector registered (14); the PID match as a
+   payload bit, registered select/hits, the tag mux on E's need, FCNVFX in
+   two cycles (15): **70.2 MHz, +1.37 ns, 14,720 ALMs, every stage
+   positive**. Each step passed the 12 suites, the lockstep co-simulation
+   and HP's ROM to `BOOT_ADMIN>` (215.2 M cycles, unchanged by the TLB
+   work) before its commit.
+
+Open (none blocking): seed spread of fit 15 (fit 15c = seed 3, see the
+table); the TLB's PID-match comparators could move to a sweep if the whole
+machine runs short of ALMs; the conditional-shift nullify path only if the
+system integration eats the margin. The original prompt follows.
+
+---
+
 # Resume prompt -- CPU: finish the FPU (fit, fpedge expectations, overlap)
 
 You are continuing the HP 9000/715 MiSTer core in `/home/dani/repos/hp9000-715`.

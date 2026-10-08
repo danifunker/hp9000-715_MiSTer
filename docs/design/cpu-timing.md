@@ -33,6 +33,8 @@ same device); the paths are what to judge by.
 | 13 | 2026-10-08 | + cuts T (lookup tag register) and F (E forwards from M only, D bypasses M/W, load-word bypass with refetch) | `top_pipe` | **53.9 MHz** | -2.92 ns | 12,326 | 15,824 | 291 | 4 | -1.7k ALMs; E/D stages now -0.46/-0.04, the M-stage lookup + checks chain is 17.8 ns on its own; section 4.9 |
 | 13b | 2026-10-08 | fit 13's RTL, retiming off (diagnostic) | `top_pipe` (`cpu_fmax_pipe_nort`) | 48.0 MHz | -4.00 ns | 11,672 | -- | 291 | 4 | stages: M -4.00 (the lookup chain), F2 -1.47 and D -0.84 (M forward -> ALU -> branch), E -1.31 (M forward -> shifter -> nullify), TLB ops -1.29 |
 | 14 | 2026-10-08 | + the CAM in E: `match`/`bmatch` registered at E -> M | `top_pipe` | **55.7 MHz** | -2.34 ns | 12,071 | 15,329 | 291 | 4 | M chain -2.19 (now `sel` -> AND-OR -> PID -> trap, 17 ns), FPU FCNVFX -2.34, W hold in front of the CAM -1.16; section 4.10 |
+| 15 | 2026-10-08 | + PID match as a payload bit, `sel`/hits registered, the tag mux on E's need, FCNVFX in two cycles | `top_pipe` | **70.2 MHz** | +1.37 ns | 14,720 | 17,130 | 291 | 4 | **64 MHz met with the FPU**; every stage positive; section 4.11 |
+| 15c | 2026-10-08 | fit 15's RTL, seed 3 | `top_pipe` (`cpu_fmax_pipe_s3`) | **69.3 MHz** | +1.19 ns | 14,704 | 17,063 | 291 | 4 | the margin holds across seeds (worst: `w_trap` -> the fetch unit's `nb`) |
 
 ## 1. Baseline: the sequential core (fit 1)
 
@@ -529,11 +531,47 @@ F1 +0.57, D -0.54 (M forward -> shifter -> zero detect -> condition ->
 | `w_hold` -> the next-tag mux -> `n_tag` -> CAM compare -> `match` | -1.16 (and `w_trap` -> `match` -0.77) | the W hold decision (`adv`) selects the CAM's input | the tag mux selects on E's own need (`e_need`), `adv` only gates the register load; the I-LAB is not served during a hold while E would translate (a refill waits a few cycles) |
 | M forward -> shifter -> result zero-detect -> shift condition -> `e_nullify` -> `e_nul` | -0.54 | conditional shift/extract/deposit nullify | left for after fit 15 (a one-cycle D stall after a conditional shift, with the condition from the registered result) |
 
+### 4.11 Fit 15: 64 MHz with the FPU
+
+The four cuts of 4.10: **70.2 MHz, +1.37 ns; 14,720 ALMs / 17,130
+registers**. All 12 suites, the co-simulation and the ROM boot (again
+215,232,637 cycles) pass. Per stage: M +1.87, E +2.88, D +2.41, F2 +2.72,
+F1 +2.29, TLB +1.69, FPU +1.97, from `w_trap` +1.65. The worst path of the
+whole design is now a W-stage one (`w_dperr_eff` -> the fetch unit's
+IAOQ-back register `nb`), +1.37 ns.
+
+Area by entity: `pa_tlb` 5,176 ALMs / 7,062 registers (the PID-match
+bits: 64 x 4 + 8 x 4 fifteen-bit comparators plus their OR trees, all
+combinational, ~+0.8k over fit 11), `pa_core` 4,341, `pa_fpunit` 2,907
+(engine 2,101), `pa_fetch` 741, the caches ~1,030, `pa_biu` 107; the rest of
+the +2.6k over fit 14 is the fitter's own duplication for the slack it now
+has. If area matters later, the same bits can be
+kept in registers and recomputed by a sweep (one comparator set, 64
+cycles while W holds) on each PID write and at each insert; nothing else
+in the design depends on how they are produced.
+
+What the 64 MHz core now looks like, in pipeline terms (cpu.md 6.8 has
+the stage definitions): the TLB CAM compares in E against E's address
+(or the I-LAB's request) and registers the valid-qualified hit vector; M
+selects the payload (RPN, rights, flags, PID match) and decides the
+translation traps; E's operands come from D (register file, or the D
+bypass from M and W) or the M forward only -- never from W; a load's word
+is bypassed from M into D, a load that completes late in W refetches a
+consumer that took it. Cycle costs against fit 9: the refetch after an
+uncached load with a consumer right behind it (~5 cycles), one more
+bubble after PROBE/LPA/LDSID/LCI/DIAG read before a dependent use, two
+more FPU cycles per operation (the registered operand read and start),
+one more for FCNVXF and FCNVFX.
+
 ## 5. Open items
 
-- **Fit 15**: the four cuts of 4.10; 64 MHz with the FPU is the gate. Then
-  seeds 1 and 3 for margin (the seed moves this design by ~2 MHz: fits 8/9,
-  12/12c).
+- Seed 1 of fit 15's RTL, if one more point of the spread is wanted (seed 3
+  gave 69.3 MHz, +1.19 ns).
+- The conditional shift/extract/deposit nullify path (D +2.41 now; was
+  the next item when the budget was tight) needs nothing unless the system
+  integration eats the margin.
+- The TLB's PID-match area (above) if the whole machine runs short of
+  ALMs.
 
 - Prediction in F2 instead of D (see 2.1) once the real F2 (tag compare +
   select) exists and its slack is known.

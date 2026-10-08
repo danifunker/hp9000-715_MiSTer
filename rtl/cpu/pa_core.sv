@@ -66,6 +66,8 @@ module pa_core
     input  logic [19:0] tlb_lk_rpn,
     input  logic [6:0]  tlb_lk_ar,
     input  logic [14:0] tlb_lk_aid,
+    input  logic        tlb_lk_pid_rd, tlb_lk_pid_wr,
+    output logic [15:0] pid_o [4],
     input  logic        tlb_lk_t, tlb_lk_d, tlb_lk_b, tlb_lk_u,
     // FP unit (pa_fpunit): operations issue at W commit, loads write at W commit,
     // stores read in W; the unit's busy / FPSR.T / FPSR feed D's stall and E's traps
@@ -633,15 +635,17 @@ module pa_core
     // translate in M). M then starts from the registered match. The I-LAB is
     // served only while its request still equals the registered tag (a
     // redirect may have moved F1 since the edge).
+    // (the tag select is E's own need, never the W hold: `adv` only gates
+    // the load, so no W-stage control sits in front of the CAM -- 4.10)
     wire e_need = e_valid && !e_nul && e_xlate;
-    assign tlb_lk_space = (adv && e_need) ? e_sp : it_space;
-    assign tlb_lk_vpn   = (adv && e_need) ? e_va[31:12] : it_vpn;
+    assign tlb_lk_space = e_need ? e_sp : it_space;
+    assign tlb_lk_vpn   = e_need ? e_va[31:12] : it_vpn;
     assign tlb_lk_load  = adv || !m_need;
     logic        lk_is_it;              // the registered match is the I-LAB's
     always_ff @(posedge clk) begin
         if (!rst_n) lk_is_it <= 1'b0;
         else if (tlb_op_accept) lk_is_it <= 1'b0;
-        else if (tlb_lk_load) lk_is_it <= !(adv && e_need);
+        else if (tlb_lk_load) lk_is_it <= !e_need;
     end
     assign tlb_lk_use   = m_need && adv;
     assign it_ack = it_req && lk_is_it && !m_need && !tlb_op_cam &&
@@ -658,16 +662,11 @@ module pa_core
     function automatic logic xok_at(input logic [1:0] pl);
         return ar_type[2:1] != 2'b00 && ar_pl2 <= pl && pl <= ar_pl1;
     endfunction
-    logic pid_rd_ok, pid_wr_ok;
-    always_comb begin
-        pid_rd_ok = 1'b0; pid_wr_ok = 1'b0;
-        for (int k = 0; k < 4; k++)
-            if (pid[k][15:1] == tlb_lk_aid) begin
-                pid_rd_ok = 1'b1;
-                if (!pid[k][0]) pid_wr_ok = 1'b1;
-            end
-        if (!psw[P_P] || tlb_lk_aid == 15'd0) begin pid_rd_ok = 1'b1; pid_wr_ok = 1'b1; end
-    end
+    // the PID match comes with the entry (pa_tlb computes it per entry from
+    // the PID registers); PSW[P] = 0 disables the check
+    wire pid_rd_ok = !psw[P_P] || tlb_lk_pid_rd;
+    wire pid_wr_ok = !psw[P_P] || tlb_lk_pid_wr;
+    always_comb for (int k = 0; k < 4; k++) pid_o[k] = pid[k][15:0];
     assign it_xok = {xok_at(2'd3), xok_at(2'd2), xok_at(2'd1), xok_at(2'd0)} & {4{pid_rd_ok}};
     wire [19:0] m_rpn = m_xlate ? tlb_lk_rpn : m_ea[31:12];
     wire m_tmiss = m_xlate && !tlb_lk_hit;

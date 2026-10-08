@@ -39,10 +39,12 @@ module pa_tlb
     input  logic        lk_load,        // register the compare of (lk_space, lk_vpn) this edge
     output logic [35:0] lk_tag_r,       // the tag the registered match belongs to
     input  logic        lk_use,
+    input  logic [15:0] pid [4],        // CR8/9/12/13: access id at [15:1], write-disable at [0]
     output logic        lk_hit,
     output logic [19:0] lk_rpn,
     output logic [6:0]  lk_ar,
     output logic [14:0] lk_aid,
+    output logic        lk_pid_rd, lk_pid_wr,   // the entry's access id matches a PID (read / write allowed)
     output logic        lk_t, lk_d, lk_b, lk_u,
 
     // operations
@@ -99,34 +101,55 @@ module pa_tlb
                           b_vpn[i][12:7] == n_tag[19:14] &&
                           ((b_vpn[i][6:0] ^ n_tag[13:7]) & b_mask[i]) == 7'd0;
     end
+    // registered for M: the raw match (the operations' targets), the valid
+    // entries hit (the payload select), the page hit and the block hit/index
+    wire [63:0] n_sel = n_match & valid;
+    logic [63:0] sel;
+    logic        pg_hit, b_hit;
+    logic [2:0]  b_idx;
+    logic [2:0]  n_bidx;
+    always_comb begin
+        n_bidx = 3'd0;
+        for (int i = 0; i < 8; i++) if (n_bmatch[i]) n_bidx = n_bidx | 3'(i);
+    end
     always_ff @(posedge clk) begin
-        if (!rst_n) begin match <= 64'd0; bmatch <= 8'd0; lk_tag_r <= 36'd0; end
-        else if (op_accept || lk_load) begin match <= n_match; bmatch <= n_bmatch; lk_tag_r <= n_tag; end
+        if (!rst_n) begin match <= 64'd0; bmatch <= 8'd0; lk_tag_r <= 36'd0; sel <= 64'd0; pg_hit <= 1'b0; b_hit <= 1'b0; b_idx <= 3'd0; end
+        else if (op_accept || lk_load) begin
+            match <= n_match; bmatch <= n_bmatch; lk_tag_r <= n_tag;
+            sel <= n_sel; pg_hit <= |n_sel; b_hit <= |n_bmatch; b_idx <= n_bidx;
+        end
     end
     wire [19:0] lk_vpn_r = lk_tag_r[19:0];
-    wire [63:0] sel = match & valid;
-    wire pg_hit = |sel;
-    logic [45:0] pl_all;
+    // PID match per entry, from registers only (the entry's access id against
+    // the four PID registers; id 0 is public): two more payload bits, so the
+    // check costs nothing after the payload select (cpu-timing.md 4.10)
+    logic [63:0] p_rd, p_wr;
+    logic [7:0]  bp_rd, bp_wr;
+    function automatic logic [1:0] pid_ok(input logic [14:0] aid);   // {rd, wr}
+        pid_ok = (aid == 15'd0) ? 2'b11 : 2'b00;
+        for (int k = 0; k < 4; k++)
+            if (pid[k][15:1] == aid) begin pid_ok[1] = 1'b1; if (!pid[k][0]) pid_ok[0] = 1'b1; end
+    endfunction
     always_comb begin
-        pl_all = 46'd0;
-        for (int i = 0; i < 64; i++) pl_all = pl_all | (pay[i] & {46{sel[i]}});
+        for (int i = 0; i < 64; i++) {p_rd[i], p_wr[i]} = pid_ok(pay[i][18:4]);
+        for (int i = 0; i < 8; i++)  {bp_rd[i], bp_wr[i]} = pid_ok(b_aid[i]);
     end
-    wire [19:0] pl_rpn = pl_all[45:26];
-    wire [25:0] pl = pl_all[25:0];
-    logic [2:0] b_idx;
+    logic [47:0] pl_all;
     always_comb begin
-        b_idx = 3'd0;
-        for (int i = 0; i < 8; i++) if (bmatch[i]) b_idx = b_idx | 3'(i);
+        pl_all = 48'd0;
+        for (int i = 0; i < 64; i++) pl_all = pl_all | ({pay[i], p_rd[i], p_wr[i]} & {48{sel[i]}});
     end
+    wire [19:0] pl_rpn = pl_all[47:28];
+    wire [25:0] pl = pl_all[27:2];
     wire [19:0] b_rpn = {b_trans[b_idx][12:7], (b_trans[b_idx][6:0] & b_mask[b_idx]) | (lk_vpn_r[13:7] & ~b_mask[b_idx]),
                          lk_vpn_r[6:0]};
     always_comb begin
         if (pg_hit) begin
             lk_hit = 1'b1; lk_rpn = pl_rpn; lk_ar = pl[25:19]; lk_aid = pl[18:4];
-            {lk_t, lk_d, lk_b, lk_u} = pl[3:0];
+            {lk_t, lk_d, lk_b, lk_u} = pl[3:0]; {lk_pid_rd, lk_pid_wr} = pl_all[1:0];
         end else begin
-            lk_hit = |bmatch; lk_rpn = b_rpn; lk_ar = b_ar[b_idx]; lk_aid = b_aid[b_idx];
-            {lk_t, lk_d, lk_b, lk_u} = b_flags[b_idx];
+            lk_hit = b_hit; lk_rpn = b_rpn; lk_ar = b_ar[b_idx]; lk_aid = b_aid[b_idx];
+            {lk_t, lk_d, lk_b, lk_u} = b_flags[b_idx]; {lk_pid_rd, lk_pid_wr} = {bp_rd[b_idx], bp_wr[b_idx]};
         end
     end
 
