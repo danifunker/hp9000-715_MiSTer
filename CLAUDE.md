@@ -12,8 +12,8 @@ caches with diagnose access, TLB with the hardware walker, the FPU; it
 passes the 12 pacputest suites, the lockstep co-simulation and boots HP's
 PDC 1.6 to `BOOT_ADMIN>` on the machine top (`rtl/hp715.sv`, Verilator);
 **fit 15: 70.2 MHz, 14.7k ALMs with the FPU** (`docs/design/cpu-timing.md`).
-`HP9K715.sv` still drives the template's demo core (`rtl/mycore.v`, `cos.sv`,
-`lfsr.v`), which is placeholder and goes away when the machine goes in.
+`HP9K715.sv` is the whole machine on the MiSTer top at 64 MHz (built, not
+yet run on a board); SCSI (`rtl/scsi/`) is being brought up against the ROM.
 
 ## The user's process
 
@@ -43,7 +43,7 @@ PDC 1.6 to `BOOT_ADMIN>` on the machine top (`rtl/hp715.sv`, Verilator);
 | `HP9K715.{qpf,qsf,sdc,srf,sv}` | Quartus project (from Template_MiSTer). `HP9K715.sv` is the MiSTer `emu` top. The core name is **HP9K715** (user, 2026-10-07): it is the OSD name, the rbf name and the `games/HP9K715/` folder. |
 | `files.qip` | RTL file list -- add new RTL here |
 | `sys/` | MiSTer framework, copied as-is from `../Template_MiSTer` (2026-08-26, `3ea1134`). Do not edit. |
-| `rtl/` | the core (`pll*` from the template; demo files are placeholders) |
+| `rtl/` | the core (`pll*` from the template) |
 | `docs/review/01..05` | the 2026-10-07 reviews: system docs, chip docs, QEMU/SeaBIOS, ROM and prior art, firmware (PDC/IODC/STI) requirements |
 | `docs/review/06*.md` | what HP-UX 10.20 and Linux need from the hardware: 06 by block, with sub-reports 06a audio, 06b PS/2/serial/parallel, 06c graphics/STI, 06d SCSI (c720 driver, SCRIPTS) |
 | `docs/review/07-hpux-cpu-specifics.md` | HP-UX 10.20 / Linux versus PCX-L details: CPU revision (cpu.md Q3), walker CR28 (Q4), DIAG and implementation-specific opcodes (Q7, Q8), DR25 soft-power poll |
