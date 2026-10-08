@@ -28,6 +28,9 @@ same device); the paths are what to judge by.
 | 10 | 2026-10-07 | 1365246 + the FPU (`pa_fpunit` + `pa_fpu`, seed 2) | `top_pipe` | **55.8 MHz** | -2.28 ns | 17,545 | 21,254 | 293 | 4 | 64 MHz **missed**: +6.2k ALMs, the TLB path spread out; section 4.5 |
 | 11 | 2026-10-07 | + fpedge fixes, FR file as MLAB copies, registered operand read (`S_RD`) | `top_pipe` | **57.3 MHz** | -1.82 ns | 14,276 | 17,131 | 291 | 4 | FPU 3.2k ALMs; the TLB -> `wd0` -> ALU chain is back as the worst; section 4.6 |
 | 12 | 2026-10-07 | + the `w_wd0_val` cut (loads take `w_ld` regardless of cached), FCNVXF through the normalise shifter, one shared right shifter | `top_pipe` | **59.0 MHz** | -1.33 ns | 14,041 | 16,734 | 291 | 4 | the `wd0` chain is gone; next: TLB -> PID check -> PROBE result -> W forward -> shift amount; section 4.7 |
+| 12b | 2026-10-08 | fit 12's RTL, retiming off (diagnostic) | `top_pipe` (`cpu_fmax_pipe_nort`) | 51.9 MHz | -3.58 ns | 11,876 | 14,504 | 291 | 4 | per-stage slacks; section 4.8 |
+| 12c | 2026-10-08 | fit 12's RTL, seed 3 | `top_pipe` (`cpu_fmax_pipe_s3`) | **60.9 MHz** | -0.80 ns | 14,119 | 16,709 | 291 | 4 | the seed alone: +1.9 MHz; worst: W sysop -> TLB op CAM, D decode -> ALU |
+| 13 | 2026-10-08 | + cuts T (lookup tag register) and F (E forwards from M only, D bypasses M/W, load-word bypass with refetch) | `top_pipe` | **53.9 MHz** | -2.92 ns | 12,326 | 15,824 | 291 | 4 | -1.7k ALMs; E/D stages now -0.46/-0.04, the M-stage lookup + checks chain is 17.8 ns on its own; section 4.9 |
 
 ## 1. Baseline: the sequential core (fit 1)
 
@@ -443,11 +446,78 @@ hold cycle; their result is computed from registered copies into `w_ld`,
 which `wd0` already selects for late results), leaving `w_result <=
 m_result`, a plain register-to-register copy.
 
+### 4.8 Diagnosis of fit 12 without retiming, and the two cuts (fit 13)
+
+Fit 12b (`cpu_fmax_pipe_nort`: fit 12's RTL, retiming off, seed 2 -- 51.9
+MHz, -3.58 ns) gives the stages as the RTL has them, worst setup slack per
+destination (`paths_stage.tcl`, full paths with `paths_diag.tcl`):
+
+| Stage (destination registers) | Slack | Worst path |
+|---|---:|---|
+| M -> W (`w_trap`) | **-3.58** | `m_need` -> the port mux (`tlb_lk_space`, 1.4 ns of routing) -> the TLB's tag mux (`lk_tag`, 1.7 ns) -> CAM `match` -> `sel` -> payload AND-OR -> `lk_aid` -> PID compare -> `pid_wr_ok` -> the trap priority -> `w_trap`: 20.0 ns, of which 3.3 ns are spent before the CAM starts |
+| TLB ops (`targets`) | -1.50 | the same head into the operation's target select |
+| D -> E (`e_nul`) | **-1.68** | `w_result` (an MTSAR in W) -> `sar_in` (2.8 ns of routing) -> `sh_amount` -> the shifter (`ShiftRight2`, `ext_raw`, `Mux0`, `Selector`) -> the result zero-detect (`Equal2`, 4 levels) -> the shift condition -> `e_nullify` -> the next instruction's `e_nul`: 20.3 ns |
+| E -> M (`m_nullify`) | -1.35 | the same chain into E's own nullify register |
+| F2 (`f2_iasq_b`) | -1.41 | `w_c.fu` -> `wd0` select -> E's operand mux (`Mux28`) -> ALU carry chain -> compare -> branch condition -> `redir_from_e` -> the fetch unit's slot select -> the F2 enables: 20.3 ns |
+| D-cache RAM, I-cache RAM | -0.44, +0.03 | fine |
+
+So with retiming the fitter was balancing an M stage that is 3.6 ns over
+against E stages that are 1.4-1.7 ns over on their own -- a sum no
+balancing can meet -- and the reported chain is wherever it left the
+boundary. Two cuts, one per stage:
+
+| Cut | What | Where | Saves |
+|---|---|---|---|
+| **T** | the lookup tag is a register in the core, loaded at the E -> M edge with E's virtual address when the instruction entering M translates, held while W holds, else with the I-LAB's request; the I-LAB is acked only while its request still equals the registered tag (a redirect may move F1 after the edge) | `pa_core.sv` (`tlb_lk_space/vpn`, `lk_is_it`, `it_ack`) | the 3.3 ns of port mux + routing in front of the CAM, on every TLB path (trap, PROBE/LPA, the operations' target select) |
+| **F** | E forwards from M only. D bypasses from M (the ALU result, the base update, or the cache word `m_ld` of a load) ahead of W's write-through; E's operand muxes are 3:1, the shift amount comes from a SAR copy registered at D -> E (`e_sar_r`, bypassed from an MTSAR in M or W). A load's word from M is right for a hit; a miss replays from the load; a load that completes later in W (`W_DONE`: uncached, LDCW through memory, DIAG) **refetches** the consumer that took its word (`e_bp_ld` -> `w_refetch`, the existing commit-then-redirect to `w_iaoq_b`). The other late results (PROBE, LPA, LDSID, LCI, DIAG reads) hold the consumer in D while they are in E or M | `pa_core.sv` (`gra_d`/`grb_d`, `fsel`, `late_rt`, `ld_use`, `d_sar`, `w_refetch`) | one mux level and the `w_result`/`wd0` routing (2.8-4 ns) at the head of every E path: the shifter/nullify chain, the ALU/branch chain into F2 |
+
+Costs: cut T none in cycles (the I-LAB refill already waits for M);
+cut F an extra refetch (~5 cycles) after an uncached load whose consumer
+follows within a cycle, and one more bubble after PROBE/LPA/LDSID/LCI/DIAG
+read before a dependent use. All 12 suites and the co-simulation pass.
+
+### 4.9 Fit 13: the E stage fixed, the M-stage lookup exposed
+
+**53.9 MHz, -2.92 ns; 12,326 ALMs / 15,824 registers** (-1.7k ALMs: the
+W forward muxes and their duplicates). All 12 suites, the co-simulation
+(the pipelined core now takes ~2 % more cycles on the suites: the serial
+polling loops refetch after each uncached status load) and HP's ROM to
+`BOOT_ADMIN>` (215.2 M cycles, 80.9 M instructions) pass.
+
+Per stage on this retimed fit (`paths_stage13.tcl`): E -0.46 (`e_sar_sel`
+-> shifter -> `m_nullify`), D -0.04, F2 +1.00, F1 +1.32, TLB +0.46, FPU
+-0.92 (`na.e` -> the shared shifter -> `int_result`), from `w_trap` -0.69,
+and **M -2.92**: `tlb_lk_space` (the new register) -> `lk_tag` mux (1.2 ns)
+-> CAM `match` (3.9) -> `sel` (0.8) -> payload AND-OR (3.9, incl. 2.1 of
+routing) -> `lk_aid` (1.4) -> PID compare (1.2) -> `pid_wr_ok` (2.1) ->
+`m_trap_xd` (0.9) -> 1.5 of routing -> `w_trap`: **17.8 ns, register to
+register, no retiming in it**. Cut F did its job (E and D are within 0.5
+ns); cut T saved 2.2 of the 3.3 ns it aimed at; the fit-12 figure was the
+retimer lending M time from the E stage, which it can no longer do because
+E has none to spare either.
+
+The lookup alone (tag mux, CAM, select, AND-OR, output select) is 11 ns, so
+no consumer can follow it in the same cycle: the PID check (3.3 ns), the
+B/D/T flag traps, the cached/uncached decision, LPA's result and the
+D-cache tag compare all sit at 15-18 ns. Moving one check to W does not
+save the others. The cut that does is **the CAM in E** (fit 14): the
+virtual address is known mid-E (the EA adder), so the 64 page compares and
+the 8 block compares run in E against E's address (or the I-LAB's request,
+or an operation's tag at its acceptance) and `match`/`bmatch` become
+registers loaded at the E -> M edge; M starts at `sel`, ~5 ns earlier.
+The tag can change under a registered match only by a TLB operation, which
+holds the pipeline; every TLB operation therefore ends in a replay
+(inserts and walks already do; purges will) so the instruction in M looks
+up again. E's new path (operand forward -> adder -> 36-bit compare ->
+register) is ~10 ns.
+
 ## 5. Open items
 
-- **Fit 13**: the PROBE/LPA late-result cut once fit 12b says where the
-  stage budgets stand; 64 MHz with the FPU is the gate. Then seeds 1 and 3
-  for margin.
+- **Fit 14**: the CAM in E; 64 MHz with the FPU is the gate. Then seeds 1
+  and 3 for margin (the seed moves this design by ~2 MHz: fits 8/9, 12/12c).
+- The FPU's `na.e` -> shared shifter -> `int_result` path (-0.92): if it
+  stays after fit 14, give FCNVFX its own cycle for the shift (S_CVT ->
+  S_CVT2) instead of sharing with the alignment.
 
 - Prediction in F2 instead of D (see 2.1) once the real F2 (tag compare +
   select) exists and its slack is known.

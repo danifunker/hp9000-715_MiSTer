@@ -194,7 +194,9 @@ module pa_core
     logic [31:0] e_insn, e_iaoq_f, e_iaoq_b, e_gra, e_grb, e_target;
     logic [15:0] e_iasq_f, e_iasq_b;
     ctrl_t       e_c;
-    logic [2:0]  e_fa_sel, e_fb_sel;      // 0 reg, 1 M port0, 2 M port1, 3 W port0, 4 W port1
+    logic [1:0]  e_fa_sel, e_fb_sel;      // 0 reg (D read or bypass), 1 M port0, 2 M port1
+    logic        e_bp_ld;                 // an operand was bypassed in D from the load then in M
+    logic [4:0]  e_sar_r;                 // SAR as of D (bypassed from an MTSAR in M/W)
     logic [1:0]  e_cb_sel, e_v_sel, e_sar_sel;  // 0 PSW/reg, 1 M, 2 W
     // ---- M
     logic        m_valid, m_nul, m_err, m_taken, m_nullify, m_new_space;
@@ -264,30 +266,53 @@ module pa_core
         .shr_capture(shr_capture), .shr_restore(shr_restore), .dbg_gr(dbg_gr));
     logic shr_capture, shr_restore;
 
-    // W write-through bypass (port 0 wins). The select uses what W *would*
-    // write, not whether it commits this cycle: if W traps or holds instead,
-    // D's instruction is killed or re-read, so the gate stays off the path.
+    // Operand bypasses in D (cpu-timing.md 4.8): E forwards only from M, so D
+    // takes the newest value from M (the ALU result, the base update, or the
+    // cache word of a load) ahead of W's write-through (port 0 wins). The
+    // selects use what M / W *would* write, not whether they commit: if W
+    // traps or holds instead, D's instruction is killed or re-read. A load's
+    // word from M is right for a cache hit; a miss replays everything from the
+    // load, and a load that completes later in W (uncached, LDCW through
+    // memory) refetches the consumer (`w_refetch`). The other late results
+    // (PROBE, LPA, LDSID, LCI, DIAG reads) hold the consumer in D instead.
     wire bp0 = w_valid && !w_nul && w_c.rt_we && w_c.rt != 0;
     wire bp1 = w_valid && !w_nul && w_c.base_we && w_c.rb != 0;
+    wire m_fw = m_valid && !m_nul;
+    wire m_gload = m_c.fu == FU_LOAD && !m_c.fpm;
+    wire mp0 = m_fw && m_c.rt_we && m_c.rt != 0;
+    wire mp1 = m_fw && m_c.base_we && m_c.rb != 0;
+    wire [31:0] m_fw_rt = m_gload ? m_ld : m_result;
+    wire bp_ld_a = dc.ra != 0 && mp0 && m_c.rt == dc.ra && m_gload;
+    wire bp_ld_b = dc.rb != 0 && mp0 && m_c.rt == dc.rb && m_gload;
     always_comb begin
         gra_d = rd0; grb_d = rd1;
         if (dc.ra != 0) begin
-            if (bp0 && wa0 == dc.ra) gra_d = wd0;
-            else if (bp1 && wa1 == dc.ra) gra_d = wd1;
+            if (mp0 && m_c.rt == dc.ra)      gra_d = m_fw_rt;
+            else if (mp1 && m_c.rb == dc.ra) gra_d = m_base;
+            else if (bp0 && wa0 == dc.ra)    gra_d = wd0;
+            else if (bp1 && wa1 == dc.ra)    gra_d = wd1;
         end
         if (dc.rb != 0) begin
-            if (bp0 && wa0 == dc.rb) grb_d = wd0;
-            else if (bp1 && wa1 == dc.rb) grb_d = wd1;
+            if (mp0 && m_c.rt == dc.rb)      grb_d = m_fw_rt;
+            else if (mp1 && m_c.rb == dc.rb) grb_d = m_base;
+            else if (bp0 && wa0 == dc.rb)    grb_d = wd0;
+            else if (bp1 && wa1 == dc.rb)    grb_d = wd1;
         end
     end
 
     // interlocks
     wire [4:0] d_f6_10  = d_insn[25:21];
     wire [4:0] d_f11_15 = d_insn[20:16];
-    wire e_late = e_c.fu == FU_LOAD || (e_c.fu == FU_SYS && e_c.sysop == SYS_LDSID) ||
-                  (e_c.fu == FU_MMU && (e_c.sysop == MM_PROBE || e_c.sysop == MM_LPA || e_c.sysop == MM_LCI));
-    wire ld_use = e_valid && !e_nul && e_late && !e_c.fpm && e_c.rt != 0 &&
-                  (e_c.rt == d_f6_10 || e_c.rt == d_f11_15);
+    // results that are not in m_result when the instruction is in M
+    function automatic logic late_rt(input ctrl_t c);
+        late_rt = (c.fu == FU_LOAD && !c.fpm) || (c.fu == FU_SYS && c.sysop == SYS_LDSID) ||
+                  (c.fu == FU_MMU && (c.sysop == MM_PROBE || c.sysop == MM_LPA || c.sysop == MM_LCI)) ||
+                  (c.fu == FU_DIAG && c.rt_we);
+    endfunction
+    wire ld_use = (e_valid && !e_nul && late_rt(e_c) && e_c.rt != 0 &&
+                   (e_c.rt == d_f6_10 || e_c.rt == d_f11_15)) ||
+                  (m_valid && !m_nul && late_rt(m_c) && !m_gload && m_c.rt != 0 &&
+                   (m_c.rt == d_f6_10 || m_c.rt == d_f11_15));
     function automatic logic ser_stall(input ctrl_t c);
         ser_stall = (c.fu == FU_SYS) && (c.sysop == SYS_MTSP || (c.sysop == SYS_MTCTL && c.cr != 5'd11));
     endfunction
@@ -310,21 +335,24 @@ module pa_core
     wire adv_d = adv && !d_stall;              // D -> E this cycle
     assign adv_f2 = adv_d;                     // F2 -> D (also when D is empty)
 
-    // forwarding selects for the instruction entering E (what will be in M / W then)
-    function automatic logic [2:0] fsel(input logic [4:0] r);
-        fsel = 3'd0;
+    // forwarding selects for the instruction entering E (what will be in M then;
+    // anything older was bypassed in D)
+    function automatic logic [1:0] fsel(input logic [4:0] r);
+        fsel = 2'd0;
         if (r != 0) begin
-            if (e_valid && !e_nul && e_c.rt_we && e_c.rt == r)              fsel = 3'd1;
-            else if (e_valid && !e_nul && e_c.base_we && e_c.rb == r)       fsel = 3'd2;
-            else if (m_valid && !m_nul && m_c.rt_we && m_c.rt == r)         fsel = 3'd3;
-            else if (m_valid && !m_nul && m_c.base_we && m_c.rb == r)       fsel = 3'd4;
+            if (e_valid && !e_nul && e_c.rt_we && e_c.rt == r)              fsel = 2'd1;
+            else if (e_valid && !e_nul && e_c.base_we && e_c.rb == r)       fsel = 2'd2;
         end
     endfunction
     wire e_mtsar = e_c.fu == FU_SYS && e_c.sysop == SYS_MTCTL && e_c.cr == 5'd11;
     wire m_mtsar = m_c.fu == FU_SYS && m_c.sysop == SYS_MTCTL && m_c.cr == 5'd11;
     wire [1:0] d_cb_sel  = (e_valid && !e_nul && e_c.cb_we) ? 2'd1 : (m_valid && !m_nul && m_c.cb_we) ? 2'd2 : 2'd0;
     wire [1:0] d_v_sel   = (e_valid && !e_nul && e_c.ds)    ? 2'd1 : (m_valid && !m_nul && m_c.ds)    ? 2'd2 : 2'd0;
-    wire [1:0] d_sar_sel = (e_valid && !e_nul && e_mtsar)   ? 2'd1 : (m_valid && !m_nul && m_mtsar)   ? 2'd2 : 2'd0;
+    wire w_mtsar = w_c.fu == FU_SYS && w_c.sysop == SYS_MTCTL && w_c.cr == 5'd11;
+    wire [1:0] d_sar_sel = (e_valid && !e_nul && e_mtsar) ? 2'd1 : 2'd0;
+    // SAR as D sees it: an MTSAR in M or W bypassed, else the register
+    wire [4:0] d_sar = (m_valid && !m_nul && m_mtsar) ? m_result[4:0] :
+                       (w_valid && !w_nul && w_mtsar) ? w_result[4:0] : sar;
 
     // static prediction
     wire e_is_branch = e_valid && e_c.fu == FU_BRANCH;
@@ -339,18 +367,18 @@ module pa_core
     logic [31:0] fa, fb, opa;
     always_comb begin
         case (e_fa_sel)
-            3'd1: fa = m_result; 3'd2: fa = m_base; 3'd3: fa = wd0; 3'd4: fa = wd1;
+            2'd1: fa = m_result; 2'd2: fa = m_base;
             default: fa = e_gra;
         endcase
         case (e_fb_sel)
-            3'd1: fb = m_result; 3'd2: fb = m_base; 3'd3: fb = wd0; 3'd4: fb = wd1;
+            2'd1: fb = m_result; 2'd2: fb = m_base;
             default: fb = e_grb;
         endcase
         opa = e_c.a_imm ? e_c.imm : fa;
     end
     wire [7:0] cb_in  = (e_cb_sel == 2'd1) ? m_cb : (e_cb_sel == 2'd2) ? w_cb : psw[15:8];
     wire       v_in   = (e_v_sel == 2'd1)  ? m_v  : (e_v_sel == 2'd2)  ? w_v  : psw[P_V];
-    wire [4:0] sar_in = (e_sar_sel == 2'd1) ? m_result[4:0] : (e_sar_sel == 2'd2) ? w_result[4:0] : sar;
+    wire [4:0] sar_in = (e_sar_sel == 2'd1) ? m_result[4:0] : e_sar_r;
     wire [1:0] cur_pl = e_iaoq_f[1:0];
 
     // ---- ALU
@@ -595,10 +623,25 @@ module pa_core
     wire m_is_rd   = m_c.fu == FU_LOAD;
     wire m_probe   = m_c.fu == FU_MMU && m_c.sysop == MM_PROBE;
     wire m_lpa     = m_c.fu == FU_MMU && m_c.sysop == MM_LPA;
-    assign tlb_lk_space = m_need ? m_space : it_space;
-    assign tlb_lk_vpn   = m_need ? m_ea[31:12] : it_vpn;
+    // The lookup tag is a register (cpu-timing.md 4.8): loaded at the E -> M
+    // edge with E's virtual address when the instruction entering M translates,
+    // held while W holds M, else with the I-LAB's request. The CAM then starts
+    // from flip-flops instead of behind the port mux and its routing. The
+    // I-LAB is served only when its request still matches the registered tag
+    // (a redirect may have moved F1 since the edge).
+    logic        lk_is_it;              // the registered tag is the I-LAB's
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin tlb_lk_space <= 16'd0; tlb_lk_vpn <= 20'd0; lk_is_it <= 1'b0; end
+        else if (adv) begin
+            if (e_valid && !e_nul && e_xlate) begin tlb_lk_space <= e_sp; tlb_lk_vpn <= e_va[31:12]; lk_is_it <= 1'b0; end
+            else begin tlb_lk_space <= it_space; tlb_lk_vpn <= it_vpn; lk_is_it <= 1'b1; end
+        end else if (!m_need) begin
+            tlb_lk_space <= it_space; tlb_lk_vpn <= it_vpn; lk_is_it <= 1'b1;
+        end
+    end
     assign tlb_lk_use   = m_need && adv;
-    assign it_ack = it_req && !m_need && !tlb_op_cam;
+    assign it_ack = it_req && lk_is_it && !m_need && !tlb_op_cam &&
+                    it_space == tlb_lk_space && it_vpn == tlb_lk_vpn;
     assign it_hit = tlb_lk_hit;
     assign it_rpn = tlb_lk_rpn;
     assign it_type = tlb_lk_ar[6:4];
@@ -895,7 +938,10 @@ module pa_core
 
     // ---- W redirect: trap, RFI, flush
     logic [31:0] psw_next;
-    assign w_redir = w_trap_take || (w_commit && !w_nul && w_flush) || w_replay;
+    // a load that completed late (W_DONE) while E holds an instruction that
+    // took its word from M: commit, then refetch from the next instruction
+    wire w_refetch = wst == W_DONE && w_is_load && e_valid && e_bp_ld;
+    assign w_redir = w_trap_take || (w_commit && !w_nul && (w_flush || w_refetch)) || w_replay;
     assign redir_kill_all = w_redir;
     wire [31:0] vec_addr = (w_vec == TRAP_HPMC || w_vec == TRAP_TOC) ? 32'hF000_0000 : {iva[31:10], w_vec[4:0], 5'd0};
     always_comb begin
@@ -934,7 +980,7 @@ module pa_core
             d_ferr <= 0; d_fperr <= 0; e_fperr <= 0; m_fperr <= 0; w_fperr <= 0; d_insn <= 0; d_iaoq_f <= 0; d_iaoq_b <= 0; d_iasq_f <= 0; d_iasq_b <= 0;
             e_nul <= 0; e_err <= 0; e_pred <= 0; e_bflag <= 0; e_insn <= 0; e_iaoq_f <= 0; e_iaoq_b <= 0;
             e_iasq_f <= 0; e_iasq_b <= 0; e_gra <= 0; e_grb <= 0; e_target <= 0; e_c <= '0;
-            e_fa_sel <= 0; e_fb_sel <= 0; e_cb_sel <= 0; e_v_sel <= 0; e_sar_sel <= 0;
+            e_fa_sel <= 0; e_fb_sel <= 0; e_cb_sel <= 0; e_v_sel <= 0; e_sar_sel <= 0; e_bp_ld <= 0; e_sar_r <= 0;
             m_nul <= 0; m_err <= 0; m_taken <= 0; m_nullify <= 0; m_new_space <= 0; m_insn <= 0;
             m_iaoq_f <= 0; m_iaoq_b <= 0; m_iasq_f <= 0; m_iasq_b <= 0; m_result <= 0; m_base <= 0;
             m_ea <= 0; m_target <= 0; m_trap <= 0; m_trap_data <= 0; m_cb <= 0; m_v <= 0;
@@ -997,6 +1043,7 @@ module pa_core
                         e_gra <= gra_d; e_grb <= grb_d; e_target <= d_target; e_c <= dc;
                         e_pred <= d_pred;
                         e_fa_sel <= fsel(dc.ra); e_fb_sel <= fsel(dc.rb);
+                        e_bp_ld <= bp_ld_a || bp_ld_b; e_sar_r <= d_sar;
                         e_cb_sel <= d_cb_sel; e_v_sel <= d_v_sel; e_sar_sel <= d_sar_sel;
                     end else begin
                         e_valid <= 1'b0;
