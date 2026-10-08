@@ -42,9 +42,12 @@ Every CPU access goes through the MIOC. Cacheable accesses come on the line
 port (cpu.md 6.8) and can only be memory; uncached ones (I/O space, U-bit
 pages, LDCW read-and-clear, instruction fetches from the ROM) come on the
 uncached port and are decoded as below. "BE" = bus error: the access is
-acknowledged with `io_err` (loads: precise HPMC; stores: HPMC at the next
-boundary, STUBS S-006), MIOC_STATUS |= 0x02 (pioae) and MDERRADD = the
-address (HW 1.3, 1.7, 7).
+reported as MIOC_STATUS |= 0x02 (pioae), MDERRADD = the address and the
+`hpmc_req` level (HW 1.3, 1.7, 7); a load is also acknowledged with
+`io_err` (a precise HPMC on the load, PSW.M then masks the level), a store
+is not (the write is posted: its HPMC comes from the level at the next
+instruction boundary; with `io_err` as well the core would take a second
+HPMC once the handler returns -- ROM test 0x410D9).
 
 | Range | Target | Reads | Writes | Ref |
 |---|---|---|---|---|
@@ -139,9 +142,13 @@ DDR3 word per line write-back; it is never on the fill path.
 ### 3.3 RAM port
 
 `ram_req` held until `ram_ack`, `ram_we`, `ram_addr` (byte address of a
-doubleword inside the RAM, 28 bits), `ram_line` (1 = 4 beats, wrapping from
-`ram_addr[4:3]`; 0 = one doubleword), `ram_be[7:0]` (single writes),
-`ram_wdata` + `ram_wready` (one per beat), `ram_rdata` + `ram_rvalid`.
+doubleword inside the RAM, 28 bits), `ram_line` (1 = 4 beats; 0 = one
+doubleword), `ram_be[7:0]` (single writes), `ram_wdata` + `ram_wready` (one
+per beat, writes always in order from doubleword 0), `ram_rdata` +
+`ram_rvalid` + `ram_rbeat` (each read beat names its doubleword: a line
+starts with the one at `ram_addr[4:3]`, in whatever order the memory
+delivers -- the SDRAM's is c, c^1, c^2, c^3 -- except that a line read from
+doubleword 0 comes in order 0..3, which uncached bursts rely on).
 Line writes are collected in the MIOC first and sent as one burst; fills
 stream through the ECC check (one register stage) to the CPU's `mem_r*`.
 Uncached writes to RAM are read-modify-write in the MIOC (the check byte
@@ -235,7 +242,7 @@ outputs. The ROM's chassis codes are the byte `(code >> 12) & 0xFF`
 | Item | Choice |
 |---|---|
 | clk_sys | one clock for the CPU, the MIOC and all devices. The CPU closes 64 MHz on its own (cpu-timing.md fit 9); the board build decides the final number. CR16 always counts at the strap's rate whatever clk_sys is: the MIOC derives `cfg_tq/tr/td` from the model and the clk_sys frequency (cpu.md 5.2). In the simulator clk_sys is "64 MHz" (TQ = 1, TR = 0, TD = 1 for the 715/64) |
-| RAM / DDR3 / video | on the board *(later)*: SDRAM at 2 x clk_sys with a synchronous bridge (the Quadra's `sdram.sv` + beat bridge pattern), DDR3 through the MiSTer `DDRAM_*` bridge at its own clock with a CDC FIFO (the Indy's `ddr3_mux.sv`), video from the MiSTer framebuffer (8-bit palette mode) reading VRAM in DDR3 |
+| RAM / DDR3 / video | on the board, all on clk_sys (64 MHz, `HP9K715.sv`): `rtl/mister/sdram64.sv`, a closed-page SDRAM controller (BL8, CAS 2, two bursts per line, ~25 cycles per line fill; unit bench `make -C verilator tb_sdram64`) with SDRAM_CLK from a second PLL output 270 degrees late (11.7 ns; chosen on paper for the 64 MHz read window, to be confirmed on the board); `rtl/mister/ddr3_port.sv` on the `DDRAM_*` bridge with DDRAM_CLK = clk_sys: boot ROM at DDR3 0x3000_0000, check store at 0x3100_0000; *(later)* VRAM in DDR3 for Artist, shown by the MiSTer framebuffer (8-bit palette mode), and the RAM above 128 MB. A faster SDRAM clock (2 x clk_sys) is the obvious memory-latency improvement once the machine works on the board |
 | UART / RTC / PS/2 time bases | fractional dividers from clk_sys: 7.3728 MHz x16 baud reference, 1 Hz RTC tick, PS/2 bit timing for the device model |
 | Power-on reset | `reset` input (MiSTer reset, ROM download) resets everything; RAM contents survive, the EEPROM is never cleared |
 | Broadcast reset | a store of 5 to FFFC_0030 / FFFE_0030 asserts the machine reset for 16 cycles after the store is acknowledged: CPU, MIOC registers, LASI and its units (the same as power-on except memory and the EEPROM) |
@@ -253,7 +260,25 @@ simulator) and **applies the one-word patch of STUBS S-011** (file offset
 HP's. The machine is held in reset while a download runs. The simulator
 loads the same file through the same loader (`verilator/sim.v`).
 
-## 9. Simulation
+## 9. The MiSTer top (`HP9K715.sv`)
+
+| Item | |
+|---|---|
+| OSD | model (715/64/80/100) and RAM (16-128 MB, clipped to the SDRAM module) latched at reset; `SC1,EEP` = the EEPROM image; TOC button; soft power off (DR25 bit 0 held "pressed" for 2 s); reset |
+| EEPROM | `rtl/mister/eeprom_save.sv`: the mounted image is read into the EEPROM before the machine leaves reset (or a 3 s backstop); saved when the OSD opens or 2 s after the firmware's last write. No image = a blank EEPROM = manufacturing mode |
+| Boot ROM | `games/HP9K715/boot.rom`, sent by the MiSTer at core start (ioctl index 0) through `rom_loader` (S-011 patch) into DDR3; the machine waits in reset until it has arrived; `ioctl_wait` paces the download |
+| RTC | hps_io's TIMESTAMP (seconds since 1970) is loaded into the LASI RTC whenever it is sent |
+| Serial | LASI RS-232 on the MiSTer UART pins (UART_TXD/RXD); CONF_STR offers 9600-115200 to the Main |
+| Video | a placeholder until Artist: the eight LEDs and the power LED on a 640x480 screen (STUBS S-018) |
+| LEDs | LED_USER = front-panel LED4 (the OS heartbeat), LED_DISK = LED3, LED_POWER = LASI's power LED |
+
+## 10. Builds (whole core, Quartus 17.0.2)
+
+| # | Date | Tree | Core clock (64 MHz) | ALMs | M10K | DSP | Notes |
+|---|---|---|---|---|---|---|---|
+| 1 | 2026-10-08 | the machine before SCSI (fix #4 in, #5 not) | setup +0.781 ns, hold +0.249 ns | 25,041 (60 %) | 358 (65 %) | 37 | first full build; every clock meets timing; `output_files/HP9K715.rbf` (not committed). SDRAM I/O unconstrained (S-019) |
+
+## 11. Simulation
 
 * `verilator/sim.v` (`emu`): hp715 + RAM, ROM and check-store arrays +
   the ROM loader; the GUI (`make && ./obj_dir/Vemu`) shows the serial
@@ -261,5 +286,11 @@ loads the same file through the same loader (`verilator/sim.v`).
 * `verilator/romsim/`: the same `emu` with a headless driver (no SDL):
   loads the ROM and an EEPROM image, logs the serial console and every
   chassis code, can type into the serial port, and stops on a string.
+  Whole-model checkpoints (`--save-at`, `--restore`; valid only for the
+  build that made them), trace switches through an input port so they work
+  after a restore (`--gsctrace`, `--l1trace`, `--flags-from`), and a
+  simulator-only CR16 speed-up (`--turbo N`, default after 30M cycles: the
+  ROM's long delays are CR16 loops; selftest1's timer test needs the real
+  rate).
 * `tests/run-rom.sh`: boots the ROM headless and asserts milestones on the
   serial log and the chassis codes (BOOT 3.2).

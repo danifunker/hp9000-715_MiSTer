@@ -3,12 +3,12 @@
 // at a time, answered the cycle after the request; and a GSC master for its
 // interrupt transaction (IAR[4:0] written to IAR[31:5]).
 //
-// Pages (4 KB, offset bits 15:12): 0 interrupt registers, 5 RS-232, 8 PS/2,
-// 9 RTC, B clock registers, C PCR/ERRLOG/VER/IORESET/AMR. The units not
-// built yet -- parallel and its DMA (1-3, P-010), Harmony (4, P-003), SCSI
-// (6), LAN (7, P-005), floppy (A, D, P-004) -- read 0 and ignore writes
-// (STUBS S-015); so does everything above page D (LASI answers its whole
-// space, Lasi ERS app. A).
+// Pages (4 KB, offset bits 15:12): 0 interrupt registers, 5 RS-232, 6 SCSI
+// (the 53C710 outside this module, on the scsi_* port), 8 PS/2, 9 RTC, B
+// clock registers, C PCR/ERRLOG/VER/IORESET/AMR. The units not built yet --
+// parallel and its DMA (1-3, P-010), Harmony (4, P-003), LAN (7, P-005),
+// floppy (A, D, P-004) -- read 0 and ignore writes (STUBS S-015); so does
+// everything above page D (LASI answers its whole space, Lasi ERS app. A).
 module lasi #(
     parameter int CLK_HZ    = 64_000_000,
     parameter bit SIM_FAST  = 1'b0          // fast UART and PS/2 timing (simulator)
@@ -48,6 +48,16 @@ module lasi #(
     // RTC: load a value (e.g. the MiSTer's clock at power-up)
     input  logic        rtc_set,
     input  logic [31:0] rtc_value,
+    // the SCSI unit (page 6, rtl/scsi/ncr53c710.sv): its registers answer
+    // the cycle after the request, so LASI acknowledges a cycle later
+    output logic        scsi_req,
+    output logic        scsi_we,
+    output logic [11:0] scsi_addr,
+    output logic [3:0]  scsi_be,
+    output logic [31:0] scsi_wdata,
+    input  logic [31:0] scsi_rdata,
+    output logic        scsi_rst,          // machine reset, IORESET bit 0 clear, or a write to +0x000
+    input  logic        scsi_irq,
     // misc outputs
     output logic [31:0] pcr,
     output logic        artist_rst        // IORESET bit 8 (RST_ARTIST_L) clear
@@ -125,12 +135,23 @@ module lasi #(
         else rtc_pre <= rtc_pre + 32'd1;
     end
 
+    // -------------------------------------------------------- SCSI unit
+    wire s_page = in_lasi && page == 4'h6;
+    assign scsi_req = req && s_page;
+    assign scsi_we = we;
+    assign scsi_addr = addr[11:0];
+    assign scsi_be = be;
+    assign scsi_wdata = wdata;
+    assign scsi_rst = !rst_n || !ioreset[0] || (req && we && s_page && addr[11:2] == 10'd0);
+    logic s_pend;
+
     // -------------------------------------------- interrupt sources (GSC bits)
     logic [31:0] src, src_q;
     logic        ext_q;
     always_comb begin
         src = 32'd0;
         src[5]  = u_irq;
+        src[9]  = scsi_irq;
         src[21] = ext_int && !toc_remap;
         src[26] = cmpintr;
     end
@@ -140,6 +161,8 @@ module lasi #(
         ack <= 1'b0;
         ext_toc <= 1'b0;
         irr_clr <= 1'b0;
+        s_pend <= 1'b0;
+        if (s_pend) begin ack <= 1'b1; rdata <= scsi_rdata; end
 
         if (!rst_n) begin
             ioreset <= 9'd0; amr <= 32'd0; errlog <= 32'd0; pcr <= 32'd1;
@@ -180,7 +203,8 @@ module lasi #(
             endcase
         end
 
-        if (rst_n && req) begin
+        if (rst_n && req && s_page) s_pend <= 1'b1;
+        if (rst_n && req && !s_page) begin
             logic [31:0] r;
             r = 32'd0;
             if (in_lasi) case (page)

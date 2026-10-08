@@ -34,7 +34,7 @@ package mioc_ecc;
         logic [5:0] bitn;
         cls = 2'd3; bitn = 6'd0;
         if (syn == 8'd0) cls = 2'd0;
-        else if ($countones(syn) == 1) cls = 2'd1;
+        else if ((syn & (syn - 8'd1)) == 8'd0) cls = 2'd1;   // one bit set
         else
             for (int j = 0; j < 64; j++)
                 if (syn == ECC_COL[j]) begin cls = 2'd2; bitn = j[5:0]; end

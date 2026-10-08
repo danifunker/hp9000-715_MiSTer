@@ -11,6 +11,8 @@
 //
 //  sim_status: [1:0] model (0 = 715/64, 1 = /80, 2 = /100),
 //              [5:2] RAM = 2^n MB (0 = the default, 16 MB; at most RAM_LG_MAX)
+//              [9:6] CR16 speed-up (0 = real rate): shortens the ROM's
+//                    delays; selftest1's timer test needs the real rate
 //  +eeprom=<hex> preloads the EEPROM (rtl/hp_xbus.sv); blank otherwise.
 //============================================================================
 
@@ -21,6 +23,7 @@ module emu #(
 	input         clk_sys,
 	input         reset,
 	input  [31:0] sim_status,
+	input  [7:0]  sim_trace,       // trace switches (rtl/hp715.sv dbg_ctl)
 
 	// PS/2 keyboard and mouse, in hps_io's format
 	input  [10:0] ps2_key,
@@ -55,6 +58,20 @@ module emu #(
 	input         uart_rx_strobe,
 	input  [7:0]  uart_rx_byte,
 	output        uart_rx_full,
+
+	// SCSI images, as hps_io's block devices (512-byte blocks, 16-bit
+	// buffer): slot 0 = disk ID 6, 1 = disk ID 5, 2 = CD-ROM ID 2
+	input  [2:0]  img_present,
+	input  [31:0] img_blocks [3],
+	output [31:0] sd_lba [3],
+	output [5:0]  sd_blk_cnt [3],
+	output [2:0]  sd_rd,
+	output [2:0]  sd_wr,
+	input  [2:0]  sd_ack,
+	input  [12:0] sd_buff_addr,
+	input  [15:0] sd_buff_dout,
+	output [15:0] sd_buff_din [3],
+	input         sd_buff_wr,
 
 	// Front panel
 	output [7:0]  leds,            // the LED latch (active low)
@@ -108,6 +125,7 @@ wire m_reset = reset || rl_busy || rst_cnt != 8'd0;
 // The machine
 //----------------------------------------------------------------------------
 logic        ram_req, ram_we, ram_line, ram_ack, ram_wready, ram_rvalid;
+logic [1:0]  ram_rbeat;
 logic [27:0] ram_addr;
 logic [7:0]  ram_be;
 logic [63:0] ram_wdata, ram_rdata;
@@ -123,12 +141,12 @@ logic [31:0] pcr;
 
 hp715 #(.CLK_HZ(64_000_000), .SIM_FAST(1'b1)) u_hp715 (
 	.clk(clk_sys), .reset(m_reset),
-	.cfg_model(sim_status[1:0]), .cfg_ram_lg(ram_lg),
+	.cfg_model(sim_status[1:0]), .cfg_ram_lg(ram_lg), .sim_cr16_mul(sim_status[9:6]),
 	.soft_pwr_n(!soft_power_off), .toc_button(toc_button),
 	.led_latch(leds), .led_strobe(led_strobe), .lasi_pcr(pcr),
 	.ram_req(ram_req), .ram_we(ram_we), .ram_line(ram_line), .ram_addr(ram_addr), .ram_be(ram_be),
 	.ram_wdata(ram_wdata), .ram_ack(ram_ack), .ram_wready(ram_wready), .ram_rvalid(ram_rvalid),
-	.ram_rdata(ram_rdata),
+	.ram_rbeat(ram_rbeat), .ram_rdata(ram_rdata),
 	.chk_req(chk_req), .chk_we(chk_we), .chk_addr(chk_addr), .chk_be(chk_be), .chk_wdata(chk_wdata),
 	.chk_ack(chk_ack), .chk_rdata(chk_rdata),
 	.rom_req(rom_req), .rom_addr(rom_addr), .rom_ack(rom_ack), .rom_rvalid(rom_rvalid),
@@ -136,9 +154,12 @@ hp715 #(.CLK_HZ(64_000_000), .SIM_FAST(1'b1)) u_hp715 (
 	.uart_txd(), .uart_rxd(1'b1), .uart_tap_strobe(uart_tx_strobe), .uart_tap_byte(uart_tx_byte),
 	.uart_inj_strobe(uart_rx_strobe), .uart_inj_byte(uart_rx_byte), .uart_inj_full(uart_rx_full),
 	.ps2_key(ps2_key), .ps2_mouse(ps2_mouse),
+	.img_present(img_present), .img_blocks(img_blocks), .sd_lba(sd_lba), .sd_blk_cnt(sd_blk_cnt),
+	.sd_rd(sd_rd), .sd_wr(sd_wr), .sd_ack(sd_ack), .sd_buff_addr(sd_buff_addr), .sd_buff_dout(sd_buff_dout),
+	.sd_buff_din(sd_buff_din), .sd_buff_wr(sd_buff_wr), .scsi_activity(),
 	.rtc_set(1'b0), .rtc_value(32'd0),
 	.ee_haddr(11'd0), .ee_hwe(1'b0), .ee_hwdata(32'd0), .ee_hrdata(), .ee_dirty(), .ee_dirty_clr(1'b0),
-	.dbg_retire(debug_retire), .dbg_nullified(debug_nullified), .dbg_iaoq_f(debug_iaoq_f),
+	.dbg_ctl(sim_trace), .dbg_retire(debug_retire), .dbg_nullified(debug_nullified), .dbg_iaoq_f(debug_iaoq_f),
 	.dbg_iaoq_b(debug_iaoq_b), .dbg_insn(debug_insn), .dbg_trap(debug_trap), .dbg_trap_vec(debug_trap_vec),
 	.dbg_psw(debug_psw), .dbg_halted(debug_halted), .dbg_buserr(debug_buserr),
 	.dbg_buserr_addr(debug_buserr_addr), .dbg_gr(gr));
@@ -162,7 +183,7 @@ always_ff @(posedge clk_sys) begin
 			r_state <= ram_we ? 2'd2 : 2'd1;
 		end
 		2'd1: begin
-			ram_rvalid <= 1'b1; ram_rdata <= ram[r_widx];
+			ram_rvalid <= 1'b1; ram_rdata <= ram[r_widx]; ram_rbeat <= r_beat;
 			r_beat <= r_beat + 2'd1; r_left <= r_left - 2'd1;
 			if (r_left == 2'd0) r_state <= 2'd0;
 		end

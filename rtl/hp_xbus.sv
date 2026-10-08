@@ -31,22 +31,35 @@ module hp_xbus (
     output logic        ee_dirty,
     input  logic        ee_dirty_clr
 );
-    logic [31:0] ee [2048];
+    // Quartus's byte-enabled true dual-port RAM template: a packed byte
+    // array, each port in its own plain always block, byte writes spelled
+    // out (ee[w][3] = byte 0 = bits 31:24)
+    (* ramstyle = "M10K, no_rw_check" *) logic [3:0][7:0] ee [0:2047];
     logic [31:0] ee_q;
 
     wire is_ee  = addr[19:17] == 3'b110;     // F00C_0000-F00D_FFFF
     wire is_led = addr[19:16] == 4'hE;
     wire is_id  = addr[19:16] == 4'hF;
+    wire cpu_we = req && we && is_ee;
 
     // port A: the CPU
-    always_ff @(posedge clk) begin
-        if (req && we && is_ee)
-            for (int b = 0; b < 4; b++) if (be[b]) ee[addr[12:2]][8*b +: 8] <= wdata[8*b +: 8];
+    always @(posedge clk) begin
+        if (cpu_we) begin
+            if (be[0]) ee[addr[12:2]][0] <= wdata[7:0];
+            if (be[1]) ee[addr[12:2]][1] <= wdata[15:8];
+            if (be[2]) ee[addr[12:2]][2] <= wdata[23:16];
+            if (be[3]) ee[addr[12:2]][3] <= wdata[31:24];
+        end
         ee_q <= ee[addr[12:2]];
     end
     // port B: the host
-    always_ff @(posedge clk) begin
-        if (ee_hwe) ee[ee_haddr] <= ee_hwdata;
+    always @(posedge clk) begin
+        if (ee_hwe) begin
+            ee[ee_haddr][0] <= ee_hwdata[7:0];
+            ee[ee_haddr][1] <= ee_hwdata[15:8];
+            ee[ee_haddr][2] <= ee_hwdata[23:16];
+            ee[ee_haddr][3] <= ee_hwdata[31:24];
+        end
         ee_hrdata <= ee[ee_haddr];
     end
 

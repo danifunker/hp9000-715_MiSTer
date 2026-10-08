@@ -36,6 +36,7 @@ V_OPT = --x-assign fast --x-initial fast --noassert --unroll-count 256
 # CPU_RTL is defined below with the CPU benches.
 MACHINE_RTL = $(RTL)/mioc_ecc.sv $(RTL)/mioc.sv $(RTL)/hp_xbus.sv $(RTL)/lasi/lasi_uart.sv \
 	$(RTL)/lasi/lasi_ps2.sv $(RTL)/lasi/ps2_dev.sv $(RTL)/lasi/lasi.sv $(RTL)/wax_stub.sv \
+	$(RTL)/scsi/ncr53c710.sv $(RTL)/scsi/scsi_targets.sv \
 	$(RTL)/rom_loader.sv $(RTL)/hp715.sv
 V_SRC = $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v
 
@@ -202,3 +203,14 @@ $(ROMSIM_EXE): $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v romsim/tb_rom.cpp
 romsim: $(ROMSIM_EXE)
 
 .PHONY: romsim
+
+# ---------------------------------------------------------------------------
+# Board-side units: `make tb_sdram64` runs rtl/mister/sdram64.sv against a
+# behavioural SDRAM (tb/tb_sdram64.sv).
+tb_sdram64: tb/tb_sdram64.sv $(RTL)/mister/sdram64.sv
+	$(V) --binary --timing -j 0 -Wno-fatal -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL -Wno-WIDTHEXPAND \
+		-Wno-WIDTHTRUNC -Wno-TIMESCALEMOD --Mdir obj_dir_tb/sdram64 --top-module tb_sdram64 -o tb_sdram64 \
+		$(RTL)/mister/sdram64.sv tb/tb_sdram64.sv
+	./obj_dir_tb/sdram64/tb_sdram64
+
+.PHONY: tb_sdram64

@@ -7,7 +7,10 @@
 //   obj_dir_rom/Vemu [--rom FILE] [+eeprom=HEX] [--max-cycles N] [--until STR]
 //                    [--type STR] [--type-after STR] [--serial-log FILE]
 //                    [--model 0|1|2] [--ram-lg N] [--leds] [--buserr]
-//                    [--trace N] [--trace-from CYCLE] [--traps] [--stamp] [--sample N]
+//                    [--trace N] [--trace-from CYCLE] [--traps] [--stamp] [--sample N] [--gsctrace]
+//                    [--turbo N [--turbo-after CYCLE]]  (CR16 N x faster after CYCLE, default 30M:
+//                    shortens the ROM's delays; selftest1's timer test needs the real rate)
+//                    [--disk0 IMG] [--disk1 IMG] [--cd ISO]   (SCSI IDs 6, 5, 2; disks are written)
 //                    [--save-at CYCLE FILE] [--restore FILE]   (whole-model checkpoints;
 //                    a restored run keeps the cycle count, and needs the same build)
 #include "Vemu.h"
@@ -21,6 +24,66 @@
 
 static Vemu* top;
 static uint64_t cyc = 0;
+
+// hps_io's block devices, for the SCSI images: the core raises sd_rd/sd_wr
+// with sd_lba and sd_blk_cnt; we raise sd_ack, move (sd_blk_cnt+1) x 512
+// bytes as 16-bit words (the earlier byte in the low half) through
+// sd_buff_*, and drop sd_ack.
+struct BlkDev {
+	FILE* f = nullptr;
+	uint64_t size = 0;
+};
+static BlkDev blk[3];
+static struct {
+	int st = 0;           // 0 idle, 1 reading, 2 writing
+	int n = 0;            // slot
+	uint32_t words = 0, w = 0;
+	std::vector<uint8_t> buf;
+	uint64_t lba = 0;
+	int phase = 0;
+} sd;
+
+static void sd_step() {
+	top->sd_buff_wr = 0;
+	switch (sd.st) {
+	case 0:
+		for (int n = 0; n < 3; n++)
+			if (((top->sd_rd | top->sd_wr) >> n) & 1) {
+				sd.n = n; sd.lba = top->sd_lba[n];
+				sd.words = (top->sd_blk_cnt[n] + 1) * 256; sd.w = 0; sd.phase = 0;
+				sd.buf.assign(sd.words * 2, 0);
+				top->sd_ack = 1 << n;
+				if ((top->sd_rd >> n) & 1) {
+					if (blk[n].f) { fseeko(blk[n].f, (off_t)sd.lba * 512, SEEK_SET);
+					                size_t got = fread(sd.buf.data(), 1, sd.buf.size(), blk[n].f); (void)got; }
+					sd.st = 1;
+				} else sd.st = 2;
+				break;
+			}
+		break;
+	case 1:   // one word every 4 cycles
+		if (++sd.phase & 3) break;
+		if (sd.w < sd.words) {
+			top->sd_buff_addr = sd.w;
+			top->sd_buff_dout = sd.buf[2 * sd.w] | (sd.buf[2 * sd.w + 1] << 8);
+			top->sd_buff_wr = 1;
+			sd.w++;
+		} else { top->sd_ack = 0; sd.st = 0; }
+		break;
+	case 2:   // set the address, read the word two cycles later
+		if ((++sd.phase & 3) == 1) top->sd_buff_addr = sd.w;
+		else if ((sd.phase & 3) == 0) {
+			uint16_t v = top->sd_buff_din[sd.n];
+			sd.buf[2 * sd.w] = v & 0xFF; sd.buf[2 * sd.w + 1] = v >> 8;
+			if (++sd.w == sd.words) {
+				if (blk[sd.n].f) { fseeko(blk[sd.n].f, (off_t)sd.lba * 512, SEEK_SET);
+				                   fwrite(sd.buf.data(), 1, sd.buf.size(), blk[sd.n].f); fflush(blk[sd.n].f); }
+				top->sd_ack = 0; sd.st = 0;
+			}
+		}
+		break;
+	}
+}
 
 static void tick() {
 	top->clk_sys = 0; top->eval();
@@ -37,6 +100,8 @@ int main(int argc, char** argv) {
 	int model = 0, ram_lg = 0;
 	bool show_leds = false, show_buserr = false, show_traps = false, stamp = false;
 	unsigned long long sample = 0; uint64_t save_at = 0;
+	unsigned trace_flags = 0, turbo = 0;
+	uint64_t turbo_after = 30000000, flags_from = 0;
 	const char* save_file = nullptr;
 	const char* restore_file = nullptr;
 	for (int i = 1; i < argc; i++) {
@@ -54,6 +119,18 @@ int main(int argc, char** argv) {
 		else if (a == "--buserr") show_buserr = true;
 		else if (a == "--traps") show_traps = true;
 		else if (a == "--stamp") stamp = true;
+		else if (a == "--gsctrace") trace_flags |= 1;
+		else if (a == "--disk0" || a == "--disk1" || a == "--cd") {
+			int n = a == "--disk0" ? 0 : a == "--disk1" ? 1 : 2;
+			const char* path = next();
+			blk[n].f = fopen(path, n == 2 ? "rb" : "r+b");
+			if (!blk[n].f) { fprintf(stderr, "cannot open %s\n", path); return 2; }
+			fseeko(blk[n].f, 0, SEEK_END); blk[n].size = ftello(blk[n].f);
+		}
+		else if (a == "--l1trace") trace_flags |= 2;
+		else if (a == "--flags-from") flags_from = strtoull(next(), 0, 0);
+		else if (a == "--turbo") turbo = atoi(next());
+		else if (a == "--turbo-after") turbo_after = strtoull(next(), 0, 0);
 		else if (a == "--save-at") { save_at = strtoull(next(), 0, 0); save_file = next(); }
 		else if (a == "--restore") restore_file = next();
 		else if (a == "--sample") sample = strtoull(next(), 0, 0);
@@ -84,6 +161,12 @@ int main(int argc, char** argv) {
 	top->sim_status = (model & 3) | ((ram_lg & 15) << 2);
 	top->ps2_key = 0; top->ps2_mouse = 0;
 	top->uart_rx_strobe = 0; top->toc_button = 0; top->soft_power_off = 0;
+	top->img_present = 0;
+	for (int n = 0; n < 3; n++) {
+		top->img_blocks[n] = blk[n].size / 512;
+		if (blk[n].f) top->img_present |= 1 << n;
+	}
+	top->sd_ack = 0; top->sd_buff_wr = 0;
 	uint64_t start;
 	if (restore_file) {
 		VerilatedRestore is;
@@ -110,6 +193,7 @@ int main(int argc, char** argv) {
 	}
 
 	std::string out;
+	top->sim_trace = flags_from ? 0 : trace_flags;
 	unsigned long long retired = 0, traps = 0, traced = 0, next_type = 0;
 	size_t typed_pos = 0;
 	bool typing = false;
@@ -121,8 +205,11 @@ int main(int argc, char** argv) {
 			top->uart_rx_strobe = 1; top->uart_rx_byte = typed[typed_pos++];
 			next_type = cyc + 20000;
 		}
+		sd_step();
 		tick();
 		unsigned long long t = cyc - start;
+		top->sim_status = (model & 3) | ((ram_lg & 15) << 2) | (t >= turbo_after ? (turbo & 15) << 6 : 0);
+		if (flags_from && t == flags_from) top->sim_trace = trace_flags;
 		if (save_file && t == save_at) {
 			VerilatedSave os;
 			os.open(save_file);

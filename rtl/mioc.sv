@@ -2,12 +2,12 @@
 // (docs/design/system.md 2-4; HW 1-3, 7): the CPU's two ports in, system
 // RAM, the boot ROM, the ECC check store and the GSC I/O bus out.
 //
-// One transaction at a time, from three requesters in priority order: a
+// One transaction at a time, from four requesters in priority order: a
 // LASI interrupt write (IAR -> IO_EIR), the CPU's cacheable line port
-// (fills and write-backs, memory only) and the CPU's uncached port (I/O
-// space, U-bit pages, LDCW, instruction fetches from the ROM). Neither CPU
-// port depends on the other to finish, so serving them one after the other
-// cannot deadlock.
+// (fills and write-backs, memory only), DMA (RAM only, through the uncached
+// path) and the CPU's uncached port (I/O space, U-bit pages, LDCW,
+// instruction fetches from the ROM). None of them depends on another to
+// finish, so serving them one after the other cannot deadlock.
 //
 // The CPU-port protocols are cpu.md 6.8's: a request is held until its
 // acknowledge. The pa_cpu BIU drops a request the cycle after it sees the
@@ -50,13 +50,16 @@ module mioc
     output logic        hpmc_req,
     output logic        lpmc_req,
 
-    // system RAM: held until ram_ack; then 1 or 4 beats (wrapping from
-    // ram_addr[4:3]) as ram_rvalid, or taken one per ram_wready
+    // system RAM: held until ram_ack; then 1 or 4 beats as ram_rvalid, each
+    // with its doubleword index ram_rbeat (a line read starts with the
+    // doubleword at ram_addr[4:3]; one that starts at 0 must come in order
+    // 0..3), or taken one per ram_wready (writes always in order from 0)
     output logic        ram_req, ram_we, ram_line,
     output logic [27:0] ram_addr,
     output logic [7:0]  ram_be,
     output logic [63:0] ram_wdata,
     input  logic        ram_ack, ram_wready, ram_rvalid,
+    input  logic [1:0]  ram_rbeat,
     input  logic [63:0] ram_rdata,
     // ECC check store: one word per 32-byte line of RAM (byte k = doubleword k)
     output logic        chk_req, chk_we,
@@ -80,6 +83,16 @@ module mioc
     output logic [31:0] gsc_wdata,
     input  logic        gsc_ack, gsc_err,
     input  logic [31:0] gsc_rdata,
+    // DMA from LASI's bus masters (the 53C710 ...): one doubleword of RAM,
+    // held until dma_ack; not coherent with the CPU's caches (system.md 3.3)
+    input  logic        dma_req,
+    input  logic        dma_we,
+    input  logic [31:0] dma_addr,
+    input  logic [7:0]  dma_be,
+    input  logic [63:0] dma_wdata,
+    output logic        dma_ack,
+    output logic        dma_err,
+    output logic [63:0] dma_rdata,
     // LASI's interrupt transaction (a GSC write it masters)
     input  logic        lasi_eir_req,
     input  logic [31:0] lasi_eir_addr,
@@ -214,7 +227,7 @@ module mioc
     logic [1:0]  wcnt;           // RAM write beats sent
 
     // latched uncached request
-    logic        u_we, u_burst, u_rclr;
+    logic        u_we, u_burst, u_rclr, u_dma;
     logic [31:0] u_addr;
     logic [7:0]  u_be;
     logic [63:0] u_wdata;
@@ -237,7 +250,6 @@ module mioc
     logic        f1_v;
     logic [63:0] f1_data;
     logic [1:0]  f1_beat;
-    logic [1:0]  f_start;
 
 
     // MIOC register read
@@ -267,7 +279,7 @@ module mioc
         logic [6:0]  st_set, st_clr;
         logic        ea_we;
         logic [31:0] ea_val;
-        mem_ack <= 1'b0; mem_rvalid <= 1'b0; mem_rerr <= 1'b0;
+        mem_ack <= 1'b0; mem_rvalid <= 1'b0; mem_rerr <= 1'b0; dma_ack <= 1'b0;
         io_ack <= 1'b0; io_last <= 1'b0; io_err <= 1'b0;
         gsc_req <= 1'b0;
         eir_set <= 1'b0; toc_req <= 1'b0; bcast_reset <= 1'b0;
@@ -323,9 +335,13 @@ module mioc
                     mem_ack <= 1'b1;
                     l_we <= mem_we; l_addr <= mem_addr; cnt <= 3'd0;
                     st <= S_LDEC;
+                end else if (dma_req && !dma_ack) begin
+                    u_we <= dma_we; u_addr <= dma_addr; u_be <= dma_be; u_wdata <= dma_wdata;
+                    u_burst <= 1'b0; u_rclr <= 1'b0; u_err <= 1'b0; u_dma <= 1'b1;
+                    st <= S_IDEC;
                 end else if (io_req) begin
                     u_we <= io_we; u_addr <= io_addr; u_be <= io_be; u_wdata <= io_wdata;
-                    u_burst <= io_burst; u_rclr <= io_rclr; u_err <= 1'b0;
+                    u_burst <= io_burst; u_rclr <= io_rclr; u_err <= 1'b0; u_dma <= 1'b0;
                     st <= S_IDEC;
                 end
             end
@@ -387,7 +403,6 @@ module mioc
                     st <= S_LRRAM;
                     ram_req <= 1'b1; ram_we <= 1'b0; ram_line <= 1'b1; ram_be <= 8'hFF;
                     ram_addr <= {l_blk.off[27:5], l_addr[4:3], 3'd0};
-                    f_start <= l_addr[4:3];
                     last_fill_line <= l_blk.off[27:5];
                 end else begin
                     // no comparator: bus error on every beat; empty bank: all ones
@@ -404,7 +419,7 @@ module mioc
             S_LRRAM: begin
                 if (ram_ack) ram_req <= 1'b0;
                 if (ram_rvalid) begin
-                    f1_v <= 1'b1; f1_data <= ram_rdata; f1_beat <= f_start + cnt[1:0];
+                    f1_v <= 1'b1; f1_data <= ram_rdata; f1_beat <= ram_rbeat;
                     cnt <= cnt + 3'd1;
                     if (cnt == 3'd3) st <= S_IDLE;     // stage 2 delivers the last beat next cycle
                 end
@@ -420,7 +435,10 @@ module mioc
                 tmo <= 10'd0;
                 u_hi_pending <= u_be[7:4] != 4'd0 || u_be == 8'd0;
                 u_lo_pending <= u_be[3:0] != 4'd0;
-                if (u_we && u_addr[31:28] == 4'hF && (pgape || pgdpe)) begin
+                if (u_dma && c != C_MEM) begin
+                    // DMA reaches RAM only
+                    u_err <= 1'b1; u_rdata <= 64'd0; st <= S_IRESP;
+                end else if (u_we && u_addr[31:28] == 4'hF && (pgape || pgdpe)) begin
                     // MIOC_CONTROL parity injection: this I/O store fails and is dropped
                     st_set[pgape ? 1 : 3] = 1'b1; ea_we = 1'b1; ea_val = u_addr;
                     r_control[14] <= 1'b0; r_control[13] <= 1'b0;
@@ -494,11 +512,13 @@ module mioc
             // read-and-clear; bursts (code fetched from a U-bit page)
             S_IRAMRD: begin
                 if (!u_blk.hit) begin
-                    st_set[1] = 1'b1; ea_we = 1'b1; ea_val = u_addr;
+                    if (!u_dma) begin st_set[1] = 1'b1; ea_we = 1'b1; ea_val = u_addr; end
                     u_err <= 1'b1; u_rdata <= 64'd0; st <= S_IRESP;
                 end else if (!u_blk.bank) begin
                     u_rdata <= 64'hFFFF_FFFF_FFFF_FFFF;
                     st <= u_burst ? S_IRAMBURST : S_IRESP;
+                end else if (u_we && u_be == 8'hFF && !u_rclr) begin
+                    st <= S_IMERGE;                    // a whole doubleword: no read needed
                 end else if (!ram_req && cnt == 3'd0) begin
                     ram_req <= 1'b1; ram_we <= 1'b0; ram_be <= 8'hFF;
                     ram_line <= u_burst;
@@ -509,7 +529,7 @@ module mioc
                     if (ram_rvalid) begin
                         pe_t e;
                         logic [63:0] d;
-                        e = pt_find(u_burst ? {u_blk.off[27:5], cnt[1:0] - 2'd1} : u_blk.off[27:3]);
+                        e = pt_find(u_burst ? {u_blk.off[27:5], ram_rbeat} : u_blk.off[27:3]);
                         d = ram_rdata;
                         if (ecc_on && e.v && e.cls == 2'd2) d[63 - e.bitn] = ~d[63 - e.bitn];
                         if (ecc_on && e.v) st_set[e.cls == 2'd3 ? 5 : 6] = 1'b1;
@@ -605,8 +625,15 @@ module mioc
             end
 
             // the acknowledge of a single (non-burst) transfer
-            S_IRESP: begin
-                io_ack <= 1'b1; io_last <= 1'b1; io_err <= u_err;
+            S_IRESP: if (u_dma) begin
+                dma_ack <= 1'b1; dma_err <= u_err; dma_rdata <= u_rdata;
+                st <= S_IGAP;
+            end else begin
+                // a store's error is reported only through MIOC_STATUS and
+                // hpmc_req (the write is posted, cpu.md 3.4): an io_err as
+                // well would make the core take a second HPMC once the
+                // handler has returned (ROM test 0x410D9)
+                io_ack <= 1'b1; io_last <= 1'b1; io_err <= u_err && !u_we;
                 // a one-word device read: the word in both halves
                 if (u_cls == C_XBUS || u_cls == C_LASI || u_cls == C_WAX || u_cls == C_ART)
                     io_rdata <= u_be[3:0] == 4'd0 ? {2{u_rdata[63:32]}} :

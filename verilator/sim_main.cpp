@@ -6,9 +6,13 @@
 // console, the debug log and the emulated screen. Headless runs drive the
 // same loop without SDL for scripted tests.
 //
-//   make && ./obj_dir/Vemu                        GUI
+//   make && ./obj_dir/Vemu [--rom FILE] [+eeprom=HEX]     GUI
 //   ./obj_dir/Vemu --headless --frames 3 --screenshot 2
 //   ./obj_dir/Vemu --headless --max-cycles 5000000 --serial-log out.txt
+//
+// The boot ROM (default ../roms/hp715_pdc_rev1.6.bin) is loaded through the
+// ioctl download at start-up, as hps_io does on the board. For long scripted
+// ROM runs use the headless verilator/romsim instead (faster, checkpoints).
 
 #include <verilated.h>
 #include "Vemu.h"
@@ -45,7 +49,20 @@ static bool multi_step = false;
 static int  multi_step_amount = 1024;
 
 // Core options (stand-ins for the OSD's status word; see sim.v)
-static int opt_tvmode = 0;
+static int opt_model = 0;          // 0 = 715/64, 1 = /80, 2 = /100
+static int opt_ram_lg = 3;         // 2^n MB
+static int opt_turbo = 0;          // CR16 speed-up (0 = real rate)
+static bool opt_toc = false, opt_softoff = false;
+
+// Boot ROM download state
+static std::vector<unsigned char> rom_img;
+static size_t rom_pos = 0;
+static int rom_phase = 0;          // 0 waiting, 1 downloading, 2 done
+static const char* rom_path = "../roms/hp715_pdc_rev1.6.bin";
+
+// Serial input queue (typed into the console window)
+static std::string serial_in;
+static unsigned long long serial_next = 0;
 
 // Headless / scripted runs
 static bool headless = false;
@@ -101,7 +118,30 @@ static int verilate() {
 
 	clk_sys.Tick();
 	VERTOPINTERN->clk_sys = clk_sys.clk;
-	VERTOPINTERN->sim_status = (opt_tvmode & 1) << 2;
+	VERTOPINTERN->sim_status = (opt_model & 3) | ((opt_ram_lg & 15) << 2) | ((opt_turbo & 15) << 6);
+	VERTOPINTERN->toc_button = opt_toc;
+	VERTOPINTERN->soft_power_off = opt_softoff;
+
+	// the ROM download, one 16-bit write every other clock, during reset
+	if (clk_sys.IsRising()) {
+		VERTOPINTERN->ioctl_wr = 0;
+		VERTOPINTERN->uart_rx_strobe = 0;
+		if (rom_phase == 0 && main_time > 8 && !rom_img.empty()) { rom_phase = 1; VERTOPINTERN->ioctl_download = 1; }
+		else if (rom_phase == 1) {
+			if (rom_pos >= rom_img.size()) { rom_phase = 2; VERTOPINTERN->ioctl_download = 0; }
+			else if (main_time & 2) {
+				VERTOPINTERN->ioctl_addr = rom_pos;
+				VERTOPINTERN->ioctl_dout = rom_img[rom_pos] | (rom_img[rom_pos + 1] << 8);
+				VERTOPINTERN->ioctl_wr = 1;
+				rom_pos += 2;
+			}
+		} else if (!serial_in.empty() && main_time >= serial_next && !VERTOPINTERN->uart_rx_full) {
+			VERTOPINTERN->uart_rx_strobe = 1;
+			VERTOPINTERN->uart_rx_byte = serial_in[0];
+			serial_in.erase(0, 1);
+			serial_next = main_time + 40000;
+		}
+	}
 
 	if (clk_sys.clk != clk_sys.old) {
 		if (clk_sys.clk) input.BeforeEval();
@@ -152,6 +192,8 @@ int main(int argc, char** argv, char** env) {
 				screenshot_frames.push_back(atoi(t));
 		} else if (!strcmp(argv[i], "--serial-log") && i + 1 < argc) {
 			serial_log = fopen(argv[++i], "w");
+		} else if (!strcmp(argv[i], "--rom") && i + 1 < argc) {
+			rom_path = argv[++i];
 		} else if (!strcmp(argv[i], "--help")) {
 			usage();
 			return 0;
@@ -163,6 +205,19 @@ int main(int argc, char** argv, char** env) {
 
 	top = new Vemu();
 	Verilated::commandArgs(argc, argv);
+	{
+		FILE* rf = fopen(rom_path, "rb");
+		if (rf) {
+			int c;
+			while ((c = fgetc(rf)) != EOF) rom_img.push_back((unsigned char)c);
+			fclose(rf);
+			if (rom_img.size() & 1) rom_img.push_back(0);
+		} else fprintf(stderr, "no boot ROM at %s (roms/README.md)\n", rom_path);
+	}
+	VERTOPINTERN->sim_trace = 0;
+	VERTOPINTERN->uart_rx_strobe = 0;
+	VERTOPINTERN->toc_button = 0;
+	VERTOPINTERN->soft_power_off = 0;
 
 	VERTOPINTERN->clk_sys = 0;
 	VERTOPINTERN->reset = 1;
@@ -218,8 +273,13 @@ int main(int argc, char** argv, char** env) {
 			if (ImGui::Button("Multi step")) multi_step = true;
 			ImGui::SameLine();
 			ImGui::SliderInt("Steps", &multi_step_amount, 8, 1024);
-			ImGui::RadioButton("NTSC", &opt_tvmode, 0); ImGui::SameLine();
-			ImGui::RadioButton("PAL", &opt_tvmode, 1);
+			ImGui::RadioButton("715/64", &opt_model, 0); ImGui::SameLine();
+			ImGui::RadioButton("715/80", &opt_model, 1); ImGui::SameLine();
+			ImGui::RadioButton("715/100", &opt_model, 2);
+			ImGui::SliderInt("RAM 2^n MB", &opt_ram_lg, 3, 6);
+			ImGui::SliderInt("CR16 x (0 = real)", &opt_turbo, 0, 15);
+			ImGui::Checkbox("TOC button", &opt_toc); ImGui::SameLine();
+			ImGui::Checkbox("Soft power off", &opt_softoff);
 			ImGui::Text("cycle %llu  frame %d  %.1f fps  %dx%d",
 			            (unsigned long long)main_time, video.count_frame, video.stats_fps,
 			            video.stats_xMax - video.stats_xMin + 1,
@@ -236,7 +296,13 @@ int main(int argc, char** argv, char** env) {
 			            VERTOPINTERN->debug_iaoq_b);
 			ImGui::Text("insn  %08X   retired %llu   %s", VERTOPINTERN->debug_insn,
 			            retired, VERTOPINTERN->debug_halted ? "HALTED" : "");
-			ImGui::TextDisabled("stage 0: template demo core, no CPU yet (docs/STUBS.md S-001)");
+			{
+				char leds[9];
+				for (int b = 0; b < 8; b++) leds[b] = (VERTOPINTERN->leds >> (7 - b)) & 1 ? '.' : '*';
+				leds[8] = 0;
+				ImGui::Text("LEDs 8..1  %s   (code %02X)   ROM %s", leds, (~VERTOPINTERN->leds) & 0xFF,
+				            rom_phase == 2 ? "loaded" : rom_phase == 1 ? "loading" : "missing");
+			}
 			ImGui::End();
 
 			// Serial console
@@ -246,6 +312,16 @@ int main(int argc, char** argv, char** env) {
 			if (ImGui::Button("Clear")) serial_text.clear();
 			ImGui::SameLine();
 			ImGui::Checkbox("Auto-scroll", &serial_scroll);
+			{
+				static char line[256] = "";
+				ImGui::SameLine();
+				ImGui::SetNextItemWidth(200);
+				if (ImGui::InputText("##send", line, sizeof line, ImGuiInputTextFlags_EnterReturnsTrue)) {
+					serial_in += line; serial_in += '\r'; line[0] = 0;
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Esc")) serial_in += '\x1b';
+			}
 			ImGui::BeginChild("serial", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
 			ImGui::TextUnformatted(serial_text.c_str());
 			if (serial_scroll) ImGui::SetScrollHereY(1.0f);

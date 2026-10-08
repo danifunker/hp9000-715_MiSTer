@@ -13,6 +13,7 @@ module hp715 #(
     // configuration
     input  logic [1:0]  cfg_model,          // 0 = 715/64, 1 = 715/80, 2 = 715/100
     input  logic [3:0]  cfg_ram_lg,         // 2^n MB of RAM, 3..8
+    input  logic [3:0]  sim_cr16_mul,       // simulator only: CR16 counts n x faster (0 = real rate; tie 0 on the board)
     // front panel
     input  logic        soft_pwr_n,         // 0 while "soft power off" is requested
     input  logic        toc_button,
@@ -25,6 +26,7 @@ module hp715 #(
     output logic [7:0]  ram_be,
     output logic [63:0] ram_wdata,
     input  logic        ram_ack, ram_wready, ram_rvalid,
+    input  logic [1:0]  ram_rbeat,
     input  logic [63:0] ram_rdata,
     // ECC check store
     output logic        chk_req, chk_we,
@@ -50,6 +52,20 @@ module hp715 #(
     // PS/2 (hps_io format)
     input  logic [10:0] ps2_key,
     input  logic [24:0] ps2_mouse,
+    // SCSI images (hps_io block devices, 512-byte blocks, WIDE): slot 0 the
+    // disk at ID 6, 1 the disk at ID 5, 2 the CD-ROM at ID 2
+    input  logic [2:0]  img_present,
+    input  logic [31:0] img_blocks [3],
+    output logic [31:0] sd_lba [3],
+    output logic [5:0]  sd_blk_cnt [3],
+    output logic [2:0]  sd_rd,
+    output logic [2:0]  sd_wr,
+    input  logic [2:0]  sd_ack,
+    input  logic [12:0] sd_buff_addr,
+    input  logic [15:0] sd_buff_dout,
+    output logic [15:0] sd_buff_din [3],
+    input  logic        sd_buff_wr,
+    output logic        scsi_activity,
     // RTC load
     input  logic        rtc_set,
     input  logic [31:0] rtc_value,
@@ -61,6 +77,7 @@ module hp715 #(
     output logic        ee_dirty,
     input  logic        ee_dirty_clr,
     // debug
+    input  logic [7:0]  dbg_ctl,            // simulator trace switches: [0] GSC accesses
     output logic        dbg_retire, dbg_nullified,
     output logic [31:0] dbg_iaoq_f, dbg_iaoq_b,
     output logic [31:0] dbg_insn,
@@ -113,8 +130,12 @@ module hp715 #(
     logic        eir_set, toc_req, hpmc_req, lpmc_req;
     logic [4:0]  eir_num;
 
+    // the simulator's CR16 speed-up multiplies the integer ticks per clock
+    // (exact only when the ratio is an integer, as for a 715/64 at 64 MHz)
+    wire [15:0] cr16_tq = sim_cr16_mul == 4'd0 ? rsel[47:32] : rsel[47:32] * {12'd0, sim_cr16_mul};
+
     pa_cpu u_cpu (
-        .clk(clk), .rst_n(rst_n), .cfg_tq(rsel[47:32]), .cfg_tr(rsel[31:16]), .cfg_td(rsel[15:0]),
+        .clk(clk), .rst_n(rst_n), .cfg_tq(cr16_tq), .cfg_tr(rsel[31:16]), .cfg_td(rsel[15:0]),
         .mem_req(mem_req), .mem_we(mem_we), .mem_ifill(mem_ifill), .mem_addr(mem_addr), .mem_ack(mem_ack),
         .mem_wdata(mem_wdata), .mem_wvalid(mem_wvalid), .mem_wready(mem_wready), .mem_rdata(mem_rdata),
         .mem_rvalid(mem_rvalid), .mem_rbeat(mem_rbeat), .mem_rerr(mem_rerr),
@@ -134,6 +155,10 @@ module hp715 #(
     logic [31:0] gsc_addr, gsc_wdata, gsc_rdata;
     logic [3:0]  gsc_be;
     logic        l_eir_req, l_eir_ack, l_eir_err, ext_toc;
+    logic        dma_req, dma_we, dma_ack, dma_err;
+    logic [31:0] dma_addr;
+    logic [7:0]  dma_be;
+    logic [63:0] dma_wdata, dma_rdata;
     logic [31:0] l_eir_addr;
     logic [4:0]  l_eir_data;
 
@@ -148,13 +173,15 @@ module hp715 #(
         .eir_set(eir_set), .eir_num(eir_num), .toc_req(toc_req), .hpmc_req(hpmc_req), .lpmc_req(lpmc_req),
         .ram_req(ram_req), .ram_we(ram_we), .ram_line(ram_line), .ram_addr(ram_addr), .ram_be(ram_be),
         .ram_wdata(ram_wdata), .ram_ack(ram_ack), .ram_wready(ram_wready), .ram_rvalid(ram_rvalid),
-        .ram_rdata(ram_rdata),
+        .ram_rbeat(ram_rbeat), .ram_rdata(ram_rdata),
         .chk_req(chk_req), .chk_we(chk_we), .chk_addr(chk_addr), .chk_be(chk_be), .chk_wdata(chk_wdata),
         .chk_ack(chk_ack), .chk_rdata(chk_rdata),
         .rom_req(rom_req), .rom_addr(rom_addr), .rom_ack(rom_ack), .rom_rvalid(rom_rvalid),
         .rom_rdata(rom_rdata), .rom_inval(rom_inval),
         .gsc_req(gsc_req), .gsc_we(gsc_we), .gsc_dev(gsc_dev), .gsc_addr(gsc_addr), .gsc_be(gsc_be),
         .gsc_wdata(gsc_wdata), .gsc_ack(gsc_ack), .gsc_err(gsc_err), .gsc_rdata(gsc_rdata),
+        .dma_req(dma_req), .dma_we(dma_we), .dma_addr(dma_addr), .dma_be(dma_be), .dma_wdata(dma_wdata),
+        .dma_ack(dma_ack), .dma_err(dma_err), .dma_rdata(dma_rdata),
         .lasi_eir_req(l_eir_req), .lasi_eir_addr(l_eir_addr), .lasi_eir_data(l_eir_data),
         .lasi_eir_ack(l_eir_ack), .lasi_eir_err(l_eir_err),
         .ext_toc(ext_toc), .bcast_reset(bcast_reset),
@@ -182,20 +209,49 @@ module hp715 #(
         .uart_inj_strobe(uart_inj_strobe), .uart_inj_byte(uart_inj_byte), .uart_inj_full(uart_inj_full),
         .kbd_present(1'b1), .mouse_present(1'b1), .ps2_key(ps2_key), .ps2_mouse(ps2_mouse),
         .rtc_set(rtc_set), .rtc_value(rtc_value),
+        .scsi_req(s_req), .scsi_we(s_we), .scsi_addr(s_addr), .scsi_be(s_be), .scsi_wdata(s_wdata),
+        .scsi_rdata(s_rdata), .scsi_rst(s_rst), .scsi_irq(s_irq),
         .pcr(lasi_pcr), .artist_rst(artist_rst));
+
+    // ------------------------------------------------------------ SCSI
+    logic        s_req, s_we, s_rst, s_irq;
+    logic [11:0] s_addr;
+    logic [3:0]  s_be;
+    logic [31:0] s_wdata, s_rdata;
+    logic        sb_sel, sb_sel_atn, sb_sel_done, sb_sel_fail, sb_bsy, sb_req, sb_ack, sb_ackhold, sb_atn, sb_rst;
+    logic [2:0]  sb_sel_id, sb_phase;
+    logic [7:0]  sb_tdata, sb_idata;
+
+    ncr53c710 #(.STO_CLKS(SIM_FAST ? 200_000 : CLK_HZ / 4)) u_scsi (
+        .clk(clk), .rst(s_rst),
+        .req(s_req), .we(s_we), .addr(s_addr), .be(s_be), .wdata(s_wdata), .rdata(s_rdata), .irq(s_irq),
+        .dma_req(dma_req), .dma_we(dma_we), .dma_addr(dma_addr), .dma_be(dma_be), .dma_wdata(dma_wdata),
+        .dma_ack(dma_ack), .dma_err(dma_err), .dma_rdata(dma_rdata),
+        .sb_sel(sb_sel), .sb_sel_id(sb_sel_id), .sb_sel_atn(sb_sel_atn), .sb_sel_done(sb_sel_done),
+        .sb_sel_fail(sb_sel_fail), .sb_bsy(sb_bsy), .sb_req(sb_req), .sb_phase(sb_phase), .sb_tdata(sb_tdata),
+        .sb_ack(sb_ack), .sb_idata(sb_idata), .sb_ackhold(sb_ackhold), .sb_atn(sb_atn), .sb_rst(sb_rst));
+
+    scsi_targets u_targets (
+        .clk(clk), .rst(!rst_n),
+        .sel(sb_sel), .sel_id(sb_sel_id), .sel_atn(sb_sel_atn), .sel_done(sb_sel_done), .sel_fail(sb_sel_fail),
+        .bsy(sb_bsy), .req(sb_req), .phase(sb_phase), .tdata(sb_tdata), .ack(sb_ack), .idata(sb_idata),
+        .ackhold(sb_ackhold), .atn(sb_atn), .brst(sb_rst),
+        .img_present(img_present), .img_blocks(img_blocks),
+        .sd_lba(sd_lba), .sd_blk_cnt(sd_blk_cnt), .sd_rd(sd_rd), .sd_wr(sd_wr), .sd_ack(sd_ack),
+        .sd_buff_addr(sd_buff_addr), .sd_buff_dout(sd_buff_dout), .sd_buff_din(sd_buff_din),
+        .sd_buff_wr(sd_buff_wr), .activity(scsi_activity));
 
     wax_stub u_wax (
         .clk(clk), .rst_n(rst_n), .req(gsc_req && gsc_dev == 2'd2), .we(gsc_we), .addr(gsc_addr),
         .ack(w_ack), .err(w_err), .rdata(w_rdata));
 
 `ifdef SIMULATION
-    // +gsctrace: every GSC access (device, address, byte enables, data)
-    logic gsc_trace, gsc_pend_we;
+    // dbg_ctl[0]: every GSC access (device, address, byte enables, data)
+    logic gsc_pend_we;
     logic [31:0] gsc_pend_addr, gsc_pend_wdata;
     logic [3:0]  gsc_pend_be;
     logic [1:0]  gsc_pend_dev;
-    initial gsc_trace = $test$plusargs("gsctrace");
-    always_ff @(posedge clk) if (gsc_trace) begin
+    always_ff @(posedge clk) if (dbg_ctl[0]) begin
         if (gsc_req) begin
             gsc_pend_we <= gsc_we; gsc_pend_addr <= gsc_addr; gsc_pend_wdata <= gsc_wdata;
             gsc_pend_be <= gsc_be; gsc_pend_dev <= gsc_dev;
@@ -203,6 +259,20 @@ module hp715 #(
         if (gsc_ack)
             $display("gsc %0d %s %08x be=%x %08x%s", gsc_pend_dev, gsc_pend_we ? "W" : "R", gsc_pend_addr,
                      gsc_pend_be, gsc_pend_we ? gsc_pend_wdata : gsc_rdata, gsc_err ? " ERR" : "");
+    end
+
+    // dbg_ctl[1]: the I-cache's diagnose writes, flushes and the L1 entries
+    // of line 0 (the 0x41094 stale-L1 investigation, cpu-requests #4)
+    always_ff @(posedge clk) if (dbg_ctl[1]) begin
+        if (u_cpu.u_icache.st == 3 && !u_cpu.u_icache.cur_fill)
+            $display("IC op=%0d addr=%08x e_idx=%04x hash=%02x wdata=%08x", u_cpu.u_icache.op, u_cpu.u_icache.op_addr,
+                     u_cpu.u_icache.e_idx, u_cpu.u_icache.e_hash, u_cpu.u_icache.op_wdata);
+        if (u_cpu.u_icache.l1_we && u_cpu.u_icache.l1_waddr < 7'd4)
+            $display("L1 wr st=%0d idx=%0d rpn=%05x dw=%016x", u_cpu.u_icache.st, u_cpu.u_icache.l1_waddr,
+                     u_cpu.u_icache.l1_wdata[85:66], u_cpu.u_icache.l1_wdata[63:0]);
+        if (u_cpu.u_icache.lk_valid && u_cpu.u_icache.f1_addr[31:5] == 27'd0)
+            $display("IF  addr=%08x hash=%02x l1hit=%0d l2hit=%0d word=%08x", u_cpu.u_icache.f1_addr,
+                     u_cpu.u_icache.lk_hash, u_cpu.u_icache.l1_hit, u_cpu.u_icache.l2_hit, u_cpu.u_icache.f1_word);
     end
 `endif
 
