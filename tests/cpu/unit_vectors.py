@@ -18,6 +18,9 @@ alu line:   a b cb_in a_shift logic_op lop inv_b cin_sel dcor cond_class
 shift line: r1 r2 t_old imm5 op sign zero_fill use_imm amount len cond_c check
             | exp_result exp_cond                                     (hex)
 max1 line:  a b op sat sa | exp_result                                (hex)
+fp line:    op sgl dsgl rm cond a_hi a_lo b_hi b_lo check | exp_hi exp_lo
+            exp_flags exp_c   (hex; check bit 0 64-bit result, bit 1 upper
+            word only (single result), bit 2 flags V Z O U I, bit 3 compare)
 mem line:   base index disp use_index scale ea_is_base base_trunc size stbys
             st_src kind base_we | 16 window words before | exp_r5 exp_r3off
             | 16 window words after   (hex; kind 0 load, 1 store, 2 ldcw)
@@ -258,7 +261,66 @@ def mem_lines(groups):
     return out
 
 
+# ---- fp: the engine alone (rtl/cpu/pa_fpu.sv) on the fp suite's vectors, with
+# QEMU's results as the expectation. fmpyadd/fmpysub (two engine operations)
+# are left to the whole-CPU run.
+FP_OPS = {"fadd": 0, "fsub": 1, "fmpy": 2, "fdiv": 3, "fsqrt": 4, "fcpy": 5, "fabs": 6,
+          "fcnvff": 7, "fcnvxf": 8, "fcnvfx": 9, "fcnvfxt": 10, "fcmp": 11, "xmpyu": 12,
+          "frnd": 13}
+FP_CONDS = ["false?", "false", "?", "!<=>", "=", "=t", "?=", "!<>", "!?>=", "<", "?<",
+            "!>=", "!?>", "<=", "?<=", "!>", "!?<=", ">", "?>", "!<=", "!?<", ">=", "?>=",
+            "!<", "!?=", "<>", "!=", "!=t", "!?", "<=>", "true?", "true"]
+FP_RMS = {"rn": 0, "rz": 1, "rp": 2, "rm": 3}
+
+
+def fp_lines(groups, suite="fp"):
+    with open(os.path.join(HERE, "build", "gen_%s.json" % suite)) as f:
+        gen = {g["group"]: g["inputs"] for g in json.load(f)}
+    lines = []
+    for name, rows in groups.items():
+        if name.startswith("fmpy") and "," in name and name.split(",")[0] in ("fmpyadd", "fmpysub"):
+            continue
+        base, _, rmn = name.partition(".")
+        parts = base.split(",")
+        mn = parts[0]
+        if mn not in FP_OPS:
+            continue
+        rm = FP_RMS.get(rmn, 0)
+        cond = 0
+        if mn == "fcmp":
+            sgl = parts[1] == "sgl"; dsgl = sgl; cond = FP_CONDS.index(parts[2])
+        elif mn == "xmpyu":
+            sgl = True; dsgl = False
+        elif mn.startswith("fcnv"):
+            sgl = parts[1] == "sgl"; dsgl = parts[2] == "sgl"
+        else:
+            sgl = parts[1] == "sgl"; dsgl = sgl
+        for vin, row in zip(gen[name], rows):
+            a = vin["a"] << 32 if sgl else vin["a"]
+            b = vin.get("b", 0)
+            b = b << 32 if sgl else b
+            status = row[2]
+            flags, c = (status >> 27) & 0x1F, (status >> 26) & 1
+            chk = 4
+            if mn == "fcmp":
+                chk |= 8
+            else:
+                chk |= 2 if dsgl else 1
+            lines.append("%x %d %d %d %x %08x %08x %08x %08x %x | %08x %08x %x %d # %s" % (
+                FP_OPS[mn], sgl, dsgl, rm, cond, a >> 32, a & 0xFFFFFFFF, b >> 32, b & 0xFFFFFFFF,
+                chk, row[0], row[1], flags, c, name))
+    return lines
+
+
 def main(argv):
+    if len(argv) >= 5 and argv[1] == "fp" and "-o" in argv:
+        o = argv.index("-o")
+        groups, _ = read_log(argv[2])
+        lines = fp_lines(groups)
+        with open(argv[o + 1], "w") as f:
+            f.write("\n".join(lines) + "\n")
+        print("fp: %d vectors -> %s" % (len(lines), argv[o + 1]))
+        return
     if len(argv) >= 5 and argv[1] == "mem" and "-o" in argv:
         o = argv.index("-o")
         groups, _ = read_log(argv[2])

@@ -99,6 +99,17 @@ tb_shift: obj_dir_tb/shift_vectors.txt
 
 .PHONY: tb_alu tb_shift
 
+obj_dir_tb/fp_vectors.txt: $(CPUT)/unit_vectors.py $(CPUT)/ref/qemu/fp.log
+	@mkdir -p obj_dir_tb
+	$(MAKE) -C $(CPUT) build/gen_fp.json >/dev/null
+	python3 $(CPUT)/unit_vectors.py fp $(CPUT)/ref/qemu/fp.log -o $@
+
+tb_fpu: obj_dir_tb/fp_vectors.txt
+	$(TB_V) --top-module pa_fpu -o tb_fpu $(RTL)/cpu/pa_pkg.sv $(RTL)/cpu/pa_fpu.sv tb/tb_fpu.cpp
+	./obj_dir_tb/tb_fpu obj_dir_tb/fp_vectors.txt
+
+.PHONY: tb_fpu
+
 obj_dir_tb/max1_vectors.txt: $(CPUT)/unit_vectors.py $(CPUT)/model.py
 	@mkdir -p obj_dir_tb
 	$(MAKE) -C $(CPUT) build/gen_max1.json >/dev/null

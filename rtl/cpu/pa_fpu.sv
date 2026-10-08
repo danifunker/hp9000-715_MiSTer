@@ -106,7 +106,7 @@ module pa_fpu
     logic [55:0]  div_r;
     logic [55:0]  div_q;
     logic [57:0]  sq_rem, sq_root;
-    logic [161:0] sq_rad;
+    logic [109:0] sq_rad;             // radicand m << 56: the root has 55 bits (53 + guard + round)
     // early decisions
     logic        early_done, early_unimpl, early_we;
     logic [63:0] early_result;
@@ -286,9 +286,10 @@ module pa_fpu
                             div_r <= {3'd0, ua.sig}; div_q <= 56'd0; iter <= 7'd0; st <= S_DIV;
                         end
                         F_SQRT: begin
-                            // radicand m = sig (E even) or sig << 1 (E odd), scaled so the root has 55 bits
-                            if (ua.e[0]) sq_rad <= {ua.sig, 1'b0, 108'd0};
-                            else         sq_rad <= {1'b0, ua.sig, 108'd0};
+                            // radicand m = sig (E even) or sig << 1 (E odd), times 2^56 so the
+                            // 55-bit root = sqrt(m) * 2^28 has its leading one at bit 54
+                            if (ua.e[0]) sq_rad <= {ua.sig, 1'b0, 56'd0};
+                            else         sq_rad <= {1'b0, ua.sig, 56'd0};
                             sq_rem <= 58'd0; sq_root <= 58'd0; iter <= 7'd0; st <= S_SQRT;
                         end
                         default: st <= S_CVT;
@@ -344,10 +345,11 @@ module pa_fpu
                     end
                 end
 
-                // ---- divide: restoring, one quotient bit per cycle (56 bits)
+                // ---- divide: restoring, one quotient bit per cycle, 56 steps against 2b so the
+                // first digit is the units digit (a/b in (0.5, 2)): q = floor(a * 2^55 / b) < 2^56
                 S_DIV: begin
                     logic [56:0] t;
-                    t = {div_r, 1'b0} - {4'd0, nb.sig};
+                    t = {div_r, 1'b0} - {3'd0, nb.sig, 1'b0};
                     if (!t[56]) begin div_r <= t[55:0]; div_q <= {div_q[54:0], 1'b1}; end
                     else begin div_r <= {div_r[54:0], 1'b0}; div_q <= {div_q[54:0], 1'b0}; end
                     iter <= iter + 7'd1;
@@ -357,16 +359,16 @@ module pa_fpu
                     end
                 end
 
-                // ---- square root: digit by digit, 2 radicand bits per cycle, 81 cycles for 55 root bits
+                // ---- square root: digit by digit, 2 radicand bits per cycle, 55 cycles for 55 root bits
                 S_SQRT: begin
                     logic [57:0] rem2, trial;
-                    rem2 = {sq_rem[55:0], sq_rad[161:160]};
+                    rem2 = {sq_rem[55:0], sq_rad[109:108]};
                     trial = {sq_root[55:0], 2'b01};
-                    sq_rad <= {sq_rad[159:0], 2'b00};
+                    sq_rad <= {sq_rad[107:0], 2'b00};
                     if (rem2 >= trial) begin sq_rem <= rem2 - trial; sq_root <= {sq_root[56:0], 1'b1}; end
                     else begin sq_rem <= rem2; sq_root <= {sq_root[56:0], 1'b0}; end
                     iter <= iter + 7'd1;
-                    if (iter == 7'd80) st <= S_NORM;
+                    if (iter == 7'd54) st <= S_NORM;
                 end
 
                 // ---- conversions
@@ -439,7 +441,7 @@ module pa_fpu
                     end else v = rsig;
                     lz = lzc58(v);
                     rsig <= v << lz;
-                    if (op == F_SQRT) re <= ((na.e - 14'(na.e[0])) >>> 1) - 14'(signed'({8'd0, lz}));
+                    if (op == F_SQRT) re <= ((na.e - 14'(signed'({13'd0, na.e[0]}))) >>> 1) - 14'(signed'({8'd0, lz}));   // all signed: E odd -> (E-1)/2
                     else re <= re - 14'(signed'({8'd0, lz}));
                     st <= S_ROUND;
                 end
