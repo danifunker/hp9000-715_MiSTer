@@ -10,13 +10,26 @@
 // ignored by the 32 MB parts' 9-bit columns). A doubleword is four columns,
 // the first one holding bits 63:48 (big-endian: the even byte on DQ[15:8]).
 //
-// Every access is ACTIVE, then one or two BL8 bursts (CAS latency 2,
-// sequential, write bursts on), the last one with auto-precharge: a closed
-// page, no open-row bookkeeping. A line is two bursts: the half holding the
+// Every access is ACTIVE, then the transfer, then an auto-precharge: a
+// closed page, no open-row bookkeeping. Reads are one or two BL8 bursts
+// (CAS latency 2, sequential). A line is two bursts: the half holding the
 // requested doubleword first, so the beats come critical-first in burst
-// order (c, c^1, c^2, c^3; ram_rbeat names each). A single doubleword is
-// one burst whose other four words are masked (writes) or ignored (reads).
-// Writes collect their beats from the port before the ACTIVE.
+// order (c, c^1, c^2, c^3; ram_rbeat names each); a single doubleword is
+// one burst whose other four words are ignored. Writes are single-location
+// (mode register A9 = 1): one WRITE command per 16-bit word, 4 or 16 in
+// consecutive cycles, each with its data and byte mask, the last with
+// auto-precharge. Writes collect their beats from the port before the
+// ACTIVE.
+//
+// Why writes are not bursts: on the board (2026-10-08, build 8) a single
+// doubleword written as a BL8 burst with DQM = 11 on its other four words
+// came out with those words written anyway -- the partner doubleword of
+// every DMA write took a copy of it (the LIF header the ROM DMAs to
+// 0x10000 read dw0 = dw1, dw2 = dw3 ...), so the ROM's INQUIRY data and
+// IPL were garbled while the CPU's line writes were fine. The DQM pins
+// are wired as every MiSTer core wires them, so the cause is not known;
+// the controller no longer depends on DQM for anything (the byte masks
+// for ram_be are still driven, but the MIOC always sends 0xFF).
 //
 // Read timing: a READ in the command register in cycle c reaches the chip at
 // the edge ending c (SDRAM_CLK in phase with clk), data comes CL cycles
@@ -75,8 +88,8 @@ module sdram64 #(
 );
     localparam logic [2:0] C_NOP = 3'b111, C_ACT = 3'b011, C_RD = 3'b101, C_WR = 3'b100,
                            C_PRE = 3'b010, C_REF = 3'b001, C_MRS = 3'b000;
-    // burst length 8, sequential, CAS latency 2, write bursts on
-    localparam logic [12:0] MODE = 13'b000_0_00_010_0_011;
+    // burst length 8, sequential, CAS latency 2, single-location writes (A9)
+    localparam logic [12:0] MODE = 13'b000_1_00_010_0_011;
     localparam int INIT_WAIT = CLK_HZ / 10_000 + 100;     // 100 us + a margin
     localparam int REF_EVERY = CLK_HZ / 1_000_000 * 76 / 10;   // 7.6 us (8192 rows / 64 ms)
 
@@ -129,9 +142,9 @@ module sdram64 #(
     logic [1:0]  crit;
 
     wire [1:0] c0 = r_addr[4:3];
-    // column of a burst starting at doubleword d of the line
-    function automatic logic [12:0] col_of(input logic [1:0] d, input logic ap);
-        return {2'b00, ap, r_addr[25], r_addr[9:5], d, 2'b00};
+    // column of word w of doubleword d of the line (a read burst starts at w = 0)
+    function automatic logic [12:0] col_of(input logic [1:0] d, input logic [1:0] w, input logic ap);
+        return {2'b00, ap, r_addr[25], r_addr[9:5], d, w};
     endfunction
     // the 16-bit word w (0..3) of a doubleword, and its write mask
     function automatic logic [15:0] word_of(input logic [63:0] q, input logic [1:0] w);
@@ -200,27 +213,24 @@ module sdram64 #(
                 crit <= r_we ? 2'd0 : c0;
                 st <= S_RW;
             end
-            // the first burst's command at rw = 1, the second's (lines) at
-            // rw = 9; a command set at rw = n is on the pins while rw = n + 1
+            // a command set at rw = n is on the pins while rw = n + 1. Reads:
+            // the first burst's READ at rw = 1, the second's (lines) at rw = 9.
+            // Writes: a WRITE per word at rw = 1 .. 4 (16 for a line), its
+            // data and mask with it, auto-precharge on the last
             S_RW: begin
                 rw <= rw + 5'd1;
-                if (rw == 5'd1 || (rw == 5'd9 && r_line)) begin
-                    logic [1:0] d;
-                    logic       last;
-                    if (r_we) d = r_line ? (rw == 5'd1 ? 2'd0 : 2'd2) : c0;
-                    else      d = (rw == 5'd1) ? c0 : c0 ^ 2'b10;
-                    last = !r_line || rw == 5'd9;
-                    cmd <= r_we ? C_WR : C_RD; SDRAM_A <= col_of(d, last);
+                if (!r_we && (rw == 5'd1 || (rw == 5'd9 && r_line))) begin
+                    cmd <= C_RD;
+                    SDRAM_A <= col_of((rw == 5'd1) ? c0 : c0 ^ 2'b10, 2'd0, !r_line || rw == 5'd9);
                 end
-                // write data: a burst's 8 words start with its WRITE
-                if (r_we && rw >= 5'd1 && rw < (r_line ? 5'd17 : 5'd9)) begin
-                    logic [3:0] k;            // word of the line (single: of the burst)
+                if (r_we && rw >= 5'd1 && rw <= (r_line ? 5'd16 : 5'd4)) begin
+                    logic [3:0] k;            // word of the line (single: of the doubleword)
                     k = 4'(rw - 5'd1);
+                    cmd <= C_WR;
+                    SDRAM_A <= col_of(r_line ? k[3:2] : c0, k[1:0], rw == (r_line ? 5'd16 : 5'd4));
                     dq_oe  <= 1'b1;
                     dq_out <= word_of(wbuf[r_line ? k[3:2] : 2'd0], k[1:0]);
-                    if (r_line)               dqm <= 2'b00;
-                    else if (k[3:2] == 2'd0)  dqm <= {!r_be[7 - 2*k[1:0]], !r_be[6 - 2*k[1:0]]};
-                    else                      dqm <= 2'b11;   // the burst's other doubleword
+                    dqm    <= r_line ? 2'b00 : {!r_be[7 - 2*k[1:0]], !r_be[6 - 2*k[1:0]]};
                 end
                 // read capture: word k of the bursts is in dq_cap while rw = rd_first + k
                 if (!r_we && rw >= rd_first) begin
@@ -235,9 +245,9 @@ module sdram64 #(
                         cw <= cw + 2'd1;
                     end
                 end
-                // done after the last write word, or once the last burst has
+                // done with the last WRITE, or once the last read burst has
                 // left the bus (a single read waits out its unused 4 words)
-                if (r_we ? rw == (r_line ? 5'd16 : 5'd8) : rw == 5'(2 + RD_LAT) + (r_line ? 5'd15 : 5'd7)) begin
+                if (r_we ? rw == (r_line ? 5'd16 : 5'd4) : rw == 5'(2 + RD_LAT) + (r_line ? 5'd15 : 5'd7)) begin
                     st <= S_WAIT; tcnt <= r_we ? 16'd4 : 16'd2;   // tWR + tRP after a write, tRP after a read
                 end
             end

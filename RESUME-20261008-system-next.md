@@ -29,9 +29,15 @@ do that first.
   `skip_int_restore2_0` (0x20f3c) -- an interruption loop -- without
   printing anything.
 * **Board** (MiSTer at 192.168.99.92, cleared by the user 2026-10-08): the
-  core meets 64 MHz (build 8: setup +0.948 ns, 67 % ALMs); the ROM's
+  core meets 64 MHz (build 9: setup +0.843 ns, 69 % ALMs); the ROM's
   self-tests pass and it reaches BOOT_ADMIN (SDRAM capture fixed, S-019;
-  CPU ordering fixed, cpu-requests #6); the MiSTer screen shows the serial
+  CPU ordering fixed, cpu-requests #6); **it boots from SCSI** (build 9:
+  SDRAM writes no longer rely on DQM, S-019): `search` lists
+  `scsi.6.0 SEAGATE ST32550N`, `boot scsi.6` runs ISL and the hpux loader,
+  and HP-UX's kernel starts -- at 16 MB with the diag EEPROM it panics at
+  once, `Data page fault`, interrupt 15, pcoq 0x8b368, ior 0x2ecd8 (the
+  console log: the 2026-10-08 board-scsi session's scratchpad
+  `board9_console.txt`); the MiSTer screen shows the serial
   console and the MiSTer keyboard types into it; a debug event recorder
   writes the machine's SCSI/DMA/CPU-line events into DDR3 for
   `tools/mister/trace_dump.py`.

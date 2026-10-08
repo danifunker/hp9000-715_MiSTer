@@ -1,5 +1,17 @@
 # Resume prompt -- the board-only SCSI failure (2026-10-08)
 
+**Resolved 2026-10-08 (build 9).** The cause was none of the leads below:
+`sdram64` wrote a single doubleword as a BL8 burst with DQM = 11 on the
+other four words, and on the board those words were written anyway, so
+every DMA write's partner doubleword took a copy of it (seen with the
+ROM's `peek` on the LIF header DMAed to 0x10000: dw0 = dw1, dw2 = dw3 ...;
+the INQUIRY type byte at 0x3154 became 0x53). The CPU's line writes mask
+nothing, so every memory test passed. Writes are now single-location (a
+WRITE per 16-bit word); `search` lists `scsi.6.0 SEAGATE ST32550N` and
+`boot scsi.6` runs ISL, the hpux loader and starts the kernel on the board
+(STUBS S-019, system.md 10 build 9). Continue with
+`RESUME-20261008-system-next.md`.
+
 You are working on the HP 9000/715 MiSTer core in `/home/dani/repos/hp9000-715`.
 This session has **one job**: find and fix why HP's boot ROM cannot use the
 SCSI disk **on the real MiSTer**, while the same RTL works in Verilator.
