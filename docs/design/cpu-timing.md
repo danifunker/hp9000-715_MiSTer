@@ -23,7 +23,8 @@ same device); the paths are what to judge by.
 | 5 | 2026-10-07 | + cuts F, A, M1, M2, M3 of section 4.3; CPU revision 2 | `top_pipe` | **62.8 MHz** | -0.31 ns | 12,070 | 14,923 | 291 | 0 | 1.2 MHz short; section 4.3 |
 | 6 | 2026-10-07 | + the W-stage TLB operations share the lookup CAM (4.4) | `top_pipe` | **59.0 MHz** | -1.34 ns | 10,635 | 14,162 | 291 | 0 | -1.4k ALMs, but the tag select hurts; section 4.4 |
 | 7 | 2026-10-07 | + the operation's CAM cycle as a registered state (S_CAM), tag select from state only | `top_pipe` | **53.6 MHz** | -3.04 ns | 11,106 | 14,436 | 291 | 0 | worse: the operation's tag path; section 4.4 |
-| 8 | 2026-10-07 | + the operation's tag registered in the TLB at acceptance | `top_pipe` | pending | | | | | | |
+| 8 | 2026-10-07 | + the operation's tag registered in the TLB at acceptance | `top_pipe` | **63.1 MHz** | -0.23 ns | 11,443 | 14,989 | 291 | 0 | best so far, 0.9 MHz short; section 4.4 |
+| 9 | 2026-10-07 | fit 8's RTL, fitter seed 2 | `top_pipe` | pending | | | | | | |
 
 ## 1. Baseline: the sequential core (fit 1)
 
@@ -319,6 +320,17 @@ muxes, 36 bits fanned out to 64 comparators.
 acceptance (S_IDLE -> S_CAM); the CAM cycle and the target walk start from
 flip-flops. If this does not get back above fit 5's 62.8 MHz, the shared
 CAM is reverted (commits 7fc0551, 9bb4514) and the 1.4k ALMs stay.
+
+**Fit 8: 63.1 MHz, -0.23 ns, 11,443 ALMs / 14,989 registers** (`pa_tlb`
+4770.2(4770.2) ALMs). Better than fit 5 on both counts, so the shared CAM stays. The
+worst path is the fit-5 shape again, retimed across M and W: lookup
+(`match` -> `sel` -> hit) -> page/block RPN select -> `dc_m_rpn` ->
+`w_cached` (moved forward) -> the W write-data select `wd0` -> E's operand
+mux -> the shifter's first mux (`ext_raw`), 15.2 ns. Within fitter noise of
+the target: fit 9 is the same RTL with seed 2. If the seeds scatter around
+63, the RTL cut is to make the `wd0` select a flag registered at M -> W
+(`w_ld_sel`) instead of `wst`/`w_is_cmem`/`w_is_load` decode, which takes
+`w_cached` out of the write-data path entirely.
 
 
 ## 5. Open items
