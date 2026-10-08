@@ -24,7 +24,7 @@ same device); the paths are what to judge by.
 | 6 | 2026-10-07 | + the W-stage TLB operations share the lookup CAM (4.4) | `top_pipe` | **59.0 MHz** | -1.34 ns | 10,635 | 14,162 | 291 | 0 | -1.4k ALMs, but the tag select hurts; section 4.4 |
 | 7 | 2026-10-07 | + the operation's CAM cycle as a registered state (S_CAM), tag select from state only | `top_pipe` | **53.6 MHz** | -3.04 ns | 11,106 | 14,436 | 291 | 0 | worse: the operation's tag path; section 4.4 |
 | 8 | 2026-10-07 | + the operation's tag registered in the TLB at acceptance | `top_pipe` | **63.1 MHz** | -0.23 ns | 11,443 | 14,989 | 291 | 0 | best so far, 0.9 MHz short; section 4.4 |
-| 9 | 2026-10-07 | fit 8's RTL, fitter seed 2 | `top_pipe` | pending | | | | | | |
+| 9 | 2026-10-07 | fit 8's RTL, fitter seed 2 | `top_pipe` | **65.1 MHz** | +0.25 ns | 11,373 | 14,764 | 291 | 0 | **64 MHz met**; section 4.4 |
 
 ## 1. Baseline: the sequential core (fit 1)
 
@@ -322,7 +322,7 @@ flip-flops. If this does not get back above fit 5's 62.8 MHz, the shared
 CAM is reverted (commits 7fc0551, 9bb4514) and the 1.4k ALMs stay.
 
 **Fit 8: 63.1 MHz, -0.23 ns, 11,443 ALMs / 14,989 registers** (`pa_tlb`
-4770.2(4770.2) ALMs). Better than fit 5 on both counts, so the shared CAM stays. The
+4,770 ALMs). Better than fit 5 on both counts, so the shared CAM stays. The
 worst path is the fit-5 shape again, retimed across M and W: lookup
 (`match` -> `sel` -> hit) -> page/block RPN select -> `dc_m_rpn` ->
 `w_cached` (moved forward) -> the W write-data select `wd0` -> E's operand
@@ -331,6 +331,21 @@ the target: fit 9 is the same RTL with seed 2. If the seeds scatter around
 63, the RTL cut is to make the `wd0` select a flag registered at M -> W
 (`w_ld_sel`) instead of `wst`/`w_is_cmem`/`w_is_load` decode, which takes
 `w_cached` out of the write-data path entirely.
+
+**Fit 9 (seed 2): 65.1 MHz, +0.25 ns, 11,373 ALMs / 14,764 registers --
+64 MHz met.** Same RTL as fit 8; the seed alone moved it by 2 MHz, so the
+margin is placement, not logic. `scratch/cpu_fmax/cpu_fmax_pipe.qsf` keeps
+`SEED 2`. The worst path is the same shape (lookup -> RPN -> `w_cached`,
+retimed, -> `wd0` -> E's operand -> the ALU pre-shift), +0.25 ns. For real
+margin the `w_ld_sel` cut above is still the one to make, and the fetch
+redirect path (4.3) is the other candidate that retiming currently hides.
+
+Area summary at fit 9, against the ~8-10k ALM budget: 11.4k ALMs without
+the FPU -- `pa_tlb` 4.8k (64 x 36-bit CAM + 64 x 46-bit payload in
+flip-flops), `pa_core` 4.4k, `pa_fetch` 0.8k, the two caches 0.9k, the
+rest 0.5k. The TLB's flip-flop payload is the obvious place to buy area
+back (an MLAB payload costs ~2.5 ns on the lookup; a 2-cycle registered
+translation would allow it) once the FPU's cost is known.
 
 
 ## 5. Open items
