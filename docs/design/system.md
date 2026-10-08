@@ -301,9 +301,12 @@ loads the same file through the same loader (`verilator/sim.v`).
   SCSI trace (`--scsitrace`: SCRIPTS instructions, selections, interrupts,
   bus bytes), the MIOC's transactions (`--miotrace`) and the board
   recorder's events (`--evtrace`, the same records `tools/mister/trace_dump.py`
-  reads from a board). `--traps` lists every interruption; `--wtrace A B`
-  prints the core's W and M stages and the TLB every cycle from A to B and
-  dumps all 64 + 8 TLB entries at both ends (it reads the model's internal
+  reads from a board). `--traps` lists every interruption; `--memdump CYCLE ADDR LEN FILE`
+  writes LEN bytes of the ideal RAM from physical ADDR at CYCLE (it showed
+  HP-UX's PDIR entry intact while the walker read stale data); `--wtrace A B`
+  prints the core's W and M stages, the TLB and the D-cache engine every
+  cycle from A to B (and, while the walker runs, the PDIR words it read and
+  the CR28 it will write) and dumps all 64 + 8 TLB entries at both ends (it reads the model's internal
   signals; it found the I-LAB livelock, cpu-requests #7).
 * `ROMSIM_SDRAM=1` (`make -C verilator romsim ROMSIM_DIR=obj_dir_roms
   ROMSIM_SDRAM=1`): system RAM is `rtl/mister/sdram64.sv` on a chip model

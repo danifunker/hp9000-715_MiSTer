@@ -267,7 +267,13 @@ module pa_dcache
                     cnt <= cnt + 3'd1;
                     if (cnt[1:0] == 2'd3) begin
                         cnt <= 3'd0;
-                        st <= (op == DC_MISS) ? S_FILLREQ : S_INVAL;
+                        // a miss and the walker's read fill after the victim leaves;
+                        // the flushes invalidate. (The walker's read took the flush
+                        // path here: no fill, no error, op_rd2 left holding the
+                        // previous walk's entry -- HP-UX 10.20 page-faulted on a
+                        // mapped kernel page whenever the PDIR line missed the
+                        // D-cache over a dirty victim.)
+                        st <= (op == DC_MISS || op == DC_RD2) ? S_FILLREQ : S_INVAL;
                     end
                 end
                 S_FILLREQ: if (ln_ack) st <= S_FILLDATA;

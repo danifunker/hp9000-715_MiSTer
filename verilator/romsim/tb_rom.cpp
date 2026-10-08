@@ -18,6 +18,7 @@
 //                    [--save-at CYCLE FILE] [--save-on STR FILE] [--restore FILE]   (whole-model
 //                    checkpoints, at a cycle or when the console first prints STR; a restored
 //                    run keeps the cycle count, and needs the same build)
+//                    [--memdump CYCLE ADDR LEN FILE]   (the ideal RAM, LEN bytes from physical ADDR, at CYCLE)
 //                    [--wtrace A B]   (every cycle from A to B: the core's W and M stages and the
 //                    TLB's state, with a dump of all TLB entries at A and at B; reads the model's
 //                    internal signals, so it follows pa_core / pa_tlb renames)
@@ -59,6 +60,32 @@ static void wtrace_line(unsigned long long t) {
 	        CORE_(m_valid), CORE_(m_iaoq_f), CORE_(m_ea), TLB_(st),
 	        (unsigned long long)top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__tlb_lk_tag_r, TLB_(pg_hit), TLB_(b_hit),
 	        top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__tlb_lk_hit, top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__tlb_lk_rpn);
+	// the D-cache engine every cycle of the window
+#define DC_(x) top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__u_dcache__DOT__##x
+#define CPU_(x) top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__##x
+	fprintf(stderr, "%12s   dc st%d op%d req%d done%d err%d addr %08x rpn %05x idx %04x traddr %03x draddr %04x tq %05x qhit%d"
+	        " dq %016llx twe%d twa %03x dwe%d dwa %04x fill %x cnt%d rd2 %08x%08x_%08x%08x\n", "",
+	        DC_(st), CPU_(dc_op), CPU_(dc_op_req), CPU_(dc_op_done), CPU_(dc_op_err), CPU_(dc_op_addr), CPU_(dc_op_rpn),
+	        DC_(op_idx), DC_(t_raddr), DC_(d_raddr), DC_(tq_rpn), DC_(q_hit), (unsigned long long)DC_(d_q)[0] | ((unsigned long long)DC_(d_q)[1] << 32),
+	        DC_(t_we), DC_(t_waddr), DC_(d_we), DC_(d_waddr), DC_(fill_got), DC_(cnt),
+	        CPU_(dc_op_rd2)[3], CPU_(dc_op_rd2)[2], CPU_(dc_op_rd2)[1], CPU_(dc_op_rd2)[0]);
+	// the walker's view: the PDIR entry it read (words 0-3), its verdict, the CR28 it will write, CR28 now
+	if (CORE_(wst) == 5 || CORE_(wst) == 8 || CORE_(wst) == 9)
+		fprintf(stderr, "%12s   walker pdir %08x %08x %08x %08x cr28we%d cr28val %08x tr4 %08x dr24 %08x dr25 %08x\n", "",
+		        top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__dc_op_rd2[3], top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__dc_op_rd2[2], top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__dc_op_rd2[1], top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__dc_op_rd2[0],
+		        CORE_(w_cr28_we), CORE_(w_cr28_val), CORE_(tr)[4], CORE_(dr24), CORE_(dr25));
+}
+// --memdump CYCLE ADDR LEN FILE: the ideal RAM array (64-bit words, byte 0 of
+// a doubleword in bits 63:56) written out big-endian as the CPU sees it
+static void dump_mem(const char* file, unsigned long long addr, unsigned long long len) {
+	FILE* f = fopen(file, "wb");
+	if (!f) { perror(file); return; }
+	for (unsigned long long a = addr; a < addr + len; a++) {
+		unsigned long long q = top->rootp->emu__DOT__ram[a >> 3];
+		fputc((q >> (8 * (7 - (a & 7)))) & 0xFF, f);
+	}
+	fclose(f);
+	fprintf(stderr, "romsim: dumped %llu bytes at %08llx to %s\n", len, addr, file);
 }
 static uint64_t cyc = 0;
 
@@ -170,6 +197,7 @@ int main(int argc, char** argv) {
 	std::string save_on;
 	const char* blk_path[3] = {nullptr, nullptr, nullptr};
 	const char* restore_file = nullptr;
+	unsigned long long memdump_at = 0, memdump_addr = 0, memdump_len = 0; const char* memdump_file = nullptr;
 	for (int i = 1; i < argc; i++) {
 		std::string a = argv[i];
 		auto next = [&](void) -> const char* { return i + 1 < argc ? argv[++i] : ""; };
@@ -208,6 +236,8 @@ int main(int argc, char** argv) {
 		else if (a == "--wtrace") { wtrace_a = strtoull(next(), 0, 0); wtrace_b = strtoull(next(), 0, 0); }
 		else if (a == "--trace") trace = strtoull(next(), 0, 0);
 		else if (a == "--trace-from") trace_from = strtoull(next(), 0, 0);
+		else if (a == "--memdump") { memdump_at = strtoull(next(), 0, 0); memdump_addr = strtoull(next(), 0, 0);
+		                             memdump_len = strtoull(next(), 0, 0); memdump_file = next(); }
 		else if (a[0] != '+') { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
 	}
 	for (int n = 0; n < 3; n++) {
@@ -299,6 +329,7 @@ int main(int argc, char** argv) {
 		sd_step();
 		tick();
 		unsigned long long t = cyc - start;
+		if (memdump_file && t == memdump_at) { dump_mem(memdump_file, memdump_addr, memdump_len); memdump_file = nullptr; }
 		if (wtrace_b && t >= wtrace_a && t <= wtrace_b) {
 			if (t == wtrace_a) dump_tlb(t);
 			wtrace_line(t);

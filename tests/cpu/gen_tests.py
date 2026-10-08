@@ -1680,6 +1680,21 @@ def gen_tlbx(rng):
     for case in ("ok", "v0", "r0", "tag"):
         for u, n in ((0, 0), (1, 0), (1, 1)):
             vecs.append(walk_vector(k, case, u, n)); k += 1
+    # the PDIR line not in the D-cache, with a dirty line at its index (the walker's
+    # read must write the victim back and then fill; it once took the flush path,
+    # returned the previous walk's entry and HP-UX 10.20 page-faulted on a mapped
+    # kernel page): the "ok" and the "tag" (U = 1, N = 0) cases again
+    def walk_vector_miss(k, case, u, n):
+        lines, expect = walk_vector(k, case, u, n)
+        va = VWIN + 0x1000 * k
+        entry = PDIR | ((va >> 12) & 0xFF) << 4
+        alias = (entry ^ 0x20000) & ~0x1F                  # same D-cache index, another page (2 MB RAM)
+        evict = li(13, entry & ~0x1F) + ["\tfdc\t%r0(%r13)", SYNC] + \
+                li(13, alias) + li(14, 0xD1D7D1D7) + ["\tstw\t%r14, 0(%r13)"]
+        i = lines.index("\tmtctl\t%r13, %cr28") - len(li(13, 0xC0000))   # before the CR28 preset
+        return lines[:i] + evict + lines[i:], expect
+    for case, u, n in (("ok", 1, 0), ("tag", 1, 0)):
+        vecs.append(walk_vector_miss(k, case, u, n)); k += 1
     # walker disabled: trap 15 and CR28 untouched
     va, pa = VWIN + 0x1000 * k, PBASE + 0x1000 * k
     lines = li(13, 0xC0000) + ["\tmtctl\t%r13, %cr28"] + li(13, 0x9) + [diag("MTCPU", x=13, dr=25)] + \
