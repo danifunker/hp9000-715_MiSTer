@@ -93,6 +93,7 @@ module pa_decode
             c.ra = f11_15;              // index x
             c.use_index = 1'b1;
             c.base_we = f26;            // ,m: GR[b] <- GR[b] + GR[x]
+            c.ea_is_base = f26;         // ... and the offset is the old GR[b] (ACD 5-169..5-174; cpu-requests #4)
             c.sr = sr3(insn);
             c.s2 = insn[15:14];
             c.illegal = 1'b1;

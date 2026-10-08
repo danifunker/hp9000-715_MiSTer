@@ -913,7 +913,7 @@ module pa_core
                              (w_mem_go && w_cached && (!dc_ready || !w_chit)) ||
                              w_op_go || w_walk_go ||
                              (w_exec && w_is_sync && !sb_empty && !w_run_trap);
-            W_WAIT, W_OP, W_REPLAY, W_WALK_RD, W_WALK_A, W_WALK_P, W_WFAIL: w_hold = 1'b1;
+            W_WAIT, W_OP, W_REPLAY, W_WALK_RD, W_WALK_RD3, W_WALK_A, W_WALK_P, W_WFAIL: w_hold = 1'b1;   // RD3: cpu-requests #5
             default: w_hold = 1'b0;
         endcase
     end
