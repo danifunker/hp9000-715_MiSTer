@@ -102,7 +102,9 @@ tested (pipeline, caches with diagnose access, TLB with the hardware walker).
    simplified: latencies, no overlap), `CLAUDE.md`'s layout row, and commit
    as steps land ("commit it and keep going" stands).
 
-## CPU revision (decision needed from the user -- the user asked for help choosing)
+## CPU revision (DECIDED 2026-10-07: the user chose a value in 1..0xB; implemented as 2)
+
+**Decision:** `CPU_REVISION = 2`. Consequences: the ROM runs the dual-issue test, so the system's loader patches ROM offset 0xB810 (STUBS S-011) until a later task (the user: "probably a task for Opus") makes the core pass it; Linux gets the Gecko-style soft-power answer; HP-UX 10.20 stays on its trap-7 gateway path (rev < 0xC). The table below is the analysis that preceded the decision.
 
 `pa_cpu #(.CPU_REVISION(...))` sets DR0 bits 0:5. The facts
 (`docs/review/07-hpux-cpu-specifics.md` section 1):

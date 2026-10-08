@@ -1140,6 +1140,7 @@ def par(x):
 
 TAG_INVALID = 0xF0000400
 DR0_MASKED = 0x03FF0000        # flags cleared (W1C), HPMCs masked, L1 off
+# DR0 reads are logged masked (0x02AF0003), so pa_cpu's CPU_REVISION (DR0 bits 0:5) never appears here
 
 
 def gen_cache(rng):

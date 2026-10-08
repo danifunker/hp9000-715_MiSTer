@@ -30,7 +30,7 @@ field is written `[n:m]` in Verilog order, which is said explicitly.
 | Topic | Decision | Why |
 |---|---|---|
 | Architecture | PA-RISC 1.1 3rd ed., Level 1 (16-bit space IDs, 48-bit VA), + MAX-1 halfword ops (32-bit forms), + PCX-L implementation specifics (diagnose, fast TLB inserts, FMPYCFXT, clip-test FTEST, multi-endian word ops) | user decision; ERS s.1.3, s.2 |
-| Issue | single issue, in order; DR0 revision field = **0** by default (`pa_cpu` parameter `CPU_REVISION`), **0xC with a one-word ROM patch recommended** (review 07 s.1.6 option B) | ROM skips the cycle-exact dual-issue test and forces single issue at rev 0 (BOOT s.4.2 0x4108D, HW s.8.2); P-008. Rev 0 leaves Linux a stale PDC_SOFT_POWER pointer and HP-UX 10.20 on its pre-production gateway path (review 07 s.1) -- Q3 |
+| Issue | single issue, in order; DR0 revision field = **2** (`pa_cpu` parameter `CPU_REVISION`; user's decision 2026-10-07: a value in 1..0xB) | at rev != 0 the ROM runs the cycle-exact dual-issue test 0x4108D (BOOT s.4.2), which a single-issue core fails, so the system patches the one ROM word of review 07 s.1.6 when loading the image until dual issue exists (STUBS S-011, P-008). Rev != 0 gives Linux a valid PDC_SOFT_POWER answer; rev < 0xC keeps HP-UX 10.20 on its trap-7 gateway path (review 07 s.1.3) -- Q3 |
 | Pipeline | 5 stages F-D-E-M-W, precise commit in W, replay from W for misses | sec. 6 |
 | Clock | **64 MHz** (the real 715/64's clock); the pipelined core without caches fits at 72.5 MHz (`cpu-timing.md`) | sec. 6.9 |
 | L2 caches | **real 128 KB I + 128 KB D**, direct-mapped, 32-byte lines, VIPT (index VA[15:26] with the PCX-L space hash, tag = 20-bit RPN), write-back, write-allocate, per-word parity, full diagnose access; ~244 M10K | the ROM's cache/TLB/memory tests and code-in-cache need exactly this (BOOT s.4.3-4.5, HW s.8.3) |
@@ -810,7 +810,7 @@ DR0/8 and _T for DR25/27-29 and calls DR1/24/26 unreadable -- P-018).
 
 | Bits | Name | Access | Ours | Used by |
 |---|---|---|---|---|
-| 0:5 | revision | r | `CPU_REVISION` parameter, **0** (P-008) until Q3 is decided | five ROM consumers (review 07 s.1.1): `set_dr0` (SOU/ISTRM/DUAL_DIS fix-ups), selftest2 (test 0x4108D runs unless rev 0 -- or the ROM word at offset 0xB810 is patched), MIOC control bit 14, `pdc_soft_power` (returns without writing at rev 0), `pdc_model_versions` (the real 715/64 reports **0xC**). HP-UX 10.20: rev < 0xC -> `normal_gate = 0`, every syscall through trap 7 (review 07 s.1.3) |
+| 0:5 | revision | r | `CPU_REVISION` parameter, **2** (Q3 decided 2026-10-07; `set_dr0` touches nothing at rev 2..0xA, rev 1 would clear ISTRM_EN) | five ROM consumers (review 07 s.1.1): `set_dr0` (SOU/ISTRM/DUAL_DIS fix-ups), selftest2 (test 0x4108D runs unless rev 0 -- or the ROM word at offset 0xB810 is patched), MIOC control bit 14, `pdc_soft_power` (returns without writing at rev 0), `pdc_model_versions` (the real 715/64 reports **0xC**). HP-UX 10.20: rev < 0xC -> `normal_gate = 0`, every syscall through trap 7 (review 07 s.1.3) |
 | 6 | L2IHPMC | r / W1C | set on any L2-I parity error (fetch hit, RI2D/RI2T) | HPMC classifier, 0x42095 |
 | 7 | L2IHPMC_DIS | r/w | masks (holds pending) the L2-I HPMC | |
 | 8 | L2DHPMC | r / W1C | L2-D parity error (load/store hit, walker read, RDD/RDT) | |
@@ -972,7 +972,7 @@ runs FICE + FDCE over 128 KB before the IPL (BOOT s.2.10).
 |---|---|---|
 | HVERSION 0x60A (715/64), 0x619 / 0x60B for 715/80/100 | PDC_MODEL info from the EEPROM HV area | ROM/EEPROM, not a CPU register (FW s.2.2 #4) |
 | PDC_MODEL CPU_ID | fails on a 715 | PDC (715_64.h:36); HP-UX then counts BTLB slots: **8 -> PCX-L** (R06 s.3.1) |
-| CPU revision | DR0[0:5] (= 0) -> PDC_MODEL versions | sec. 5.1, Q3 |
+| CPU revision | DR0[0:5] (= 2) -> PDC_MODEL versions | sec. 5.1, Q3 |
 | FP model/revision | 0x0D / 0x01 via COPR,0,0 | ERS s.7.1; PDC_COPROC |
 | Linux | hversion >> 4 in 0x600-0x61F -> pcxl (L hardware.c:1303) | PDC |
 
@@ -1381,7 +1381,7 @@ PA 1.1 illegal set: 07, 0F, 14-17, 1C-1F, 27, 2E, 2F, 36, 37, 3B-3F (sec.
 |---|---|---|
 | Q1 | Full **128 KB + 128 KB** caches cost ~247 M10K of 553 (the framework takes ~98). OK, or plan for the ROM-supported 32 KB variant (one-word ROM patch, ~65 M10K)? | 128 + 128, unpatched ROM |
 | Q2 | **50 MHz** core (64 MHz stretch). Acceptable that we are slower than a real 715/64 (single issue, replay misses)? | 50 MHz |
-| Q3 | **CPU revision**: 0 (ROM unpatched, dual-issue test skipped) or **0xC** (what a real 715/64 reports) with the one-word ROM patch of review 07 s.1.6 (offset 0xB810: 0x86802012 -> 0xE8000012). Review 07: rev 0 is unsafe for Linux (stale PDC_SOFT_POWER pointer) and puts HP-UX 10.20 on its trap-7 gateway path; 0xC + patch behaves exactly like the real machine. **Recommendation (2026-10-07): 0xC with the patch** -- the option table is in `RESUME-20261007-fpu.md` | `CPU_REVISION` = 0 until the user decides (cpu-requests #2) |
+| Q3 | **CPU revision**: 0 (ROM unpatched, dual-issue test skipped) or a non-zero value with the one-word ROM patch of review 07 s.1.6 (offset 0xB810: 0x86802012 -> 0xE8000012). Review 07: rev 0 is unsafe for Linux (stale PDC_SOFT_POWER pointer); any rev < 0xC puts HP-UX 10.20 on its trap-7 gateway path; 0xC is what a real 715/64 reports. **Decided (user, 2026-10-07): revision in 1..0xB, implemented as 2**, with the ROM word patched by the loader until the core passes the dual-issue timing test (a later task, STUBS S-011) | `CPU_REVISION` = 2 (cpu-requests #2) |
 | Q4 | answered by review 07 s.2: CR28 written for 15, 6 and 17 per the table, never when the walker is disabled | -- |
 | Q5 | Little-endian: is "PSW.E stored, no effect" (P-011) acceptable for every target OS (NeXTSTEP? NetBSD?) | yes |
 | Q6 | MAX-1 reference: patch the scratch QEMU to allow MAX-1 on `-M 715` (and fix HSHLADD), or rely on `model.py` alone? | model.py; optional QEMU patch |
