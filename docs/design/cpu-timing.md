@@ -21,7 +21,8 @@ same device); the paths are what to judge by.
 | 4 | 2026-10-07 | + UTLB (64 page + 8 block entries, DR8), virtual mode in both caches (space hash), protection checks, PROBE/LPA, the hardware walker, the I-LAB | `top_pipe` | **56.3 MHz** | -2.13 ns | 10,385 | 11,723 | 291 | 0 | 64 MHz **missed**; section 4.2 |
 | 4b | 2026-10-07 | fit 4's RTL with register retiming off (diagnostic) | `top_pipe` (`cpu_fmax_pipe_nort`) | 51.5 MHz | -3.79 ns | 9,107 | 9,828 | 291 | 0 | per-stage slacks; section 4.3 |
 | 5 | 2026-10-07 | + cuts F, A, M1, M2, M3 of section 4.3; CPU revision 2 | `top_pipe` | **62.8 MHz** | -0.31 ns | 12,070 | 14,923 | 291 | 0 | 1.2 MHz short; section 4.3 |
-| 6 | 2026-10-07 | + the W-stage TLB operations share the lookup CAM (4.4) | `top_pipe` | pending | | | | | | |
+| 6 | 2026-10-07 | + the W-stage TLB operations share the lookup CAM (4.4) | `top_pipe` | **59.0 MHz** | -1.34 ns | 10,635 | 14,162 | 291 | 0 | -1.4k ALMs, but the tag select hurts; section 4.4 |
+| 7 | 2026-10-07 | + the operation's CAM cycle as a registered state (S_CAM), tag select from state only | `top_pipe` | pending | | | | | | |
 
 ## 1. Baseline: the sequential core (fit 1)
 
@@ -291,7 +292,19 @@ suites pass.
 
 #### Result
 
-(fit 6 pending)
+**59.0 MHz, -1.34 ns; 10,635 ALMs** (`pa_tlb` 3,996: the second comparator
+set is gone, -1.4k ALMs as expected) -- but 3.8 MHz slower than fit 5. The
+worst 40 paths all end on the CAM's `match` (retimed into registers) and
+start on `lk_tag`: the tag select `op_cam = (st == S_IDLE) && op_req &&
+!op_done` hangs off `tlb_op_req`, which is combinational W-stage control,
+and the retimer had also moved `w_trap` forward, so the chain M trap check
+(`pid_wr_ok` -> `m_trap_xd`) -> W control -> `op_cam` -> the 36-bit tag
+mux -> the CAM sat in one cycle (16.3 ns).
+
+**Fix (fit 7):** the operation is accepted into a registered state `S_CAM`
+first; `op_cam = (st == S_CAM)` is a state decode, so nothing from W or M
+is in front of the CAM. One cycle more per TLB operation (they take 4+).
+
 
 ## 5. Open items
 

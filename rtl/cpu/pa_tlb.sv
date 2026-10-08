@@ -15,7 +15,8 @@
 // arbiter) and takes the result in the same cycle. `lk_use` marks a real
 // translation (sets the entry's used bit).
 //
-// Operations (W stage, one at a time, op_req held until op_done): the
+// Operations (W stage, one at a time, op_req held until op_done; one cycle
+// on the shared CAM, then the target walk): the
 // inserts (IxTLBA / IxTLBP and the fast forms, also used by the hardware
 // walker), PxTLB, PxTLBE. An insert may target several entries (every VPN
 // match plus the DR8 pointer); the engine walks them one per cycle.
@@ -64,15 +65,17 @@ module pa_tlb
     logic [14:0] b_aid [8];
     logic [3:0]  b_flags [8];           // {t, d, b, u}
 
-    typedef enum logic [1:0] { S_IDLE, S_SELECT, S_WALK, S_DONE } st_e;
+    typedef enum logic [2:0] { S_IDLE, S_CAM, S_SELECT, S_WALK, S_DONE } st_e;
     st_e st;
     wire [35:0] op_tag = {op_space, op_off[31:12]};
 
     // ---------------------------------------------------------------- lookup
-    // one CAM for the lookup and the operations: in the cycle an operation is
-    // accepted (S_IDLE, op_req) it compares op_tag instead -- the pipeline holds
-    // behind the W instruction then, and the core withholds it_ack (cpu-timing.md 4.4)
-    assign op_cam = st == S_IDLE && op_req && !op_done;
+    // one CAM for the lookup and the operations: the cycle after an operation is
+    // accepted (state S_CAM) it compares op_tag instead -- the pipeline holds
+    // behind the W instruction then, and the core withholds it_ack. The select
+    // is a state decode, not op_req, so no W-stage logic sits in front of the
+    // CAM (cpu-timing.md 4.4)
+    assign op_cam = st == S_CAM;
     wire [35:0] lk_tag = op_cam ? op_tag : {lk_space, lk_vpn};
     logic [63:0] match;
     logic [7:0]  bmatch;
@@ -159,24 +162,26 @@ module pa_tlb
             if (lk_use && !op_cam) used <= used | sel;
             case (st)
                 S_IDLE: if (op_req && !op_done) begin
-                    st <= S_SELECT;
                     blk_target <= 1'b0;
                     if (is_purge_all) begin
                         valid <= 64'd0;
                         st <= S_DONE;
-                    end else begin
-                        targets <= match;
-                        if (blk_sel) blk_target <= 1'b1;
-                        if (is_ins_a) begin
-                            if (!dr8_force_dis) targets <= match | (64'd1 << dr8_ptr);
-                            else if (match == 64'd0 && !dr8_lru_dis && !blk_sel) begin
-                                // normal replacement
-                                if (low_inv[6])      targets <= 64'd1 << low_inv[5:0];
-                                else if (low_nru[6]) targets <= 64'd1 << low_nru[5:0];
-                                else begin
-                                    used <= 64'd0;
-                                    if (low_any[6]) targets <= 64'd1 << low_any[5:0];
-                                end
+                    end else
+                        st <= S_CAM;
+                end
+                S_CAM: begin                            // match = the entries with op_tag
+                    st <= S_SELECT;
+                    targets <= match;
+                    if (blk_sel) blk_target <= 1'b1;
+                    if (is_ins_a) begin
+                        if (!dr8_force_dis) targets <= match | (64'd1 << dr8_ptr);
+                        else if (match == 64'd0 && !dr8_lru_dis && !blk_sel) begin
+                            // normal replacement
+                            if (low_inv[6])      targets <= 64'd1 << low_inv[5:0];
+                            else if (low_nru[6]) targets <= 64'd1 << low_nru[5:0];
+                            else begin
+                                used <= 64'd0;
+                                if (low_any[6]) targets <= 64'd1 << low_any[5:0];
                             end
                         end
                     end
@@ -217,6 +222,7 @@ module pa_tlb
                     end else st <= S_DONE;
                 end
                 S_DONE: begin op_done <= 1'b1; st <= S_IDLE; end
+                default: st <= S_IDLE;
             endcase
         end
     end
