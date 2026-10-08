@@ -6,8 +6,10 @@
 //  check store in DDR3 (rtl/mister/ddr3_port.sv), the EEPROM's image on an
 //  SD-card slot (rtl/mister/eeprom_save.sv), the LASI RS-232 port on the
 //  MiSTer UART, PS/2 keyboard and mouse from hps_io, the MiSTer clock into
-//  the LASI RTC. Video is a placeholder until Artist exists: the eight
-//  front-panel LEDs and the power LED.
+//  the LASI RTC. Until Artist exists the video shows the RS-232 console
+//  as text (rtl/mister/serial_term.sv) with the front-panel LEDs, and the
+//  MiSTer keyboard types into it (rtl/mister/ps2_ascii.sv) as well as
+//  reaching the LASI PS/2 port.
 //
 //  boot.rom (HP's PDC 1.6, games/HP9K715/boot.rom) is loaded by the MiSTer
 //  at core start (ioctl index 0); the machine waits in reset until it has
@@ -66,6 +68,7 @@ localparam CONF_STR = {
 	"-;",
 	"O[2:1],Model (on reset),715/64,715/80,715/100;",
 	"O[5:3],RAM (on reset),16MB,32MB,64MB,128MB;",
+	"O[9:8],SDRAM read capture,Edge 3,Edge 2.75,Edge 2.5,Edge 4;",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"-;",
 	"T[6],TOC (front panel);",
@@ -227,6 +230,10 @@ wire        ee_hwe, ee_dirty, ee_dirty_clr;
 wire [31:0] ee_hwdata, ee_hrdata;
 wire [31:0] gr [32];
 wire        scsi_act;
+// the serial console on the screen and the MiSTer keyboard typing into it
+wire        con_tx, con_rx_full, kbd_ascii_stb;
+wire  [7:0] con_tx_byte, kbd_ascii;
+ps2_ascii ps2_ascii (.clk(clk_sys), .rst(m_reset), .ps2_key(ps2_key), .strobe(kbd_ascii_stb), .ascii(kbd_ascii));
 
 hp715 #(.CLK_HZ(64_000_000)) hp715
 (
@@ -241,8 +248,8 @@ hp715 #(.CLK_HZ(64_000_000)) hp715
 	.chk_ack(chk_ack), .chk_rdata(chk_rdata),
 	.rom_req(rom_req), .rom_addr(rom_addr), .rom_ack(rom_ack), .rom_rvalid(rom_rvalid),
 	.rom_rdata(rom_rdata), .rom_inval(rom_dl),
-	.uart_txd(UART_TXD), .uart_rxd(UART_RXD), .uart_tap_strobe(), .uart_tap_byte(),
-	.uart_inj_strobe(1'b0), .uart_inj_byte(8'd0), .uart_inj_full(),
+	.uart_txd(UART_TXD), .uart_rxd(UART_RXD), .uart_tap_strobe(con_tx), .uart_tap_byte(con_tx_byte),
+	.uart_inj_strobe(kbd_ascii_stb && !con_rx_full), .uart_inj_byte(kbd_ascii), .uart_inj_full(con_rx_full),
 	.ps2_key(ps2_key), .ps2_mouse(ps2_mouse),
 	.img_present(img_present), .img_blocks(img_blocks), .sd_lba(m_lba), .sd_blk_cnt(m_blk_cnt),
 	.sd_rd(m_rd), .sd_wr(m_wr), .sd_ack({sd_ack[3], sd_ack[2], sd_ack[0]}), .sd_buff_addr(sd_buff_addr),
@@ -259,7 +266,7 @@ hp715 #(.CLK_HZ(64_000_000)) hp715
 
 sdram64 #(.CLK_HZ(64_000_000)) sdram
 (
-	.clk(clk_sys), .rst(~pll_locked), .ready(sdram_ready),
+	.clk(clk_sys), .clk_sdram(clk_sdram), .rst(~pll_locked), .rd_mode(status[9:8]), .ready(sdram_ready),
 	.ram_req(ram_req), .ram_we(ram_we), .ram_line(ram_line), .ram_addr(ram_addr[26:0]), .ram_be(ram_be),
 	.ram_wdata(ram_wdata), .ram_ack(ram_ack), .ram_wready(ram_wready), .ram_rvalid(ram_rvalid),
 	.ram_rbeat(ram_rbeat), .ram_rdata(ram_rdata),
@@ -325,11 +332,12 @@ eeprom_save #(.CLK_HZ(64_000_000)) eeprom_save
 	.ee_dirty(ee_dirty), .ee_dirty_clr(ee_dirty_clr)
 );
 
-///////////////////////   VIDEO (placeholder)   //////////////////
+///////////////////////   VIDEO (the serial console)   ////////////
 
 // 640x480 at 21.3 MHz (one pixel every third clock, 680 x 525 total, 59.7
-// Hz): the eight status LEDs (lit = latch bit clear) and the power LED
-// (green while LASI's PWR_ON_L is clear, blinking with FLASH_LED)
+// Hz): the machine's RS-232 console as text, the front-panel LEDs and the
+// power LED (green while LASI's PWR_ON_L is clear, blinking with FLASH_LED)
+// on a status line -- until Artist exists (STUBS S-018)
 reg  [1:0] pdiv = 0;
 reg  [9:0] hc = 0, vc = 0;
 reg  [24:0] blink = 0;
@@ -341,23 +349,21 @@ always @(posedge clk_sys) begin
 		else hc <= hc + 1'd1;
 	end
 end
-wire       hbl = hc >= 10'd640, vbl = vc >= 10'd480;
-wire       in_row = vc >= 10'd200 && vc < 10'd240;
-wire [9:0] hx = hc - 10'd80;
-wire       in_led = in_row && hc >= 10'd80 && hc < 10'd560 && hx[5:0] < 6'd40;
-wire [2:0] led_n = 3'd7 - hx[8:6];
-wire       lit = in_led && !leds[led_n];
 wire       pwr_on = !pcr[1] && (!pcr[0] || blink[24]);
-wire       pwr = vc >= 10'd300 && vc < 10'd320 && hc >= 10'd300 && hc < 10'd340 && pwr_on;
+
+serial_term serial_term
+(
+	.clk(clk_sys), .rst(m_reset),
+	.tx_strobe(con_tx), .tx_byte(con_tx_byte),
+	.leds(leds), .pwr(pwr_on),
+	.pix_ce(pdiv == 2'd0), .hc(hc), .vc(vc),
+	.hs_in(hc >= 10'd656 && hc < 10'd672), .vs_in(vc >= 10'd490 && vc < 10'd492),
+	.de_in(hc < 10'd640 && vc < 10'd480),
+	.r(VGA_R), .g(VGA_G), .b(VGA_B), .hs(VGA_HS), .vs(VGA_VS), .de(VGA_DE)
+);
 
 assign CLK_VIDEO = clk_sys;
 assign CE_PIXEL  = pdiv == 2'd0;
-assign VGA_DE = ~(hbl | vbl);
-assign VGA_HS = hc >= 10'd656 && hc < 10'd672;
-assign VGA_VS = vc >= 10'd490 && vc < 10'd492;
-assign VGA_R  = (hbl | vbl) ? 8'd0 : lit ? 8'hFF : in_led ? 8'h30 : 8'd0;
-assign VGA_G  = (hbl | vbl) ? 8'd0 : lit ? 8'hB0 : pwr ? 8'hFF : in_led ? 8'h20 : 8'd0;
-assign VGA_B  = 8'd0;
 
 ///////////////////////   LEDS   /////////////////////////////////
 

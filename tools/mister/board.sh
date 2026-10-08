@@ -2,9 +2,10 @@
 #
 # board.sh -- drive the HP9K715 core on a MiSTer over ssh (key login only).
 #
-#   board.sh setup [RAM_MB]   OSD status word (/media/fat/config/HP9K715.CFG:
+#   board.sh setup [RAM_MB [RD]]  OSD status word (/media/fat/config/HP9K715.CFG:
 #                             16 bytes, status bit N = byte N/8 bit N%8; RAM
-#                             O[5:3] 0..3 = 16/32/64/128 MB, model 715/64) and
+#                             O[5:3] 0..3 = 16/32/64/128 MB, model 715/64,
+#                             SDRAM read capture O[9:8] = RD, default 0) and
 #                             the remembered mounts (HP9K715.s<n>: the absolute
 #                             path NUL-padded to 1024 bytes, mounted again at
 #                             every core start -- the CONF_STR slots are "SC"):
@@ -34,12 +35,12 @@ rsh() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$MISTER" "$@"; }
 cmd="${1:-}"; shift || true
 case "$cmd" in
 setup)
-    ram="${1:-64}"
+    ram="${1:-64}"; rd="${2:-0}"
     case "$ram" in 16) r=0 ;; 32) r=1 ;; 64) r=2 ;; 128) r=3 ;; *) echo "RAM 16/32/64/128" >&2; exit 2 ;; esac
-    rsh "mkdir -p /media/fat/config && python3 - '$r' '$GAMES/$DISK' '$GAMES/$EEP'" <<'PY'
+    rsh "mkdir -p /media/fat/config && python3 - '$r' '$GAMES/$DISK' '$GAMES/$EEP' '$rd'" <<'PY'
 import sys
-r, disk, eep = int(sys.argv[1]), sys.argv[2], sys.argv[3]
-st = r << 3                                   # O[5:3] RAM; O[2:1] = 0: 715/64
+r, disk, eep, rd = int(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
+st = r << 3 | (rd & 3) << 8                   # O[5:3] RAM, O[9:8] SDRAM capture; O[2:1] = 0: 715/64
 open('/media/fat/config/HP9K715.CFG', 'wb').write(st.to_bytes(16, 'little'))
 for slot, p in ((0, disk), (1, eep)):
     b = p.encode()
@@ -68,7 +69,12 @@ console)
         | tee -a "$LOG" || true
     ;;
 type)
-    rsh "printf '%b' '$1' > /dev/ttyS1"
+    # one character every 30 ms: the ROM echoes while it polls the UART,
+    # and a burst overruns it
+    rsh "python3 -c 'import sys,time
+s=sys.argv[1].encode().decode(\"unicode_escape\")
+f=open(\"/dev/ttyS1\",\"wb\",0)
+for c in s: f.write(c.encode(\"latin-1\")); time.sleep(0.03)' '$1'"
     ;;
 shot)
     out="$1"

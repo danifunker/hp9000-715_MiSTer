@@ -24,7 +24,7 @@ module tb_sdram64;
     logic        DQML, DQMH, nCS, nRAS, nCAS, nWE, CKE;
 
     sdram64 #(.CLK_HZ(64_000_000)) dut (
-        .clk(clk), .rst(rst), .ready(ready),
+        .clk(clk), .clk_sdram(clk), .rst(rst), .rd_mode(2'd3), .ready(ready),
         .ram_req(ram_req), .ram_we(ram_we), .ram_line(ram_line), .ram_addr(ram_addr), .ram_be(ram_be),
         .ram_wdata(ram_wdata), .ram_ack(ram_ack), .ram_wready(ram_wready), .ram_rvalid(ram_rvalid),
         .ram_rbeat(ram_rbeat), .ram_rdata(ram_rdata),

@@ -3,7 +3,8 @@
 
 The machine has no graphics console yet (STUBS S-018), so the serial port is
 its screen. This takes the output of `verilator/obj_dir_rom/Vemu --stamp`
-(console text, each line stamped with the cycle count), drops the
+(console text, each line stamped with the cycle count) or of
+`tools/mister/board.sh console` (the board's, stamped with the time), drops the
 simulator's own lines (romsim:, LED, SCR, gsc traces), and draws the rest as
 an 80-column terminal, with the machine time of each line (cycles at 64 MHz)
 in a dim gutter.
@@ -23,6 +24,7 @@ from PIL import Image, ImageDraw, ImageFont
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 CLK_HZ = 64_000_000
 STAMP = re.compile(r"^\[\s*(\d+)\]\s?(.*)$")
+BOARD = re.compile(r"^\[\d\d:\d\d:\d\d\] (.*)$")
 NOISE = re.compile(r"^(romsim:|LED [0-9A-F]{2}$|SCR |gsc |IC |L1 |IF |\s*\d+ [0-9a-f]{8} )")
 
 BG, FG, DIM, BAR, BAR_FG = (12, 16, 14), (190, 235, 190), (85, 110, 90), (52, 56, 60), (220, 220, 220)
@@ -34,6 +36,9 @@ def read_lines(path):
     with open(path, errors="replace") as f:
         for raw in f:
             raw = raw.rstrip("\n").replace("\r", "")
+            mb = BOARD.match(raw)                 # tools/mister/board.sh console
+            if mb:
+                raw = mb.group(1)
             m = STAMP.match(raw)
             cyc, text = (int(m.group(1)), m.group(2)) if m else (None, raw)
             if NOISE.match(text) or NOISE.match(raw):

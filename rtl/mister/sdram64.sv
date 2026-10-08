@@ -21,14 +21,33 @@
 // Read timing: a READ in the command register in cycle c reaches the chip at
 // the edge ending c (SDRAM_CLK in phase with clk), data comes CL cycles
 // later and is registered at the pins one edge after that: word w is in
-// dq_in during cycle c + RD_LAT + w. RD_LAT = 4 for CL 2 on the board; the
-// simulator's chip model (verilator/tb/tb_sdram64.sv) has the same pipeline.
+// dq_in during cycle c + RD_LAT + w. RD_LAT = 4 for CL 2 with SDRAM_CLK in
+// phase; the simulator's chip model (verilator/tb/tb_sdram64.sv) has that
+// pipeline.
+//
+// On the board SDRAM_CLK is the 270-degree PLL output (STUBS S-019) and
+// the data window moves, so the capture point is chosen at run time
+// (rd_mode, an OSD option). Measured on the board (2026-10-08, build 3,
+// the ROM's LFSR memory test, edges counted from the one that launches the
+// READ): with builds 3 and 4, edges 2.75 (clk_sdram) and 3 read correctly;
+// 2.5 (a clean pipeline in build 4), 3.5 and 4 do not (3.5 and 4 read every
+// 16-bit beat one beat late). So the window opens after 2.5 and closes
+// before 3.5, and edge 3 -- a plain rising-edge register -- is the default.
+// Word k is taken when rw = 2 + L + k:
+//   rd_mode 0: clk edge 3,            L = RD_LAT - 1   -- the default
+//   rd_mode 1: clk_sdram edge (2.75), re-registered into clk 3.9 ns later,
+//              L = RD_LAT - 1
+//   rd_mode 2: falling edge 2.5 (re-registered at 3), L = RD_LAT - 1
+//   rd_mode 3: clk edge 4,            L = RD_LAT       -- the bench's chip
+//              model (SDRAM_CLK in phase); one beat late on the board
 module sdram64 #(
     parameter int CLK_HZ = 64_000_000,
     parameter int RD_LAT = 4
 ) (
     input  logic        clk,
+    input  logic        clk_sdram,      // SDRAM_CLK's source: clk + 270 degrees
     input  logic        rst,
+    input  logic [1:0]  rd_mode,        // read capture point (above)
     output logic        ready,          // initialised
     // the machine's RAM port (rtl/mioc.sv)
     input  logic        ram_req,
@@ -72,7 +91,22 @@ module sdram64 #(
     assign {SDRAM_DQMH, SDRAM_DQML} = dqm;
     assign SDRAM_CKE = 1'b1;
     assign SDRAM_DQ  = dq_oe ? dq_out : 16'hZZZZ;
-    always_ff @(posedge clk) dq_in <= SDRAM_DQ;
+    // the three samples, each a plain register in clk afterwards
+    logic [15:0] dq_in_s, dq_in_sq, dq_in_n, dq_in_nq;
+    always_ff @(posedge clk_sdram) dq_in_s <= SDRAM_DQ;
+    always_ff @(negedge clk) dq_in_n <= SDRAM_DQ;
+    always_ff @(posedge clk) begin
+        dq_in <= SDRAM_DQ;
+        dq_in_sq <= dq_in_s;
+        dq_in_nq <= dq_in_n;
+    end
+    logic [4:0]  rd_first;        // rw of the first read word: 2 + L
+    logic [1:0]  rd_m;
+    always_ff @(posedge clk) begin
+        rd_m <= rd_mode;
+        rd_first <= rd_mode == 2'd3 ? 5'(2 + RD_LAT) : 5'(2 + RD_LAT - 1);
+    end
+    wire [15:0] dq_cap = rd_m == 2'd1 ? dq_in_sq : rd_m == 2'd2 ? dq_in_nq : dq_in;
 
     typedef enum logic [3:0] {
         S_INIT, S_INIT_SEQ, S_IDLE, S_REF, S_WCOLL, S_ACT, S_RW, S_WAIT
@@ -188,16 +222,16 @@ module sdram64 #(
                     else if (k[3:2] == 2'd0)  dqm <= {!r_be[7 - 2*k[1:0]], !r_be[6 - 2*k[1:0]]};
                     else                      dqm <= 2'b11;   // the burst's other doubleword
                 end
-                // read capture: word k of the bursts is in dq_in while rw = 2 + RD_LAT + k
-                if (!r_we && rw >= 5'(2 + RD_LAT)) begin
+                // read capture: word k of the bursts is in dq_cap while rw = rd_first + k
+                if (!r_we && rw >= rd_first) begin
                     logic [4:0] k;
-                    k = rw - 5'(2 + RD_LAT);
+                    k = rw - rd_first;
                     if (k < (r_line ? 5'd16 : 5'd4)) begin
                         if (cw == 2'd3) begin
                             ram_rvalid <= 1'b1;
-                            ram_rdata  <= {asm_w, dq_in};
+                            ram_rdata  <= {asm_w, dq_cap};
                             ram_rbeat  <= crit ^ {k[3], k[2]};    // burst 0: c, c^1; burst 1: c^2, c^3
-                        end else asm_w[47 - 16*cw -: 16] <= dq_in;
+                        end else asm_w[47 - 16*cw -: 16] <= dq_cap;
                         cw <= cw + 2'd1;
                     end
                 end

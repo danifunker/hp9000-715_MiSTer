@@ -268,8 +268,9 @@ loads the same file through the same loader (`verilator/sim.v`).
 | EEPROM | `rtl/mister/eeprom_save.sv`: the mounted image is read into the EEPROM before the machine leaves reset (or a 3 s backstop); saved when the OSD opens or 2 s after the firmware's last write. No image = a blank EEPROM = manufacturing mode |
 | Boot ROM | `games/HP9K715/boot.rom`, sent by the MiSTer at core start (ioctl index 0) through `rom_loader` (S-011 patch) into DDR3; the machine waits in reset until it has arrived; `ioctl_wait` paces the download |
 | RTC | hps_io's TIMESTAMP (seconds since 1970) is loaded into the LASI RTC whenever it is sent |
-| Serial | LASI RS-232 on the MiSTer UART pins (UART_TXD/RXD); CONF_STR offers 9600-115200 to the Main |
-| Video | a placeholder until Artist: the eight LEDs and the power LED on a 640x480 screen (STUBS S-018) |
+| Serial | LASI RS-232 on the MiSTer UART (UART_TXD/RXD), which the framework wires to the HPS UART: `/dev/ttyS1` on the MiSTer's Linux (`tools/mister/board.sh console`, or `picocom -b 9600 /dev/ttyS1`); CONF_STR offers 9600-115200 to the Main |
+| Video | until Artist: the RS-232 console as 80 x 29 text with the LEDs and the power LED on a status line, 640x480 (`rtl/mister/serial_term.sv`, STUBS S-018); the MiSTer keyboard also types into the console (`rtl/mister/ps2_ascii.sv`) |
+| SDRAM | `rtl/mister/sdram64.sv`, SDRAM_CLK = clk + 270 degrees; read capture an OSD option (O[9:8], default edge 3 after the READ; S-019) |
 | LEDs | LED_USER = front-panel LED4 (the OS heartbeat), LED_DISK = LED3, LED_POWER = LASI's power LED |
 
 ## 10. Builds (whole core, Quartus 17.0.2)
@@ -277,6 +278,9 @@ loads the same file through the same loader (`verilator/sim.v`).
 | # | Date | Tree | Core clock (64 MHz) | ALMs | M10K | DSP | Notes |
 |---|---|---|---|---|---|---|---|
 | 1 | 2026-10-08 | the machine before SCSI (fix #4 in, #5 not) | setup +0.781 ns, hold +0.249 ns | 25,041 (60 %) | 358 (65 %) | 37 | first full build; every clock meets timing; `output_files/HP9K715.rbf` (not committed). SDRAM I/O unconstrained (S-019) |
+| 2 | 2026-10-08 | + SCSI (53C710, targets; `1f4d438`) | setup +0.380 ns, hold +0.241 ns | 28,075 (67 %) | 360 (65 %) | 37 | **first run on a board** (MiSTer at .92): ROM loaded into DDR3 intact, CPU/cache/TLB self-tests pass, serial console on `/dev/ttyS1`; SDRAM reads one beat late (S-019) -> ECC test 0x210D7 halts |
+| 3 | 2026-10-08 | + `sdram64` rd_mode (capture edge 4 / 3.5 / 3 / 2.5) | setup -0.850 ns (the falling-edge capture into the read assembly, modes 1 and 3 only) | 28,039 | 360 | 37 | the sweep: edges 3 and 2.5 pass the LFSR test, 3.5 and 4 do not; with edge 3 the ROM reaches BOOT_ADMIN at 64 MB. `search` lists scsi.6.1-7 with blank names, `boot scsi.6`: "Cannot load IPL" (the sim finds scsi.6.0 and boots ISL) |
+| 4 | 2026-10-08 | capture by clk_sdram (2.75), the falling-edge one pipelined | setup +0.666 ns, hold +0.252 ns | 27,912 | 360 | 37 | 2.75 and 3 pass, 2.5 (clean now), 4 fail; SCSI as build 3 |
 
 ## 11. Simulation
 
