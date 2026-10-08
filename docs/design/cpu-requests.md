@@ -15,6 +15,7 @@ the pipelined core exists, the system uses `pa_core_seq` (uncached port only,
 
 | # | Requested by / date | What | Why (ROM step / OS need, doc ref) | Status / answer |
 |---|---|---|---|---|
+| 3 | system, 2026-10-07 | uncached **loads** drive `io_be` for the bytes they read (as stores do), not the whole word: a byte load sends one enable, a halfword two | an I/O byte read must not touch the neighbouring registers -- the ROM's `ldb` of the 16550's IIR (F010_5802) went out as a word read of F010_5800-5803 and popped RBR / cleared THRE, so `uart_init_test` saw IIR != 0xC1 and the console never came up (BOOT 6). cpu.md 6.8 io_be | **Made by the system stream** (the CPU sessions were idle; please review): `pa_core.sv` d_be uses `w_be` for loads too (one line). `tests/run-cputest.sh` re-run on it; it is in the tree the FPU fit (fit 10) measures |
 
 ## Done
 

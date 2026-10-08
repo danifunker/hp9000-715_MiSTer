@@ -728,9 +728,10 @@ module pa_core
         d_be = 8'd0;
         d_wdata = (w_c.fpm && w_c.size == 2'd3) ? fp_st_data :
                   w_c.fpm ? {fp_st_data[31:0], fp_st_data[31:0]} : {w_stdata, w_stdata};
-        if (w_c.size == 2'd3)        d_be = 8'hFF;
-        else if (w_c.fu == FU_STORE) d_be = w_ea[2] ? {4'b0000, w_be} : {w_be, 4'b0000};
-        else                         d_be = w_ea[2] ? 8'h0F : 8'hF0;
+        // loads too: an uncached byte read must not touch the neighbouring
+        // registers of an I/O device (FIFO pops, read-to-clear; cpu-requests #3)
+        if (w_c.size == 2'd3) d_be = 8'hFF;
+        else                  d_be = w_ea[2] ? {4'b0000, w_be} : {w_be, 4'b0000};
         if (w_umem_go) begin
             d_req = 1'b1; d_we = (w_c.fu == FU_STORE); d_rclr = w_c.ldcw;
         end else if (wst == W_WAIT) begin
