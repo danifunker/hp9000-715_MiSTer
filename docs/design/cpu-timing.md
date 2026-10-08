@@ -25,6 +25,7 @@ same device); the paths are what to judge by.
 | 7 | 2026-10-07 | + the operation's CAM cycle as a registered state (S_CAM), tag select from state only | `top_pipe` | **53.6 MHz** | -3.04 ns | 11,106 | 14,436 | 291 | 0 | worse: the operation's tag path; section 4.4 |
 | 8 | 2026-10-07 | + the operation's tag registered in the TLB at acceptance | `top_pipe` | **63.1 MHz** | -0.23 ns | 11,443 | 14,989 | 291 | 0 | best so far, 0.9 MHz short; section 4.4 |
 | 9 | 2026-10-07 | fit 8's RTL, fitter seed 2 | `top_pipe` | **65.1 MHz** | +0.25 ns | 11,373 | 14,764 | 291 | 0 | **64 MHz met**; section 4.4 |
+| 10 | 2026-10-07 | 1365246 + the FPU (`pa_fpunit` + `pa_fpu`, seed 2) | `top_pipe` | **55.8 MHz** | -2.28 ns | 17,545 | 21,254 | 293 | 4 | 64 MHz **missed**: +6.2k ALMs, the TLB path spread out; section 4.5 |
 
 ## 1. Baseline: the sequential core (fit 1)
 
@@ -348,13 +349,53 @@ back (an MLAB payload costs ~2.5 ns on the lookup; a 2-cycle registered
 translation would allow it) once the FPU's cost is known.
 
 
+### 4.5 The FPU (fit 10)
+
+The committed tree (1365246: the fit-9 core plus `pa_fpunit` + `pa_fpu`,
+nothing else), seed 2. **55.8 MHz, -2.28 ns; 17,545 ALMs / 21,254 registers,
+293 M10K, 4 DSP blocks** (the 53x53 multiplier: four 27x27, one output adder
+chain). The FPU costs **6,174 ALMs and 6,490 registers**, far above anything
+budgeted, and 9 MHz:
+
+| Entity | ALMs | Registers | What |
+|---|---:|---:|---|
+| `pa_fpunit` (own logic) | 2,909 | 3,168 | the FR file is **flip-flops**: `frl`/`frr` have three asynchronous read ports each (two operands, the store source), which Quartus will not put in MLABs -- 28 x 64 FFs plus three 64-bit 32:1 read muxes; the `hold_*` operand registers and their select; the FPSR / exception registers; the decode |
+| `pa_fpu` (engine) | 3,581 | 2,950 | the datapath: unpack x 2, the early-decision result muxes, the 58-bit align shifter + sticky mask, the 58-bit normalise shifter + `lzc58`, the 64-bit `lzc64` + shifter of FCNVXF, the 55-bit shifter + mask of FCNVFX, the divide/sqrt recurrences, rounding; ~1,000 of the registers are the RTL's (`prod` 106, `sq_rad` 110, `na`/`nb`, `rsig`, ...), the rest retiming duplicates |
+
+The 40 worst paths: 39 are the **TLB lookup chain** of fits 8/9 (`lk_tag` ->
+CAM `match` -> `sel` -> payload AND-OR `pl_all` -> `lk_aid` -> PID compare ->
+`pid_wr_ok` -> `m_trap_xd` -> `w_trap`, retimed), now 17.2 ns of which
+**11.6 ns is routing** (68 %): the same logic as fit 9 (+0.25 ns) with the
+TLB placed at X11-X28 and the core's W control at X45. The 6k extra ALMs
+pushed the placement apart. The one FPU path (-2.04 ns) is the issue:
+W's commit decision (`w_commit`, `hpmc_req`, the nullify) -> `fp_issue` ->
+`eng_start` -> the operand select (`rd_a`/`rd_b` from the flip-flop FR file
+through `opnd` and the `nx_a`/`hold_a` mux) -> the engine's `unpack` -> `na`
+(retimed into `rsig`); the FR read addresses (`rd_a_n`) alone are -1.2 ns
+into the same registers.
+
+Cuts for fit 11, in order:
+
+1. **FR file in MLABs**: one bank copy per read port (six 32 x 32 MLAB
+   arrays, every write goes to all copies), as `pa_regfile` does. Removes
+   ~1.8k flip-flops and the three 32:1 muxes: about -1.3k ALMs.
+2. **Operands from registers**: the operation is accepted at W commit into a
+   read state (`S_RD`): the register numbers come from the captured
+   instruction, the FR file is read during that cycle into `hold_a`/`hold_b`,
+   and the engine starts the cycle after from flip-flops. One more cycle
+   per operation (FADD 3 -> 4, P-016); the W commit decision leaves the
+   engine's input cone.
+3. Then the area items of the engine if still needed: FCNVXF normalised
+   through the `S_NORM` shifter (drops `lzc64` and a 64-bit shifter), one
+   right shifter shared by align and FCNVFX, the special results encoded
+   as {kind, sign} and packed once.
+4. If the TLB chain is still the worst at the smaller area, it is placement:
+   seeds 1 and 3 before any RTL change there (fit 8 -> 9 moved 2 MHz on
+   the seed alone).
+
 ## 5. Open items
 
-- **Fit 10: the FPU** (`pa_fpunit` + `pa_fpu`, committed 91bf0e8, not yet fitted): the 53x53
-  multiplier (`prod <= mul_a * mul_b`, one registered stage -- expect DSP blocks
-  and a long path), the AND-OR payload of the engine's rounding step, and the FR
-  file's three MLAB read ports in W. Add nothing else to that fit so its cost is
-  readable; 64 MHz is the gate.
+- **Fit 11**: the FPU cuts of 4.5; 64 MHz with the FPU is the gate.
 
 - Prediction in F2 instead of D (see 2.1) once the real F2 (tag compare +
   select) exists and its slack is known.
