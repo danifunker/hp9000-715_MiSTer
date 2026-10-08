@@ -10,10 +10,16 @@
 // the RPN assembled from TRANS and the uncompared VPN bits. A page hit wins
 // over a block hit (software must not create both).
 //
-// The lookup is combinational on (lk_space, lk_vpn): the caller registers
-// them (the M stage, or the fetch unit's I-LAB refill through the core's
-// arbiter) and takes the result in the same cycle. `lk_use` marks a real
-// translation (sets the entry's used bit).
+// The lookup is split across the caller's E and M stages (cpu-timing.md
+// 4.9): (lk_space, lk_vpn) is the *next* tag -- E's virtual address, or the
+// fetch unit's I-LAB refill request through the core's arbiter -- compared
+// against every entry during E, and the match vectors are registered when
+// `lk_load` is set (the E -> M edge, or any cycle the port is free for the
+// I-LAB); the payload select and the outputs follow from those registers in
+// M. `lk_tag_r` is the tag they belong to. `lk_use` marks a real translation
+// (sets the entry's used bit). An operation's acceptance (`op_accept`) loads
+// the operation's tag instead; the core re-fetches the instruction in M
+// after every operation (the commit-time flush, or the walker's replay).
 //
 // Operations (W stage, one at a time, op_req held until op_done; one cycle
 // on the shared CAM, then the target walk): the
@@ -30,6 +36,8 @@ module pa_tlb
     // lookup
     input  logic [15:0] lk_space,
     input  logic [19:0] lk_vpn,
+    input  logic        lk_load,        // register the compare of (lk_space, lk_vpn) this edge
+    output logic [35:0] lk_tag_r,       // the tag the registered match belongs to
     input  logic        lk_use,
     output logic        lk_hit,
     output logic [19:0] lk_rpn,
@@ -44,7 +52,8 @@ module pa_tlb
     input  logic [31:0] op_off,         // the offset (vpn = [31:12]; block mask from bits 13:19)
     input  logic [31:0] op_gr,          // GR[r]: IxTLBA: rpn at bits 7:26; IxTLBP: ar 5:11, aid 16:30, t 2, d 3, b 4, u 12
     output logic        op_done,
-    output logic        op_cam          // this cycle the CAM compares op_tag: the lookup result is invalid
+    output logic        op_accept,      // the operation is accepted this cycle (its tag is compared instead)
+    output logic        op_cam          // this cycle the registered match is the operation's: the lookup result is invalid
 );
     // ---------------------------------------------------------------- page entries
     logic [35:0] tag [64];
@@ -73,22 +82,28 @@ module pa_tlb
     logic [35:0] op_tag;
 
     // ---------------------------------------------------------------- lookup
-    // one CAM for the lookup and the operations: the cycle after an operation is
-    // accepted (state S_CAM) it compares op_tag instead -- the pipeline holds
-    // behind the W instruction then, and the core withholds it_ack. The select
-    // is a state decode, not op_req, so no W-stage logic sits in front of the
-    // CAM (cpu-timing.md 4.4)
+    // one CAM for the lookup and the operations, compared a cycle ahead of its
+    // use and registered: the cycle an operation is accepted it compares the
+    // operation's tag instead (the pipeline holds behind the W instruction
+    // then, and the core withholds it_ack while op_cam)
+    wire is_purge_all_c = op == TLB_PURGE_ALL;
+    assign op_accept = st == S_IDLE && op_req && !op_done && !is_purge_all_c;
     assign op_cam = st == S_CAM;
-    wire [35:0] lk_tag = op_cam ? op_tag : {lk_space, lk_vpn};
-    logic [63:0] match;
-    logic [7:0]  bmatch;
+    wire [35:0] n_tag = op_accept ? {op_space, op_off[31:12]} : {lk_space, lk_vpn};
+    logic [63:0] n_match, match;
+    logic [7:0]  n_bmatch, bmatch;
     always_comb begin
-        for (int i = 0; i < 64; i++) match[i] = !lockout[i] && tag[i] == lk_tag;
+        for (int i = 0; i < 64; i++) n_match[i] = !lockout[i] && tag[i] == n_tag;
         for (int i = 0; i < 8; i++)
-            bmatch[i] = !b_lockout[i] && b_valid[i] && b_space[i] == lk_space &&
-                        b_vpn[i][12:7] == lk_vpn[19:14] &&
-                        ((b_vpn[i][6:0] ^ lk_vpn[13:7]) & b_mask[i]) == 7'd0;
+            n_bmatch[i] = !b_lockout[i] && b_valid[i] && b_space[i] == n_tag[35:20] &&
+                          b_vpn[i][12:7] == n_tag[19:14] &&
+                          ((b_vpn[i][6:0] ^ n_tag[13:7]) & b_mask[i]) == 7'd0;
     end
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin match <= 64'd0; bmatch <= 8'd0; lk_tag_r <= 36'd0; end
+        else if (op_accept || lk_load) begin match <= n_match; bmatch <= n_bmatch; lk_tag_r <= n_tag; end
+    end
+    wire [19:0] lk_vpn_r = lk_tag_r[19:0];
     wire [63:0] sel = match & valid;
     wire pg_hit = |sel;
     logic [45:0] pl_all;
@@ -103,8 +118,8 @@ module pa_tlb
         b_idx = 3'd0;
         for (int i = 0; i < 8; i++) if (bmatch[i]) b_idx = b_idx | 3'(i);
     end
-    wire [19:0] b_rpn = {b_trans[b_idx][12:7], (b_trans[b_idx][6:0] & b_mask[b_idx]) | (lk_vpn[13:7] & ~b_mask[b_idx]),
-                         lk_vpn[6:0]};
+    wire [19:0] b_rpn = {b_trans[b_idx][12:7], (b_trans[b_idx][6:0] & b_mask[b_idx]) | (lk_vpn_r[13:7] & ~b_mask[b_idx]),
+                         lk_vpn_r[6:0]};
     always_comb begin
         if (pg_hit) begin
             lk_hit = 1'b1; lk_rpn = pl_rpn; lk_ar = pl[25:19]; lk_aid = pl[18:4];
@@ -146,7 +161,7 @@ module pa_tlb
     wire is_ins_a = op == TLB_INS_A;
     wire is_ins_p = op == TLB_INS_P;
     wire is_purge = op == TLB_PURGE;
-    wire is_purge_all = op == TLB_PURGE_ALL;
+    wire is_purge_all = is_purge_all_c;
     // the block entry is a target when DR8 selects block force-insert (with the page
     // force-insert and LRU inserts disabled)
     wire blk_sel = dr8_blk_en && dr8_force_dis && dr8_lru_dis;
@@ -170,7 +185,7 @@ module pa_tlb
                         valid <= 64'd0;
                         st <= S_DONE;
                     end else
-                        st <= S_CAM;
+                        st <= S_CAM;                    // the match registers load op_tag's compare now
                     op_tag <= {op_space, op_off[31:12]};
                 end
                 S_CAM: begin                            // match = the entries with op_tag

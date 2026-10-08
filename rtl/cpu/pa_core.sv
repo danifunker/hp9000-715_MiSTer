@@ -56,8 +56,11 @@ module pa_core
     output logic        redir_from_e,
 
     // TLB (pa_tlb)
-    output logic [15:0] tlb_lk_space,
+    output logic [15:0] tlb_lk_space,   // the next lookup tag (E's address or the I-LAB's request)
     output logic [19:0] tlb_lk_vpn,
+    output logic        tlb_lk_load,    // the TLB registers its compare this edge
+    input  logic [35:0] tlb_lk_tag_r,   // the tag the registered match belongs to
+    input  logic        tlb_op_accept,
     output logic        tlb_lk_use,
     input  logic        tlb_lk_hit,
     input  logic [19:0] tlb_lk_rpn,
@@ -623,25 +626,26 @@ module pa_core
     wire m_is_rd   = m_c.fu == FU_LOAD;
     wire m_probe   = m_c.fu == FU_MMU && m_c.sysop == MM_PROBE;
     wire m_lpa     = m_c.fu == FU_MMU && m_c.sysop == MM_LPA;
-    // The lookup tag is a register (cpu-timing.md 4.8): loaded at the E -> M
-    // edge with E's virtual address when the instruction entering M translates,
-    // held while W holds M, else with the I-LAB's request. The CAM then starts
-    // from flip-flops instead of behind the port mux and its routing. The
-    // I-LAB is served only when its request still matches the registered tag
-    // (a redirect may have moved F1 since the edge).
-    logic        lk_is_it;              // the registered tag is the I-LAB's
+    // The CAM compare runs in E (cpu-timing.md 4.9): the TLB compares the next
+    // tag -- E's virtual address when the instruction entering M translates,
+    // else the I-LAB's request -- and registers the match at the E -> M edge
+    // (or whenever the port is free for the I-LAB: a hold with nothing to
+    // translate in M). M then starts from the registered match. The I-LAB is
+    // served only while its request still equals the registered tag (a
+    // redirect may have moved F1 since the edge).
+    wire e_need = e_valid && !e_nul && e_xlate;
+    assign tlb_lk_space = (adv && e_need) ? e_sp : it_space;
+    assign tlb_lk_vpn   = (adv && e_need) ? e_va[31:12] : it_vpn;
+    assign tlb_lk_load  = adv || !m_need;
+    logic        lk_is_it;              // the registered match is the I-LAB's
     always_ff @(posedge clk) begin
-        if (!rst_n) begin tlb_lk_space <= 16'd0; tlb_lk_vpn <= 20'd0; lk_is_it <= 1'b0; end
-        else if (adv) begin
-            if (e_valid && !e_nul && e_xlate) begin tlb_lk_space <= e_sp; tlb_lk_vpn <= e_va[31:12]; lk_is_it <= 1'b0; end
-            else begin tlb_lk_space <= it_space; tlb_lk_vpn <= it_vpn; lk_is_it <= 1'b1; end
-        end else if (!m_need) begin
-            tlb_lk_space <= it_space; tlb_lk_vpn <= it_vpn; lk_is_it <= 1'b1;
-        end
+        if (!rst_n) lk_is_it <= 1'b0;
+        else if (tlb_op_accept) lk_is_it <= 1'b0;
+        else if (tlb_lk_load) lk_is_it <= !(adv && e_need);
     end
     assign tlb_lk_use   = m_need && adv;
     assign it_ack = it_req && lk_is_it && !m_need && !tlb_op_cam &&
-                    it_space == tlb_lk_space && it_vpn == tlb_lk_vpn;
+                    {it_space, it_vpn} == tlb_lk_tag_r;
     assign it_hit = tlb_lk_hit;
     assign it_rpn = tlb_lk_rpn;
     assign it_type = tlb_lk_ar[6:4];

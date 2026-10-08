@@ -70,6 +70,8 @@ module pa_cpu
     logic [15:0] tlb_lk_space, tlb_op_space, it_space;
     logic [19:0] tlb_lk_vpn, tlb_lk_rpn, it_vpn, it_rpn;
     logic        tlb_lk_use, tlb_lk_hit, tlb_lk_t, tlb_lk_d, tlb_lk_b, tlb_lk_u, tlb_op_req, tlb_op_done, tlb_op_cam;
+    logic        tlb_lk_load, tlb_op_accept;
+    logic [35:0] tlb_lk_tag_r;
     logic [6:0]  tlb_lk_ar;
     logic [14:0] tlb_lk_aid;
     tlb_op_e     tlb_op;
@@ -154,10 +156,11 @@ module pa_cpu
 
     pa_tlb u_tlb (
         .clk(clk), .rst_n(rst_n), .dr8(dr8),
-        .lk_space(tlb_lk_space), .lk_vpn(tlb_lk_vpn), .lk_use(tlb_lk_use), .lk_hit(tlb_lk_hit), .lk_rpn(tlb_lk_rpn),
+        .lk_space(tlb_lk_space), .lk_vpn(tlb_lk_vpn), .lk_load(tlb_lk_load), .lk_tag_r(tlb_lk_tag_r),
+        .lk_use(tlb_lk_use), .lk_hit(tlb_lk_hit), .lk_rpn(tlb_lk_rpn),
         .lk_ar(tlb_lk_ar), .lk_aid(tlb_lk_aid), .lk_t(tlb_lk_t), .lk_d(tlb_lk_d), .lk_b(tlb_lk_b), .lk_u(tlb_lk_u),
         .op_req(tlb_op_req), .op(tlb_op), .op_space(tlb_op_space), .op_off(tlb_op_off), .op_gr(tlb_op_gr),
-        .op_done(tlb_op_done), .op_cam(tlb_op_cam));
+        .op_done(tlb_op_done), .op_accept(tlb_op_accept), .op_cam(tlb_op_cam));
 
     pa_core #(.CPU_REVISION(CPU_REVISION)) u_core (
         .clk(clk), .rst_n(rst_n),
@@ -165,7 +168,7 @@ module pa_cpu
         .f2_iasq_f(f2_iasq_f), .f2_iasq_b(f2_iasq_b), .f2_err(f2_err), .f2_perr(f2_perr),
         .f2_itlb(f2_itlb), .f2_imp(f2_imp), .f2_type(f2_type), .psw_c_o(psw_c), .ihash_o(ihash), .dr8_o(dr8),
         .adv_f2(adv_f2), .drained(drained), .uib_inval(uib_inval),
-        .tlb_lk_space(tlb_lk_space), .tlb_lk_vpn(tlb_lk_vpn), .tlb_lk_use(tlb_lk_use), .tlb_lk_hit(tlb_lk_hit),
+        .tlb_lk_space(tlb_lk_space), .tlb_lk_vpn(tlb_lk_vpn), .tlb_lk_load(tlb_lk_load), .tlb_lk_tag_r(tlb_lk_tag_r), .tlb_op_accept(tlb_op_accept), .tlb_lk_use(tlb_lk_use), .tlb_lk_hit(tlb_lk_hit),
         .tlb_lk_rpn(tlb_lk_rpn), .tlb_lk_ar(tlb_lk_ar), .tlb_lk_aid(tlb_lk_aid), .tlb_lk_t(tlb_lk_t),
         .tlb_lk_d(tlb_lk_d), .tlb_lk_b(tlb_lk_b), .tlb_lk_u(tlb_lk_u),
         .tlb_op_req(tlb_op_req), .tlb_op(tlb_op), .tlb_op_space(tlb_op_space), .tlb_op_off(tlb_op_off),

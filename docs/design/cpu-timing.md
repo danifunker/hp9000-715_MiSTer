@@ -31,6 +31,8 @@ same device); the paths are what to judge by.
 | 12b | 2026-10-08 | fit 12's RTL, retiming off (diagnostic) | `top_pipe` (`cpu_fmax_pipe_nort`) | 51.9 MHz | -3.58 ns | 11,876 | 14,504 | 291 | 4 | per-stage slacks; section 4.8 |
 | 12c | 2026-10-08 | fit 12's RTL, seed 3 | `top_pipe` (`cpu_fmax_pipe_s3`) | **60.9 MHz** | -0.80 ns | 14,119 | 16,709 | 291 | 4 | the seed alone: +1.9 MHz; worst: W sysop -> TLB op CAM, D decode -> ALU |
 | 13 | 2026-10-08 | + cuts T (lookup tag register) and F (E forwards from M only, D bypasses M/W, load-word bypass with refetch) | `top_pipe` | **53.9 MHz** | -2.92 ns | 12,326 | 15,824 | 291 | 4 | -1.7k ALMs; E/D stages now -0.46/-0.04, the M-stage lookup + checks chain is 17.8 ns on its own; section 4.9 |
+| 13b | 2026-10-08 | fit 13's RTL, retiming off (diagnostic) | `top_pipe` (`cpu_fmax_pipe_nort`) | 48.0 MHz | -4.00 ns | 11,672 | -- | 291 | 4 | stages: M -4.00 (the lookup chain), F2 -1.47 and D -0.84 (M forward -> ALU -> branch), E -1.31 (M forward -> shifter -> nullify), TLB ops -1.29 |
+| 14 | 2026-10-08 | + the CAM in E: `match`/`bmatch` registered at E -> M | `top_pipe` | **55.7 MHz** | -2.34 ns | 12,071 | 15,329 | 291 | 4 | M chain -2.19 (now `sel` -> AND-OR -> PID -> trap, 17 ns), FPU FCNVFX -2.34, W hold in front of the CAM -1.16; section 4.10 |
 
 ## 1. Baseline: the sequential core (fit 1)
 
@@ -511,13 +513,27 @@ holds the pipeline; every TLB operation therefore ends in a replay
 up again. E's new path (operand forward -> adder -> 36-bit compare ->
 register) is ~10 ns.
 
+### 4.10 Fit 14: the CAM in E
+
+**55.7 MHz, -2.34 ns; 12,071 ALMs / 15,329 registers.** All 12 suites, the
+co-simulation and the ROM boot (the same 215,232,637 cycles as fit 13: no
+cycle is lost) pass. Per stage (`paths_stage13.tcl`): E +0.03, F2 +1.44,
+F1 +0.57, D -0.54 (M forward -> shifter -> zero detect -> condition ->
+`e_nul`), TLB -1.16, M -2.19, FPU -2.34; D-cache paths +0.66, the RPN into
+`w_hit` +0.28, the W trap redirect into the fetch unit +0.44.
+
+| Path | Slack | What it is | Cut (fit 15) |
+|---|---:|---|---|
+| FPU `na.e` -> `sh_amt` -> shared shifter -> rounding add -> negate -> `int_result` | -2.34 | the fit-12 area cut put FCNVFX's shift, round and negate in one cycle | S_CVT registers the shifted value, S_CVT2 rounds and negates (FCNVFX 4 -> 5 cycles) |
+| `match` -> `sel` (1.7 ns of routing + 1 level) -> payload AND-OR (4 levels, 7.6 ns) -> `lk_aid` -> PID compare (3 levels) -> `pid_wr_ok` -> 2.7 ns of routing -> trap encode -> `w_trap` | -2.19 | the payload select and the PID check in series | **PID match as a payload bit**: every entry carries `pid_rd/wr_ok` computed from its AID and the four PID registers (64 x 4 15-bit compares + the AID = 0 rule, from registers only, in parallel with everything else, ~600 ALMs); the lookup returns them with the payload. The TLB registers `sel` (= match & valid), `pg_hit` and the block hit/index at the E -> M edge instead of the raw match, so M starts at the AND-OR |
+| `w_hold` -> the next-tag mux -> `n_tag` -> CAM compare -> `match` | -1.16 (and `w_trap` -> `match` -0.77) | the W hold decision (`adv`) selects the CAM's input | the tag mux selects on E's own need (`e_need`), `adv` only gates the register load; the I-LAB is not served during a hold while E would translate (a refill waits a few cycles) |
+| M forward -> shifter -> result zero-detect -> shift condition -> `e_nullify` -> `e_nul` | -0.54 | conditional shift/extract/deposit nullify | left for after fit 15 (a one-cycle D stall after a conditional shift, with the condition from the registered result) |
+
 ## 5. Open items
 
-- **Fit 14**: the CAM in E; 64 MHz with the FPU is the gate. Then seeds 1
-  and 3 for margin (the seed moves this design by ~2 MHz: fits 8/9, 12/12c).
-- The FPU's `na.e` -> shared shifter -> `int_result` path (-0.92): if it
-  stays after fit 14, give FCNVFX its own cycle for the shift (S_CVT ->
-  S_CVT2) instead of sharing with the alignment.
+- **Fit 15**: the four cuts of 4.10; 64 MHz with the FPU is the gate. Then
+  seeds 1 and 3 for margin (the seed moves this design by ~2 MHz: fits 8/9,
+  12/12c).
 
 - Prediction in F2 instead of D (see 2.1) once the real F2 (tag compare +
   select) exists and its slack is known.
