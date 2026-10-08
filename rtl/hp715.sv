@@ -277,6 +277,17 @@ module hp715 #(
 `endif
 
 `ifdef SIMULATION
+    // dbg_ctl[3]: the MIOC's transactions as it accepts them (line port,
+    // uncached port, DMA) and its RAM requests
+    always_ff @(posedge clk) if (dbg_ctl[3]) begin
+        if (u_mioc.st == 0 && !(u_mioc.lasi_eir_req && !u_mioc.lasi_eir_ack && !u_mioc.lasi_eir_err)) begin
+            if (mem_req) $display("MIO line %s %08x", mem_we ? "W" : "R", mem_addr);
+            else if (dma_req && !dma_ack) $display("MIO dma  %s %08x be=%02x %016x", dma_we ? "W" : "R", dma_addr, dma_be, dma_wdata);
+            else if (io_req) $display("MIO io   %s %08x be=%02x %016x", io_we ? "W" : "R", io_addr, io_be, io_wdata);
+        end
+        if (ram_req && ram_ack) $display("MIO ram  %s %07x line=%0d be=%02x", ram_we ? "W" : "R", ram_addr, ram_line, ram_be);
+    end
+
     // dbg_ctl[2]: the 53C710 -- SCRIPTS instructions as decoded, selections,
     // interrupt status, the bytes on the bus, the block-device requests
     logic       sc_irq_q, sc_req_q, sc_ack_q;

@@ -119,7 +119,12 @@ logic [7:0] rst_cnt;
 always_ff @(posedge clk_sys)
 	if (reset || rl_busy) rst_cnt <= 8'd255;
 	else if (rst_cnt != 8'd0) rst_cnt <= rst_cnt - 8'd1;
+`ifdef SDRAM_MODEL
+wire sdram_ready;
+wire m_reset = reset || rl_busy || rst_cnt != 8'd0 || !sdram_ready;
+`else
 wire m_reset = reset || rl_busy || rst_cnt != 8'd0;
+`endif
 
 //----------------------------------------------------------------------------
 // The machine
@@ -164,6 +169,25 @@ hp715 #(.CLK_HZ(64_000_000), .SIM_FAST(1'b1)) u_hp715 (
 	.dbg_psw(debug_psw), .dbg_halted(debug_halted), .dbg_buserr(debug_buserr),
 	.dbg_buserr_addr(debug_buserr_addr), .dbg_gr(gr));
 
+`ifdef SDRAM_MODEL
+//----------------------------------------------------------------------------
+// System RAM as on the board: rtl/mister/sdram64.sv on a behavioural chip
+// (verilator/sim_sdram_chip.sv, one 64 MB rank), SDRAM_CLK in phase
+//----------------------------------------------------------------------------
+wire  [15:0] sd_dq;
+logic [12:0] sd_a;
+logic [1:0]  sd_ba;
+logic        sd_dqml, sd_dqmh, sd_ncs, sd_nras, sd_ncas, sd_nwe, sd_cke;
+sdram64 #(.CLK_HZ(64_000_000)) u_sdram (
+	.clk(clk_sys), .clk_sdram(clk_sys), .rst(reset), .rd_mode(2'd3), .ready(sdram_ready),
+	.ram_req(ram_req), .ram_we(ram_we), .ram_line(ram_line), .ram_addr(ram_addr[26:0]), .ram_be(ram_be),
+	.ram_wdata(ram_wdata), .ram_ack(ram_ack), .ram_wready(ram_wready), .ram_rvalid(ram_rvalid),
+	.ram_rbeat(ram_rbeat), .ram_rdata(ram_rdata),
+	.SDRAM_DQ(sd_dq), .SDRAM_A(sd_a), .SDRAM_BA(sd_ba), .SDRAM_DQML(sd_dqml), .SDRAM_DQMH(sd_dqmh),
+	.SDRAM_nCS(sd_ncs), .SDRAM_nRAS(sd_nras), .SDRAM_nCAS(sd_ncas), .SDRAM_nWE(sd_nwe), .SDRAM_CKE(sd_cke));
+sim_sdram_chip #(.INV_CS(0)) u_sdram_chip (.clk(clk_sys), .nCS(sd_ncs), .nRAS(sd_nras), .nCAS(sd_ncas),
+	.nWE(sd_nwe), .ba(sd_ba), .a(sd_a), .dqmh(sd_dqmh), .dqml(sd_dqml), .dq(sd_dq), .ctl_drives(u_sdram.dq_oe));
+`else
 //----------------------------------------------------------------------------
 // System RAM: acknowledge the cycle after the request, then one beat per
 // cycle (a line wraps from ram_addr[4:3])
@@ -199,6 +223,7 @@ always_ff @(posedge clk_sys) begin
 	endcase
 	if (reset) r_state <= 2'd0;
 end
+`endif
 
 // check store
 logic [31:0] chk [CHK_WORDS];

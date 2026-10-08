@@ -10,6 +10,12 @@
 // (write-backs and fills) and the I-cache (fills): the D side has priority,
 // and a transaction holds the port until its last beat. The two never
 // overlap in practice: I-fills are issued only when the pipeline is empty.
+// A D-side transaction is not started while the store buffer holds a posted
+// store: the store is older (the D-cache's operations hold W), and the
+// MIOC acknowledges a store once it is done, so waiting keeps the two in
+// program order -- otherwise a younger miss overtook the store whenever both
+// waited for the MIOC (the ROM's ECC test turning ECC on with a store and
+// re-reading the line, cpu-requests #6).
 module pa_biu (
     input  logic        clk,
     input  logic        rst_n,
@@ -102,7 +108,7 @@ module pa_biu (
         else begin
             case (grant)
                 2'd0: begin
-                    if (dl_req) grant <= 2'd1;
+                    if (dl_req && !sb_valid) grant <= 2'd1;
                     else if (il_req) grant <= 2'd2;
                     beats <= 3'd0;
                 end

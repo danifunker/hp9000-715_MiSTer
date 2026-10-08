@@ -5,4 +5,5 @@ screenshot_*.png
 build.log
 obj_dir_ct/
 obj_dir_cosim/
-obj_dir_rom/
+obj_dir_rom*/
+obj_dir_term/

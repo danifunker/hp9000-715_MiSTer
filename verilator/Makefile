@@ -196,19 +196,33 @@ cosim: $(COSIM_EXE) obj_dir_ct/$(SUITE).hex
 # ROMSIM_DIR: build a second copy elsewhere without disturbing a running
 # simulation (checkpoints only restore into the build that made them);
 # ROMSIM_OPT: the C++ optimisation (-Os measured 8 % faster than -O2)
+# ROMSIM_SDRAM=1: system RAM is rtl/mister/sdram64.sv on a chip model
+# (sim_sdram_chip.sv), as on the board, instead of the ideal array
 ROMSIM_DIR ?= obj_dir_rom
 ROMSIM_OPT ?= -Os
+ROMSIM_SDRAM ?= 0
+ifeq ($(ROMSIM_SDRAM),1)
+ROMSIM_EXTRA = +define+SDRAM_MODEL=1 $(RTL)/mister/sdram64.sv sim_sdram_chip.sv
+endif
 ROMSIM_EXE = $(ROMSIM_DIR)/Vemu
-$(ROMSIM_EXE): $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v romsim/tb_rom.cpp
+$(ROMSIM_EXE): $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v romsim/tb_rom.cpp $(RTL)/mister/sdram64.sv sim_sdram_chip.sv
 	$(V) --cc --exe --build -j 0 -O3 -Wno-fatal -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL \
 		-Wno-UNUSEDPARAM -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-TIMESCALEMOD --x-assign fast --x-initial fast \
 		+define+SIMULATION=1 --savable --Mdir $(ROMSIM_DIR) --top-module emu -o Vemu \
-		-MAKEFLAGS "OPT_FAST='$(ROMSIM_OPT)'" $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v \
+		-MAKEFLAGS "OPT_FAST='$(ROMSIM_OPT)'" $(ROMSIM_EXTRA) $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v \
 		$(abspath romsim/tb_rom.cpp)
 
 romsim: $(ROMSIM_EXE)
 
 .PHONY: romsim
+
+# The on-screen serial terminal (rtl/mister/serial_term.sv): types console
+# text into it and writes one frame, obj_dir_term/term.ppm
+tb_term: ../rtl/mister/serial_term.sv tb/tb_term.sv tb/tb_term.cpp
+	$(V) --cc --exe --build -j 0 -Wno-fatal --Mdir obj_dir_term --top-module tb_term -o Vtb_term \
+		../rtl/mister/serial_term.sv tb/tb_term.sv $(abspath tb/tb_term.cpp)
+	cd obj_dir_term && ./Vtb_term
+.PHONY: tb_term
 
 # ---------------------------------------------------------------------------
 # Board-side units: `make tb_sdram64` runs rtl/mister/sdram64.sv against a

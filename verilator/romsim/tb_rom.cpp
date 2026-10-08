@@ -8,8 +8,9 @@
 //                    [--type STR] [--type-after STR (default BOOT_ADMIN>; "" = at once)]
 //                    [--then AFTER STR ...] (more typing, each after AFTER appears) [--serial-log FILE]
 //                    [--model 0|1|2] [--ram-lg N] [--leds] [--buserr]
-//                    [--trace N] [--trace-from CYCLE] [--traps] [--stamp] [--sample N] [--gsctrace] [--scsitrace]
-//                    [--turbo N [--turbo-after CYCLE]]  (CR16 N x faster after CYCLE, default 30M:
+//                    [--trace N] [--trace-from CYCLE] [--traps] [--stamp] [--sample N] [--gsctrace] [--scsitrace] [--miotrace]
+//                    [--turbo N [--turbo-after CYCLE] [--turbo-until CYCLE]]  (CR16 N x faster from
+//                    --turbo-after, default 30M, until --turbo-until -- an OS needs the real rate:
 //                    shortens the ROM's delays; selftest1's timer test needs the real rate)
 //                    [--disk0 IMG] [--disk1 IMG] [--cd ISO]   (SCSI IDs 6, 5, 2; disks are written
 //                    unless --snapshot: then writes stay in memory, like QEMU's -snapshot;
@@ -132,7 +133,7 @@ int main(int argc, char** argv) {
 	bool show_leds = false, show_buserr = false, show_traps = false, stamp = false;
 	unsigned long long sample = 0; uint64_t save_at = 0;
 	unsigned trace_flags = 0, turbo = 0;
-	uint64_t turbo_after = 30000000, flags_from = 0;
+	uint64_t turbo_after = 30000000, turbo_until = ~0ull, flags_from = 0;
 	const char* save_file = nullptr;
 	std::string save_on;
 	const char* blk_path[3] = {nullptr, nullptr, nullptr};
@@ -160,9 +161,11 @@ int main(int argc, char** argv) {
 		}
 		else if (a == "--l1trace") trace_flags |= 2;
 		else if (a == "--scsitrace") trace_flags |= 4;
+		else if (a == "--miotrace") trace_flags |= 8;
 		else if (a == "--flags-from") flags_from = strtoull(next(), 0, 0);
 		else if (a == "--turbo") turbo = atoi(next());
 		else if (a == "--turbo-after") turbo_after = strtoull(next(), 0, 0);
+		else if (a == "--turbo-until") turbo_until = strtoull(next(), 0, 0);
 		else if (a == "--save-at") { save_at = strtoull(next(), 0, 0); save_file = next(); }
 		else if (a == "--save-on") { save_on = next(); save_file = next(); }
 		else if (a == "--snapshot") snapshot = true;
@@ -241,6 +244,7 @@ int main(int argc, char** argv) {
 	top->sim_trace = flags_from ? 0 : trace_flags;
 	unsigned long long retired = 0, traps = 0, traced = 0, next_type = 0;
 	size_t typed_pos = 0, step = 0;
+	bool save_pending = false;   // --save-on matched, waiting for the block device
 	bool bol = true;   // the console is at the beginning of a line (--stamp)
 	bool typing = !steps.empty() && steps[0].after.empty();   // --type-after "": type at once (after a restore)
 	if (typing) next_type = cyc + 200000;
@@ -261,7 +265,7 @@ int main(int argc, char** argv) {
 		sd_step();
 		tick();
 		unsigned long long t = cyc - start;
-		top->sim_status = (model & 3) | ((ram_lg & 15) << 2) | (t >= turbo_after ? (turbo & 15) << 6 : 0);
+		top->sim_status = (model & 3) | ((ram_lg & 15) << 2) | (t >= turbo_after && t < turbo_until ? (turbo & 15) << 6 : 0);
 		if (flags_from && t == flags_from) top->sim_trace = trace_flags;
 		auto save = [&]() {
 			VerilatedSave os;
@@ -271,7 +275,11 @@ int main(int argc, char** argv) {
 			os.close();
 			fprintf(stderr, "romsim: saved %s at cycle %llu\n", save_file, t);
 		};
-		if (save_file && save_on.empty() && t == save_at) save();
+		// a checkpoint does not hold the block device's transfer state
+		// (sd_step above), so it waits for the device to be idle
+		bool sd_idle = sd.st == 0 && !top->sd_rd && !top->sd_wr;
+		if (save_file && save_on.empty() && t >= save_at && sd_idle) { save(); save_file = nullptr; }
+		if (save_pending && sd_idle) { save(); save_pending = false; save_on.clear(); save_file = nullptr; }
 		if (top->uart_tx_strobe) {
 			char c = (char)top->uart_tx_byte;
 			if (c != '\r') {
@@ -285,7 +293,7 @@ int main(int argc, char** argv) {
 			if (!typing && step < steps.size() && out.find(steps[step].after) != std::string::npos) {
 				typing = true; next_type = cyc + 200000;
 			}
-			if (!save_on.empty() && out.find(save_on) != std::string::npos) { save(); save_on.clear(); save_file = nullptr; }
+			if (!save_on.empty() && out.find(save_on) != std::string::npos) save_pending = true;
 			if (!until.empty() && step == steps.size() && out.find(until) != std::string::npos) {
 				rc = 0; why = "found"; break;
 			}
