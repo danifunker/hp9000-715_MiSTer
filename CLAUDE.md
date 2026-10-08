@@ -12,8 +12,11 @@ caches with diagnose access, TLB with the hardware walker, the FPU; it
 passes the 12 pacputest suites, the lockstep co-simulation and boots HP's
 PDC 1.6 to `BOOT_ADMIN>` on the machine top (`rtl/hp715.sv`, Verilator);
 **fit 15: 70.2 MHz, 14.7k ALMs with the FPU** (`docs/design/cpu-timing.md`).
-`HP9K715.sv` is the whole machine on the MiSTer top at 64 MHz (built, not
-yet run on a board); SCSI (`rtl/scsi/`) is being brought up against the ROM.
+`HP9K715.sv` is the whole machine on the MiSTer top at 64 MHz and **runs on
+the board** (MiSTer at 192.168.99.92): the ROM's self-tests pass and it
+reaches BOOT_ADMIN, the console shows on the MiSTer screen. SCSI works in
+Verilator (ISL, the hpux loader, HP-UX's kernel starts) but not yet on the
+board -- see `RESUME-20261008-board-scsi.md`, then `-system-next.md`.
 
 ## The user's process
 
@@ -48,6 +51,7 @@ yet run on a board); SCSI (`rtl/scsi/`) is being brought up against the ROM.
 | `docs/review/06*.md` | what HP-UX 10.20 and Linux need from the hardware: 06 by block, with sub-reports 06a audio, 06b PS/2/serial/parallel, 06c graphics/STI, 06d SCSI (c720 driver, SCRIPTS) |
 | `docs/review/07-hpux-cpu-specifics.md` | HP-UX 10.20 / Linux versus PCX-L details: CPU revision (cpu.md Q3), walker CR28 (Q4), DIAG and implementation-specific opcodes (Q7, Q8), DR25 soft-power poll |
 | `RESUME-20261007-*.md` | resume prompts: `cpu-64mhz` (pipelined CPU at 64 MHz, owns `rtl/cpu/`; done, 65.1 MHz), `fpu` (the FPU, done to the fp suite), `fpu-finish` (done 2026-10-08: fits 10-15, fpedge model, S-012 measured and left) and `system` (the rest of the machine; superseded by `RESUME-20261008-system.md`) |
+| `RESUME-20261008-*.md` | `system` (superseded), **`board-scsi`** (the open board-only SCSI failure: the ROM's `search` works in Verilator, not on the MiSTer -- evidence and leads) and **`system-next`** (the system stream after that: HP-UX's interruption loop in simulation, HP-UX on the board, Artist) |
 | `docs/design/cpu-requests.md` | system -> CPU requests between those streams |
 | `docs/reference/rom/` | the ROM analysis: README (index + headline FPGA demands), BOOTFLOW, HARDWARE (incl. the reconstructed MIOC), FIRMWARE |
 | `rtl/cpu/` | the PA-7100LC core, being built: `pa_pkg.sv` (control word), `pa_decode.sv`, the units `pa_alu.sv` (adds/compares/logical/unit/DCOR/DS + conditions), `pa_shift.sv` (shift/extract/deposit), `pa_max1.sv` (MAX-1), `pa_ldst.sv` (address generation, store byte lanes, load extraction) -- unit-tested against every suite vector (`make -C verilator tb_alu tb_shift tb_max1 tb_ldst`); **`pa_cpu.sv` = the pipelined core** (cpu.md 6.8 ports; `pa_fetch.sv` F1/F2 + UIB, `pa_core.sv` D/E/M/W, `pa_regfile.sv` 2R2W MLAB GRs + shadows, `pa_icache.sv` L2-I + L1-I, `pa_dcache.sv` L2-D, `pa_cache_ram.sv`, `pa_tlb.sv` UTLB + block entries, `pa_biu.sv` line + uncached ports, `pa_cr16.sv`; the hardware walker and the I-LAB live in `pa_core`/`pa_fetch`), caches with full diagnose access, virtual mode; **`pa_fpunit.sv` + `pa_fpu.sv` = the FPU** (FR file, FPSR/compare queue/exception registers, the multi-cycle engine; one operation at a time, STUBS S-012; `make -C verilator tb_fpu` is its unit bench); `pa_core_seq.sv` is the sequential **reference** core it is co-simulated against |
