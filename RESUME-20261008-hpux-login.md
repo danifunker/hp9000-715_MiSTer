@@ -67,8 +67,41 @@ meet 64 MHz (system.md 10).
   `hpux1020_bdra_715.bin` (the rewritten one), the trace logs.
 * `pgrep -f` matches its own shell: kill sims with `ps -o pid= -C Vemu`.
 
+## Found late in the session (22:30-23:00): user-space FP is wrong
+
+The multi-user start-up stops at "Start Software Distributor agent daemon".
+With the image's QEMU network settings removed (`disks/README.md`: lan0, the
+default route, hosts) "Configure LAN interfaces" says OK and `swagentd` starts
+when run by hand (single-user: `BOOT_ADMIN> boot scsi.6 isl`, `ISL> hpux -is`,
+`ifconfig lo0 127.0.0.1 up`), but `/sbin/init.d/swagentd start` hangs in its
+`OSUpdateComplete` function: an awk `for (i = 1; i <= NF; i++)` loop over
+`what /usr/lbin/swagent` (3 lines, 20 fields) ran to awk's 200-field limit.
+On the board `awk 'BEGIN{for(i=1;i<=3;i++) print i}'` **never ends** and
+`awk 'BEGIN{print (1==1)+0}'` prints 0: HP-UX's awk computes in doubles, so
+a user-mode double compare is wrong, while the kernel-mode fp/fpedge suites
+(1300 + 1344 vectors) pass. HP's compiler emits `ldi 1,r31; fcmp,dbl,cond
+fr4,fr5; ftest; ldi 0,r31; bb,<,n r31,1f,...` with fr5 often loaded by
+`fldd` just before (see `vmunix.dis` 0xa1170, 0xa11c8, 0x127270). The 32 MB
+romsim boot (`boot32b`) also went wrong in user space: console garbage after
+"hwiftp: empty list", then endless trap 7 at a user PC (0xc0000007).
+
+Candidates, in the order to test: (1) an FP load-use hazard (`fldd` then
+`fcmp` on that register next cycle: do the suite's compare vectors set
+operands up long before the compare?); (2) the FPSR C bit across the kernel's
+lazy FP context switch (CCR = 0 -> trap 22 -> `$emulation_trap` restores
+fr0-fr31 with `fldd`; is the C bit and the compare queue restored from fr0
+exactly? `emulate_restore_fpu_status`@0x466e4); (3) the kernel's own
+`fcmp,dbl` in the idle/scheduler path (`idleness`, 0xa1170) running with the
+user's FPU enabled. Reproduce in romsim: restore `keep/ck_k32_fix2.sav`
+(32 MB kernel start, `obj_dir_rom_fix2`) with `--turbo 15 --turbo-until
+3000000000`, type nothing (the autoboot runs the rc scripts) or boot
+single-user and `--type` the awk loop; `--trace`/`--wtrace` the loop's FP
+instructions (user PCs) and compare the FPSR after each `fcmp`.
+
 ## Next steps
 
+0. **The user-mode FP compare** above -- it blocks the rest of the start-up
+   (and likely much of user space).
 1. **Login.** Watch the board to the `Console Login:` prompt (`board.sh shot`),
    log in (`board.sh type 'root\r'`), run `ioscan -f`, `vgdisplay`, `uname -a`,
    `bdf`. Expect LAN and audio missing (no 82596, no Harmony). Note anything
