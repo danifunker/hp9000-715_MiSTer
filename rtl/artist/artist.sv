@@ -745,7 +745,10 @@ module artist (
                 push = 1'b0; pop = 1'b0; sent = wr_sent;
                 // issue step wi's line-buffer reads while the FIFO has room
                 p1_v <= 1'b0;
-                if (wi <= r_nw && ({1'b0, f_n} + {4'd0, p1_v}) < 5'd6) begin
+                // (not while the row's last line-buffer word is still being written: a
+                // one-word source would be read stale -- the previous row's, X's 4-pixel
+                // tile moves left stubs of old pixels every 16th row)
+                if (!lb_we && wi <= r_nw && ({1'b0, f_n} + {4'd0, p1_v}) < 5'd6) begin
                     logic [7:0]  k;
                     logic [11:0] xl;
                     logic [5:0]  lo, hi;

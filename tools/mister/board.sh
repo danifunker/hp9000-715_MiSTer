@@ -26,6 +26,7 @@
 #                             \r \t \b \e escapes, {up} {f1} {ctrl-c} ...) --
 #                             the core's PS/2 keyboard, for graphics consoles
 #   board.sh mouse DX DY [lrm]  move the virtual mouse, then click
+#   board.sh drag DX DY [l|r|m] move it with the button held (default l)
 #   board.sh menu             back to the MiSTer menu
 #
 # Environment: MISTER (default root@192.168.99.92), CORE_DIR
@@ -117,10 +118,10 @@ m = mmap.mmap(fd, 0x440000, mmap.MAP_SHARED, mmap.PROT_READ, offset=0x33000000)
 sys.stdout.buffer.write(m[:0x200000] + m[0x200000:0x200808] + m[0x400000:0x440000])\"" > "$raw"
     python3 "$(dirname "$0")/vram.py" "$raw" "$out"
     ;;
-key|mouse)
+key|mouse|drag)
     scp -q -o BatchMode=yes "$(dirname "$0")/kbd.py" "$MISTER:/tmp/hp715_kbd.py"
     if [ "$cmd" = key ]; then rsh "python3 /tmp/hp715_kbd.py type $(printf '%q' "$1")"
-    else rsh "python3 /tmp/hp715_kbd.py mouse $1 $2 ${3:-}"; fi
+    else rsh "python3 /tmp/hp715_kbd.py $cmd $1 $2 ${3:-}"; fi
     ;;
 menu)
     rsh "echo 'load_core /media/fat/menu.rbf' > /dev/MiSTer_cmd"

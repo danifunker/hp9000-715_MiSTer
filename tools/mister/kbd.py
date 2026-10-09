@@ -13,6 +13,7 @@ board. tools/mister/board.sh `key` and `mouse` wrap it.
                             {up} {down} {left} {right} {f1}..{f12} {ctrl-x}
     kbd.py mouse DX DY [BUTTONS]   relative move in steps of at most 10,
                             then BUTTONS (l, r, m: press and release each)
+    kbd.py drag DX DY [BUTTON]     press BUTTON (default l), move, release
 """
 import fcntl, os, struct, sys, time
 
@@ -91,7 +92,7 @@ def tokens(text):
 
 
 def main():
-    if len(sys.argv) < 3 or sys.argv[1] not in ('type', 'mouse'):
+    if len(sys.argv) < 3 or sys.argv[1] not in ('type', 'mouse', 'drag'):
         print(__doc__); sys.exit(2)
     if sys.argv[1] == 'type':
         fd = device('hp715 virtual keyboard', keys=range(1, 120))
@@ -108,13 +109,21 @@ def main():
     else:
         dx, dy = int(sys.argv[2]), int(sys.argv[3])
         buttons = sys.argv[4] if len(sys.argv) > 4 else ''
+        drag = sys.argv[1] == 'drag'
+        if drag: buttons = buttons or 'l'
         fd = device('hp715 virtual mouse', keys=BTN.values(), rels=(0, 1))
         time.sleep(1.5)
+        if drag:
+            ev(fd, EV_KEY, BTN[buttons[0]], 1); syn(fd); time.sleep(0.2)
         while dx or dy:
             sx = max(-10, min(10, dx)); sy = max(-10, min(10, dy))
             ev(fd, EV_REL, 0, sx); ev(fd, EV_REL, 1, sy); syn(fd)
             dx -= sx; dy -= sy
-            time.sleep(0.02)
+            time.sleep(0.05 if drag else 0.02)
+        if drag:
+            time.sleep(0.2)
+            ev(fd, EV_KEY, BTN[buttons[0]], 0); syn(fd)
+            buttons = ''
         for b in buttons:
             ev(fd, EV_KEY, BTN[b], 1); syn(fd); time.sleep(0.08)
             ev(fd, EV_KEY, BTN[b], 0); syn(fd); time.sleep(0.08)

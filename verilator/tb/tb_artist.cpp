@@ -592,6 +592,41 @@ int main(int argc, char** argv) {
 		wr(0x100080, 0);
 		check("points (0x100C40)");
 	}
+	// ---- X's backdrop repaint after a window move (board, build 22/23, recorder): one
+	// 16-row band of the tile uploaded through BINC (fstd pairs to 0x100600/4 included),
+	// then replicated by moves: 4 px left, doubling right, then the band down
+	{
+		wr(0x118000, 0x13A01000); wr(0x11801C, 0x23000300); wr(0x118018, 0xFF); wr(0x1005A0, 0xFFFFFFFF);
+		for (int y = 752; y < 768; y++) {
+			wr(0x1004A0, (uint32_t)y << 13 | 216 << 2);
+			for (int k = 0; k < 4; k++) wr(0x100600, 0x2A2A2A2Au + (uint32_t)(y - 752) * 0x01000000u + k);
+		}
+		struct M { int sx, sy, w, h, dx, dy; } mv[] = {
+			{228, 752, 4, 16, 212, 752}, {216, 752, 16, 16, 232, 752}, {216, 752, 32, 16, 248, 752},
+			{216, 752, 64, 16, 280, 752}, {216, 752, 128, 16, 344, 752}, {216, 752, 256, 16, 472, 752},
+			{216, 752, 384, 16, 728, 752}, {212, 759, 900, 9, 212, 743}, {212, 752, 900, 16, 212, 768},
+			{212, 752, 900, 32, 212, 784}, {212, 752, 900, 13, 212, 816}};
+		for (const M& m : mv) {
+			wr(0x100808, m.sx << 16 | m.sy); wr(0x100804, m.w << 16 | m.h); wr(0x100B00, m.dx << 16 | m.dy);
+			if (getenv("TB_STEP")) { char b[64]; snprintf(b, sizeof b, "move %d,%d %dx%d -> %d,%d", m.sx, m.sy, m.w, m.h, m.dx, m.dy); check(b); }
+		}
+		check("X's backdrop band and its replication by moves");
+		// narrow moves (one source word or two) in every width and several lane offsets,
+		// each row different, so a stale line-buffer word shows as a row slip
+		wr(0x118000, 0x13602000); wr(0x11801C, 0x85000300);
+		for (int y = 860; y < 872; y++)
+			for (int x = 1200; x < 1264; x += 4) fbw((y << 11) | x, (uint32_t)(y * 0x01030507u + x * 0x00090B0Du));
+		wr(0x118000, 0x13A01000); wr(0x11801C, 0x23000300);
+		int n = 0;
+		for (int w = 1; w <= 8; w++)
+			for (int sa : {0, 3, 4, 7})
+				for (int da : {0, 2, 4, 6}) {
+					int sx = 1200 + 8 * (n % 6) + sa, dx = 1300 + 16 * (n % 40) + da, dy = 880 + 6 * (n / 40);
+					wr(0x100808, sx << 16 | 860); wr(0x100804, w << 16 | 5); wr(0x100B00, dx << 16 | dy);
+					n++;
+				}
+		check("narrow moves, widths 1-8, all lane offsets");
+	}
 	// ---- a recolouring move from bit plane 2 (SRC BA J = 2)
 	wr(0x11801C, 0x23000300); wr(0x118018, 0xFF); wr(0x118010, 0x77); wr(0x118014, 0x11);
 	wr(0x118008, 0x28A22000); wr(0x118004, 0x2EA02000);
