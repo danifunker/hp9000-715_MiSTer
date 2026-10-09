@@ -19,6 +19,9 @@
 //                    checkpoints, at a cycle or when the console first prints STR; a restored
 //                    run keeps the cycle count, and needs the same build)
 //                    [--memdump CYCLE ADDR LEN FILE]   (the ideal RAM, LEN bytes from physical ADDR, at CYCLE)
+//                    [--watch A B]   (every retired load/store whose physical address is in [A, B): hit flags, the data)
+//                    [--watchval V]  (every retired load whose data is V, with its virtual and physical address)
+//                    [--pcwatch PC]  (that instruction's retirements, with the same fields; may repeat)
 //                    [--wtrace A B]   (every cycle from A to B: the core's W and M stages and the
 //                    TLB's state, with a dump of all TLB entries at A and at B; reads the model's
 //                    internal signals, so it follows pa_core / pa_tlb renames)
@@ -198,6 +201,10 @@ int main(int argc, char** argv) {
 	const char* blk_path[3] = {nullptr, nullptr, nullptr};
 	const char* restore_file = nullptr;
 	unsigned long long memdump_at = 0, memdump_addr = 0, memdump_len = 0; const char* memdump_file = nullptr;
+	unsigned long long watch_a = 0, watch_b = 0;   // --watch A B: retired loads/stores with an EA in [A, B)
+	unsigned wp_ea = 0, wp_rpn = 0, wp_hit = 0, wp_cch = 0, wp_ld = 0, wp_res = 0;
+	unsigned watch_val = 0; bool watch_val_on = false, watch_on = false;   // --watchval V: retired loads whose data is V
+	std::vector<unsigned> pcwatch;                        // --pcwatch PC: that instruction's retirements
 	for (int i = 1; i < argc; i++) {
 		std::string a = argv[i];
 		auto next = [&](void) -> const char* { return i + 1 < argc ? argv[++i] : ""; };
@@ -236,6 +243,9 @@ int main(int argc, char** argv) {
 		else if (a == "--wtrace") { wtrace_a = strtoull(next(), 0, 0); wtrace_b = strtoull(next(), 0, 0); }
 		else if (a == "--trace") trace = strtoull(next(), 0, 0);
 		else if (a == "--trace-from") trace_from = strtoull(next(), 0, 0);
+		else if (a == "--watch") { watch_a = strtoull(next(), 0, 0); watch_b = strtoull(next(), 0, 0); watch_on = true; }
+		else if (a == "--pcwatch") { pcwatch.push_back(strtoul(next(), 0, 0)); watch_on = true; }
+		else if (a == "--watchval") { watch_val = strtoul(next(), 0, 0); watch_on = true; watch_val_on = true; }
 		else if (a == "--memdump") { memdump_at = strtoull(next(), 0, 0); memdump_addr = strtoull(next(), 0, 0);
 		                             memdump_len = strtoull(next(), 0, 0); memdump_file = next(); }
 		else if (a[0] != '+') { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
@@ -327,6 +337,7 @@ int main(int argc, char** argv) {
 			}
 		}
 		sd_step();
+		if (watch_on) { wp_ea = CORE_(w_ea); wp_rpn = CORE_(w_rpn); wp_hit = CORE_(w_hit); wp_cch = CORE_(w_cached); wp_ld = CORE_(ld_data); wp_res = CORE_(w_result); }
 		tick();
 		unsigned long long t = cyc - start;
 		if (memdump_file && t == memdump_at) { dump_mem(memdump_file, memdump_addr, memdump_len); memdump_file = nullptr; }
@@ -377,6 +388,21 @@ int main(int argc, char** argv) {
 			fprintf(stderr, "[%12llu] bus error %08X (iaoq %08X)\n", t, top->debug_buserr_addr, top->debug_iaoq_f);
 		if (top->debug_retire) {
 			retired++;
+			if (watch_on) {
+				unsigned op = top->debug_insn >> 26;
+				bool mem = (op >= 0x10 && op <= 0x13) || (op >= 0x18 && op <= 0x1B) || op == 0x03 || op == 0x09 || op == 0x0B;
+				// debug_retire is registered: the W-stage values of the retiring
+				// instruction are the previous cycle's (wp_*, sampled below)
+				unsigned pa = (wp_rpn << 12) | (wp_ea & 0xFFF);          // the translated (physical) address
+				bool is_load = mem && !((op >= 0x18 && op <= 0x1B) || op == 0x09 || op == 0x0B) && !(op == 0x03 && (top->debug_insn & 0x200));
+				bool pc_hit = false;
+				for (unsigned pc : pcwatch) if (top->debug_iaoq_f == pc) pc_hit = true;
+				if (pc_hit || (mem && ((watch_b && pa >= watch_a && pa < watch_b) || (watch_val_on && is_load && wp_ld == watch_val)))) {
+					unsigned tr = (op >= 0x18) ? (top->debug_insn >> 16) & 31 : (top->debug_insn & 31);   // stores: r; loads: t
+					fprintf(stderr, "%12llu watch %08x %08x ea %08x pa %08x hit%d cch%d r%u ld_data %08x w_result %08x\n", t,
+					        top->debug_iaoq_f, top->debug_insn, wp_ea, pa, wp_hit, wp_cch, tr, wp_ld, wp_res);
+				}
+			}
 			if (trace && t >= trace_from && traced < trace) {
 				fprintf(stderr, "%12llu %08x %08x%s\n", t, top->debug_iaoq_f, top->debug_insn,
 				        top->debug_nullified ? " (n)" : "");
