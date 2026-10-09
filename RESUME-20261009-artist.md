@@ -2,9 +2,9 @@
 
 You are continuing the HP 9000/715 MiSTer core in `/home/dani/repos/hp9000-715`.
 This replaces `RESUME-20261009-hpux-login.md` (its steps 1 and 3 are done).
-You may change `rtl/cpu/` and the rest of the machine (as the last resume
-said); record CPU changes in `docs/design/cpu-requests.md` for the CPU
-stream's review, as #3-#8 were.
+**Do not change `rtl/cpu/` unless the user asks for it specifically** (user,
+2026-10-09): a CPU bug found from the system side goes into
+`docs/design/cpu-requests.md` with the evidence, and you tell the user.
 
 ## Read first
 
@@ -40,19 +40,25 @@ stream's review, as #3-#8 were.
   line reads, and a freeze 1024 events after a user-mode trap 8/10/11.
   `tools/mister/trace_dump.py dump` on the MiSTer (`/media/fat/hp715dbg/`).
 * `board.sh console` logs prompts (`ISL>`, `# `, `Console Login:`); `type`
-  passes quotes. HP-UX's clock is 5 h behind (Main_MiSTer sends local
-  standard time except to NeXT; STUBS S-022: add `HP9K715` to
-  `rtc_is_utc()` in the user's Main_MiSTer fork -- the user's call).
+  passes quotes. HP-UX's clock was 5 h behind: Main_MiSTer sent local
+  standard time to every core but NeXT. Fixed on branch `hp9000715` of the
+  user's fork (`~/repos/Main_MiSTer`, `3aa4a5c`: `rtc_is_utc()` names
+  HP9K715; built with `~/gcc-arm-10.2-2020.11-x86_64-arm-none-linux-gnueabihf`)
+  and installed on the board (the old binary is `/media/fat/MiSTer.bak-20261009`);
+  STUBS S-022 retired.
 * `release/` = build 15; the release notes are in the **root README**
   (user: no README inside `release/`).
 
 ## Where things stand
 
-* Board: build 15 loaded, 32 MB OSD setting, HP-UX multi-user, logged in as
-  root on the console (`board.sh console 0` logging to this session's
+* Board: build 15 loaded with the new Main_MiSTer, 32 MB OSD setting, HP-UX
+  multi-user, logged in as root on the console (`board.sh console 0` logging to this session's
   scratchpad `keep/board_console.log`, PID in `ps`).
 * Gates on `68ec0f6`: `tests/run-cputest.sh` 12/12, `tests/run-cosim.sh`
   8/8 identical, `tests/run-rom.sh` PASS.
+* The MiSTer screen shows the serial console (`rtl/mister/serial_term.sv`,
+  S-018) until the Artist exists; once it does, the plan is an OSD choice
+  between the Artist's picture and the serial terminal.
 
 ## Next steps
 

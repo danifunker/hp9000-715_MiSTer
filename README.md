@@ -41,11 +41,11 @@ details:
    - set root's password (`passwd root`): the image's own is not published;
    - rebuild `/etc/lvmtab` with `vgscan`: the disk is `c2t6d0` on the 715.
 
-The MiSTer's own binary (Main_MiSTer) is the stock one: the core uses the
-framework in `sys/` unchanged.
-
-Known issue: Main_MiSTer sends this core local standard time, but HP-UX reads
-the clock as UTC, so HP-UX's time is off by your zone offset (STUBS S-022).
+The core uses the framework in `sys/` unchanged. For the right time of day
+it needs a Main_MiSTer that sends this core UTC (HP-UX reads the clock as
+UTC): branch `hp9000715` of
+[danifunker/Main_MiSTer](https://github.com/danifunker/Main_MiSTer). With a
+stock Main_MiSTer HP-UX's clock is off by your zone offset (STUBS S-022).
 
 ## Planned
 

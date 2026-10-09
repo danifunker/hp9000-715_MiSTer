@@ -160,6 +160,9 @@ Checked in the 11.1.1 source on 2026-10-07:
 
 ## Rules
 
+- **No CPU fixes unless the user asks for them specifically** (user,
+  2026-10-09): `rtl/cpu/` bugs found from the system side go into
+  `docs/design/cpu-requests.md` with the evidence, and the user decides.
 - **Every stub goes in `docs/STUBS.md`** (user, 2026-10-07): anything
   stubbed, simplified, faked or left out -- RTL, simulator, firmware path,
   tools -- gets an entry in the same change (what, where, what the real
