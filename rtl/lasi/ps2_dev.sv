@@ -1,7 +1,8 @@
 // A PS/2 keyboard or mouse as the LASI port sees it, byte by byte (STUBS
 // S-014): answers the host's commands the way the ROM, HP-UX and Linux
 // expect (R06b 1: FA acks, AB 83 / 00 identification, AA after reset,
-// resend on FE, the parameter byte of ED/F0/F3/F8-FD... commands) and, while
+// resend on FE, the parameter byte of ED/F0/F3/F8-FD... commands, the set
+// number after F0 00) and, while
 // scanning is enabled, sends the keys and mouse movements from hps_io.
 //
 // Keys arrive in hps_io's ps2_key format ({toggle, pressed, extended,
@@ -48,7 +49,12 @@ module ps2_dev #(
     always_comb begin
         en = 2'd0; e0 = 8'd0; e1 = 8'd0; e2 = 8'd0;
         if (tx_valid) begin
-            if (pending_cmd != 8'd0) begin en = 2'd1; e0 = 8'hFA; end
+            if (pending_cmd != 8'd0) begin
+                en = 2'd1; e0 = 8'hFA;
+                // F0 00 asks for the scan code set: FA, then 1, 2 or 3 (the
+                // ROM's keyboard init sends F0 02, F0 00 and fails without it)
+                if (pending_cmd == 8'hF0 && tx_byte == 8'h00 && !MOUSE) begin en = 2'd2; e1 = {6'd0, set}; end
+            end
             else case (tx_byte)
                 8'hFF: begin en = 2'd1; e0 = 8'hFA; end                       // reset: FA now, AA after BAT
                 8'hFE: begin en = 2'd1; e0 = last_sent; end                   // resend

@@ -175,6 +175,8 @@ module artist (
     logic [11:0] e_x0, e_xend, e_sx;      // span [x0, xend), source x
     logic [10:0] e_y, e_sy, e_rows;       // current rows, rows left
     logic        e_up;                    // a block move going bottom-up
+    logic        e_mirror;                // a store into the STI state area: do the other copy's row next
+    logic [10:0] e_mirror_y;
     logic [31:0] e_pat, e_mask;
     logic [3:0]  e_be;
     logic [7:0]  e_fg, e_bg, e_pm, e_color;
@@ -558,7 +560,7 @@ module artist (
             end
             E_NEXT: begin
                 e_rows <= e_rows - 11'd1;
-                e_y  <= e_up ? e_y - 11'd1 : e_y + 11'd1;
+                e_y  <= e_mirror ? e_mirror_y : e_up ? e_y - 11'd1 : e_y + 11'd1;
                 e_sy <= e_up ? e_sy - 11'd1 : e_sy + 11'd1;
                 e_st <= E_ROW;
             end
@@ -580,7 +582,7 @@ module artist (
                 e_maskena <= ibo[29];
                 e_mask <= binc_mask;
                 e_rmw <= pmask[7:0] != 8'hFF || rop_reads_dst(ibo[11:8]);
-                e_up <= 1'b0; e_expand <= 1'b0;
+                e_up <= 1'b0; e_expand <= 1'b0; e_mirror <= 1'b0;
                 e_color <= ibo[1] ? fg[7:0] : bg[7:0];
                 e_sx <= 12'd0; e_sy <= 11'd0;
             end
@@ -600,6 +602,14 @@ module artist (
                     e_xend <= {1'b0, lp_xy[10:0]} + n;
                     e_y <= lp_xy[21:11]; e_rows <= 11'd1;
                     e_pat <= lp_d; e_be <= lp_be;
+                    // the STI's private state (STUBS S-023, artist.md 1): a store
+                    // in its access mode to x 1536..1679 of row 384 or 776 goes
+                    // to both rows, so the copy a mode change moves to is valid
+                    if (dst_ba == 32'h1360_2000 && lp_xy[10:0] >= 11'd1536 && lp_xy[10:0] < 11'd1680 &&
+                        (lp_xy[21:11] == 11'd384 || lp_xy[21:11] == 11'd776)) begin
+                        e_mirror <= 1'b1; e_rows <= 11'd2;
+                        e_mirror_y <= lp_xy[21:11] == 11'd384 ? 11'd776 : 11'd384;
+                    end
                     if (ba_otc(dst_ba) == 4'd5) begin
                         e_kind <= K_BITS;
                         if (ba_ots(dst_ba) != 3'd6) begin e_fg <= 8'd1; e_bg <= 8'd0; end

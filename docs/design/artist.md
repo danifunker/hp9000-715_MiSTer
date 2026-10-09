@@ -43,10 +43,22 @@ Status: milestone 1 (08 6.1, HP's PDC 1.6 boot console) built 2026-10-09.
   A real 2 MB board must therefore leave reset with the size fields of its
   default 1280-wide mode, 0x301 (bits 11:8 = (1024-1)>>8, 3:0 =
   (1280/4-1)>>8; bit 23 clear so the first call still takes the cold path).
-  Consequence: a 1024-wide monitor type (BCH `monitor`) moves the state to
-  y = 776 at the first mode set and the third call reads word 1 there,
-  which nothing wrote -- on the board whatever DDR3 holds, in the simulator
-  0 (the trap). Not seen with the default monitor (EE 0x16CA unset).
+* **The state area is kept in both rows** (STUBS S-023). The reset value
+  only fixes the default case: every mode change between a 1280-wide and a
+  narrower mode moves the state, and the next call reads word 1 (and the
+  countdown byte) where nothing wrote them. It happens at once on a first
+  boot -- with the monitor type unset (EE 0x16CA = 0xFF) and no keyboard
+  the ROM cycles through the monitor types (1280x1024, then 1024x768 ...),
+  seen 2026-10-09 in romsim and on the board (build 16: trap 13 at 0x517c,
+  LEDs 0x21; the board's DDR3 VRAM held the state at y = 384 intact and a
+  second copy at y = 776 with monitor index 2 and word 1 = 0) -- and on
+  every boot with a 1024-wide monitor type chosen. A real Artist's VRAM
+  powers up with random contents, so there `freq_ref` would merely be
+  garbage (a wrong PLL setting until the next cold path); ours holds 0 and
+  the divide traps. So a CPU store in the STI's state-access mode
+  (DST_BM_ACCESS = 0x13602000) to x 1536..1679 of row 384 or 776 is
+  written to both rows: whichever copy a mode change selects is the one the
+  cold path wrote.
 
 ## 2. VRAM
 

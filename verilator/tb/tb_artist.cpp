@@ -124,7 +124,14 @@ static void fb_xy(uint32_t ba, uint32_t off, int& x, int& y) {
 	if (((ba >> 21) & 7) == 3) { x = off & 2044; y = (off >> 11) & 1023; }
 	else { x = (off >> 2) & 2047; y = (off >> 13) & 2047; }
 }
+static void ref_put1(int x, int y, uint32_t d, unsigned be);
+// the STI state area is kept in both rows (artist.sv e_mirror)
 static void ref_put(int x, int y, uint32_t d, unsigned be) {
+	ref_put1(x, y, d, be);
+	if (R.dst_ba == 0x13602000 && x >= 1536 && x < 1680 && (y == 384 || y == 776))
+		ref_put1(x, y == 384 ? 776 : 384, d, be);
+}
+static void ref_put1(int x, int y, uint32_t d, unsigned be) {
 	uint32_t ba = R.dst_ba;
 	if (((ba >> 12) & 15) == 15) { stg[x & 511] = d & 0xFFFFFF; return; }
 	if (!image(ba) || y >= 1024) return;
@@ -269,7 +276,8 @@ int main(int argc, char** argv) {
 	wr(0x118024, 0xFFFFFFFF); wr(0x11801C, 0x85000300); wr(0x118000, 0x13602000);
 	fbw(0x184600, 0x11223344); fbw(0x184604, 0x55667788);
 	fbw(0x184600, 0x00AA0000, 0x4); fbw(0x184604, 0x000000BB, 0x1);
-	check("byte-mode stores");
+	check("byte-mode stores (the STI state area, both rows)");
+	expect("state area mirror at y=384", rd(FB + 0x0C0600), 0x11AA3344);
 	expect("byte-mode word read", rd(FB + 0x184600), 0x11AA3344);
 	expect("byte-mode word read 2", rd(FB + 0x184604), 0x556677BB);
 
