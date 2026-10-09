@@ -424,13 +424,18 @@ eeprom_save #(.CLK_HZ(64_000_000)) eeprom_save
 // from its timing registers, one pixel a clock, through LUT0/LUT1 by the
 // attribute plane, the hardware cursor laid over it. OSD "Display": Auto =
 // Artist while its video is on, else the serial console; Graphics = always
-// Artist; Serial console = never. Both outputs (scaler and analog) carry it
-// (STUBS S-024). The scaler's window: "Original" aspect = square pixels (the
+// Artist; Serial console = never. Auto keeps Artist once its video has been
+// on since the machine's reset: a blanked screen (X's screen saver clears
+// MISC_VIDEO bits 27/25) stays black, as on a 715, instead of turning into
+// the console view. Both outputs (scaler and analog) carry it (STUBS
+// S-024). The scaler's window: "Original" aspect = square pixels (the
 // active size) for Artist, 4:3 for the console; OSD "Scale" (default
 // V-Integer: 1024 lines 1:1 on a 1080-line HDMI mode, a fit when the mode
 // has fewer lines) computed from the HDMI mode by sys/video_freak.sv. The
 // HDMI mode itself is the MiSTer's (MiSTer.ini video_mode).
-wire gfx_show = status[11:10] == 2'd2 ? 1'b0 : status[11:10] == 2'd1 ? 1'b1 : gfx_on;
+reg  gfx_seen = 1'b0;
+always @(posedge clk_sys) gfx_seen <= m_reset ? 1'b0 : gfx_seen | gfx_on;
+wire gfx_show = status[11:10] == 2'd2 ? 1'b0 : status[11:10] == 2'd1 ? 1'b1 : gfx_on | gfx_seen;
 wire [2:0] scale_osd = status[125:123];
 wire       vid_de;
 video_freak video_freak
