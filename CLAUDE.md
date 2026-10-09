@@ -86,7 +86,7 @@ set 3, X's text and cursor).
 | `verilator/` | the GUI simulator (`make && ./obj_dir/Vemu`), unit benches (`tb/`, `make tb_alu` ...), the CPU test harness (`cputest/`: core + ROM/RAM/UART, runs a suite ROM; `PIPE` parameter picks the core) and the lockstep co-simulation (`cosim/`) |
 | `tests/run-cputest.sh` | **CPU regression**: every suite ROM (12, incl. `fp` against QEMU and `fpedge` against the PCX-L model in `model.py`) on the RTL core (`CORE=pipe` default, `CORE=seq`), checked against the model or QEMU (known QEMU bugs excused); `tests/run-cosim.sh` runs both cores in lockstep (`verilator/cosim/`) and diffs every retired instruction and the GR/PSW state |
 | `tools/rom/` | ROM analysis tools (`annotate.py` -> `roms/disasm/`, `romlib.py`, `firmware_map.py check`, symbols in `tools/rom/symbols/*.sym`) |
-| `tools/hpux/` | `qcow2.py` (read qcow2 without converting), `hpdisk.py` (LIF, LVM, HFS), `som.py` (SOM objects -> symbol-annotated disassembly) |
+| `tools/hpux/` | `qcow2.py` (read qcow2 without converting), `hpdisk.py` (LIF, LVM, HFS), `vxfs.py` (the VxFS root: ls, cat, get, find), `som.py` (SOM objects -> symbol-annotated disassembly) |
 | `roms/disasm/`, `roms/hpux/` | generated listings, and HP-UX files pulled from the 10.20 image (`vmunix`, `system`, ISL ...) -- not committed |
 | `docs/reference/` | PDFs and their text extracts (not committed; `README.md` there has the sources) |
 | `roms/` | firmware (not committed; `README.md` there has the recipe and hashes) |

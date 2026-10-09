@@ -60,7 +60,10 @@ module lasi #(
     input  logic        scsi_irq,
     // misc outputs
     output logic [31:0] pcr,
-    output logic        artist_rst        // IORESET bit 8 (RST_ARTIST_L) clear
+    output logic        artist_rst,       // IORESET bit 8 (RST_ARTIST_L) clear
+    // debug: a byte on a PS/2 port ({port, 1 = device to host, byte})
+    output logic        dbg_ps2_valid,
+    output logic [9:0]  dbg_ps2
 );
     localparam int UNITS_CLK = SIM_FAST ? 2_000 : CLK_HZ / 1000;     // one PS/2 byte
 
@@ -122,6 +125,15 @@ module lasi #(
     ps2_dev #(.MOUSE(1'b1), .BYTE_CLKS(UNITS_CLK), .RESET_CLKS(UNITS_CLK * 10)) u_mouse_dev (
         .clk(clk), .rst(!rst_n), .tx_valid(m_txv), .tx_byte(m_txb), .rx_valid(m_rxv), .rx_byte(m_rxb),
         .rx_ready(m_rxr), .ps2_key(ps2_key), .ps2_mouse(ps2_mouse));
+
+    always_comb begin
+        dbg_ps2_valid = 1'b1;
+        if      (k_txv)         dbg_ps2 = {2'b00, k_txb};
+        else if (k_rxv && k_rxr) dbg_ps2 = {2'b01, k_rxb};
+        else if (m_txv)         dbg_ps2 = {2'b10, m_txb};
+        else if (m_rxv && m_rxr) dbg_ps2 = {2'b11, m_rxb};
+        else begin dbg_ps2_valid = 1'b0; dbg_ps2 = 10'd0; end
+    end
 
     // ---------------------------------------------------------------- RTC
     logic [31:0] rtc;

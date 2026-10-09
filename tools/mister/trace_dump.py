@@ -18,6 +18,8 @@ decoded unless --raw:
     8/9 CPU uncached read/write (RAM, 53C710)
     10 selection (aux = ID)         11 interruption (vector, IIAOQ, insn, IIASQ)
     12 cache maintenance (FDC/FDCE/PDC/FIC/FICE: physical line, VA)
+    13 PS/2 byte (kbd/mouse, > host to device, < device to host)
+    14 key event from hps_io (make/break, E0, set-2 code)
 The recorder freezes 1024 events after a user-mode trap 8/10/11 (until the
 core is reset), so after a SIGILL the ring ends with what led to it.
 """
@@ -48,6 +50,8 @@ def decode(t, a, addr, d):
         op = a & 0xF
         return '%-4s pa %08x va %08x' % (ops[op] if op < len(ops) else 'op%d' % op, addr, d >> 32)
     if t in (8, 9): return 'io%s  %08x be=%02x %016x' % ('R' if t == 8 else 'W', addr, a, d)
+    if t == 13: return 'ps2  %s %s %02x' % ('mouse' if a & 2 else 'kbd  ', '<' if a & 1 else '>', d & 0xFF)
+    if t == 14: return 'key  %s %s%02x' % ('make ' if d >> 9 & 1 else 'break', 'E0 ' if d >> 8 & 1 else '', d & 0xFF)
     if t == 10: return 'sel  id %d %s' % (a & 7, 'answered' if d & 1 else 'no target')
     return 't%d a%02x %08x %016x' % (t, a, addr, d)
 

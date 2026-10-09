@@ -16,7 +16,14 @@
 #                             UART, 9600 8N1), timestamped, for SECS (default
 #                             forever) -- also appended to $LOG
 #   board.sh type TEXT        type into the console (\r for Return)
-#   board.sh shot OUT.png     a MiSTer screenshot of the video output
+#   board.sh shot OUT.png     a MiSTer screenshot of the video output (the
+#                             core's own video: not Artist's frame buffer)
+#   board.sh vram OUT.png     Artist's screen: the VRAM and the LUT0 copy read
+#                             from DDR3, rendered (tools/mister/vram.py)
+#   board.sh key TEXT         type on a virtual keyboard (tools/mister/kbd.py:
+#                             \r \t \b \e escapes, {up} {f1} {ctrl-c} ...) --
+#                             the core's PS/2 keyboard, for graphics consoles
+#   board.sh mouse DX DY [lrm]  move the virtual mouse, then click
 #   board.sh menu             back to the MiSTer menu
 #
 # Environment: MISTER (default root@192.168.99.92), CORE_DIR
@@ -97,6 +104,21 @@ shot)
     [ -n "$now" ] && [ "$now" != "$before" ] || { echo "no new screenshot" >&2; exit 1; }
     scp -q -o BatchMode=yes "$MISTER:$now" "$out"
     echo "$now -> $out"
+    ;;
+vram)
+    out="$1"
+    raw="${out%.png}.bin"
+    rsh "python3 -c \"
+import os, mmap, sys
+fd = os.open('/dev/mem', os.O_RDONLY | os.O_SYNC)
+m = mmap.mmap(fd, 0x201000, mmap.MAP_SHARED, mmap.PROT_READ, offset=0x33000000)
+sys.stdout.buffer.write(m[:0x200000] + m[0x200000:0x200408])\"" > "$raw"
+    python3 "$(dirname "$0")/vram.py" "$raw" "$out"
+    ;;
+key|mouse)
+    scp -q -o BatchMode=yes "$(dirname "$0")/kbd.py" "$MISTER:/tmp/hp715_kbd.py"
+    if [ "$cmd" = key ]; then rsh "python3 /tmp/hp715_kbd.py type $(printf '%q' "$1")"
+    else rsh "python3 /tmp/hp715_kbd.py mouse $1 $2 ${3:-}"; fi
     ;;
 menu)
     rsh "echo 'load_core /media/fat/menu.rbf' > /dev/MiSTer_cmd"

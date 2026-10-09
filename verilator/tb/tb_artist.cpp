@@ -105,8 +105,9 @@ static void wait_idle() { for (int n = 0; n < 4000000 && t->busy; n++) tick(); }
 // ------------------------------------------------------------- reference model
 struct Regs {
 	uint32_t dst_ba = 0, src_ba = 0, fg = 0, bg = 0, pm = 0, ibo = 0, mask = 0, cp = 0;
-	uint32_t dstxy = 0, lenxy = 0, srcxy = 0, binc_dst = 0, binc_src = 0; int row = 0;
+	uint32_t dstxy = 0, lenxy = 0, srcxy = 0, binc_dst = 0, binc_src = 0, r80 = 0;
 } R;
+static uint32_t curcol[4];
 static uint32_t stg[512];
 
 static uint8_t rop8(int r, uint8_t s, uint8_t d) {
@@ -188,19 +189,27 @@ static void wr(uint32_t off, uint32_t d) {
 	case 0x11801C: R.ibo = d; break;
 	case 0x118024: case 0x1005A0: R.mask = d; break;
 	case 0x100480: R.binc_src = d; break;
-	case 0x1004A0: R.binc_dst = d; R.row = 0; break;
+	case 0x1004A0: R.binc_dst = d; break;
+	case 0x100080: R.r80 = d; break;
 	case 0x100800: R.dstxy = d; break;
 	case 0x100804: R.lenxy = d; break;
 	case 0x100808: R.srcxy = d; break;
-	case 0x100A04: R.lenxy = d; ref_fill(R.dstxy, R.lenxy); break;
-	case 0x100A00: R.dstxy = d; ref_fill(R.dstxy, R.lenxy); break;
+	case 0x100A04: R.lenxy = d; ref_fill(R.dstxy, R.lenxy); if (R.r80 == 0x7D) R.dstxy += R.lenxy & 0xFFFF; break;
+	case 0x100A00: R.dstxy = d; ref_fill(R.dstxy, R.lenxy); if (R.r80 == 0x7D) R.dstxy += R.lenxy & 0xFFFF; break;
 	case 0x100B00: R.dstxy = d; ref_move(R.srcxy, R.dstxy, R.lenxy); break;
 	case 0x100B04: R.lenxy = d; ref_move(R.srcxy, R.dstxy, R.lenxy); break;
-	case 0x100620: case 0x100600: {
+	case 0x1005C0: case 0x100600: case 0x100620: case 0x100640: case 0x100660:
+	case 0x100680: case 0x1006A0: case 0x1006C0: case 0x1006E0: {
 		int x, y; fb_xy(R.dst_ba, R.binc_dst & 0xFFFFFF, x, y);
-		ref_put(x, y + R.row, d, 0xF);
-		if (off == 0x100620) R.row++;
-		else { int otc = (R.dst_ba >> 27) & 15; R.binc_dst += otc == 5 ? 0x80 : (((R.dst_ba >> 12) & 15) == 15 || otc == 7) ? 4 : 0x10; }
+		ref_put(x, y, d, 0xF);
+		int otc = (R.dst_ba >> 27) & 15, lng = ((R.dst_ba >> 21) & 7) != 3;
+		uint32_t dx = otc == 5 ? 32 : (((R.dst_ba >> 12) & 15) == 15 || otc == 7) ? 1 : 4, dy = lng ? 0x2000 : 0x800;
+		if (lng) dx <<= 2;
+		bool xp = off == 0x1005C0 || off == 0x100600 || off == 0x100680 || off == 0x1006C0;
+		bool xm = off == 0x100660 || off == 0x1006A0 || off == 0x1006E0;
+		bool yp = off == 0x100620 || off == 0x100680 || off == 0x1006A0;
+		bool ym = off == 0x100640 || off == 0x1006C0 || off == 0x1006E0;
+		R.binc_dst += (xp ? dx : 0) - (xm ? dx : 0) + (yp ? dy : 0) - (ym ? dy : 0);
 		break;
 	}
 	case 0x300118:
@@ -344,6 +353,21 @@ int main(int argc, char** argv) {
 	fbw((700 << 13) | (5 << 2), 0x81818181);
 	check("transparent-background bitmap write");
 
+	// ---- BINC in every direction (NGLE manual 4): a 3x3 walk of 32-pixel words
+	wr(0x118000, 0x2EA02000); wr(0x11801C, 0x00000300); wr(0x118018, 0xFF); wr(0x118010, 0x31); wr(0x118014, 0x07);
+	wr(0x1004A0, 0x01000000 | 800 << 13 | 64 << 2);
+	{
+		const uint32_t dirs[] = {0x100600, 0x100680, 0x100620, 0x1006A0, 0x100660, 0x1006E0, 0x100640, 0x1006C0, 0x1005C0};
+		for (uint32_t o : dirs) wr(o, rnd() << 17 ^ rnd() << 2 ^ rnd());
+	}
+	check("BINC data ports, all directions");
+	expect("BINC dst after the walk", rd(0xF8118028), R.binc_dst);
+	// fills that advance DST y (0x100080 = 0x7D)
+	wr(0x100080, 0x7D); wr(0x11801C, 0x00000302); wr(0x118010, 0x5A);
+	wr(0x100800, (900 << 16) | 700); wr(0x100A04, (40 << 16) | 3); wr(0x100A04, (20 << 16) | 2); wr(0x100A04, (60 << 16) | 4);
+	wr(0x100080, 0);
+	check("stacked fills (0x100080 = 0x7D)");
+
 	// ---- CPU reads: 4 pixels at an odd x in long mode, a bitmap read across 5 words
 	wr(0x118000, 0x13A02000);
 	{
@@ -377,7 +401,94 @@ int main(int argc, char** argv) {
 		for (int i = 0; i < 256; i++) if (lut0[i] != (uint32_t)(0xFF0000 - i)) bad++;
 		if (bad) { printf("FAIL: LUT0 via BINC: %d entries wrong\n", bad); fails++; } else printf("ok   LUT0 loaded via BINC\n");
 	}
+	// cursor colours (LUT blt type 2) must not touch LUT0
+	wr(0x118000, 0x3BA0F000);
+	for (int i = 0; i < 4; i++) fbw(i << 2, 0x111111 * (i + 1));
+	wr(0x100480, 0); wr(0x300118, 0x80008004);
+	{
+		int bad = 0;
+		for (int i = 0; i < 256; i++) if (lut0[i] != (uint32_t)(0xFF0000 - i)) bad++;
+		if (bad) { printf("FAIL: a cursor-colour LUT blt changed LUT0 (%d entries)\n", bad); fails++; } else printf("ok   cursor-colour LUT blt leaves LUT0\n");
+	}
 	expect("busy clear", rd(0xF8300000), 0);
+	check("VRAM before the cursor");
+
+	// ---- the hardware cursor (artist.sv: drawn into the VRAM with a save-under)
+	{
+		// a 1280x1024 mode: reg19 porches give hbp = 0x2F + 0x2F + 2 = 96
+		gsc(true, 0xF8300200, 0x3F2F2F0F); gsc(true, 0xF8300208, 0xFF3C0202); gsc(true, 0xF8300218, 0xEBC00341);
+		// a colour map with distinct entries, cursor colours entry 2 (mask) and 3 (image)
+		wr(0x118000, 0x3BA0F000); wr(0x118018, 0xFF); wr(0x11801C, 0x300);
+		for (int i = 0; i < 256; i++) fbw(i << 2, (i * 0x050301 + 0x102030) & 0xFFFFFF);
+		wr(0x100480, 0); wr(0x300118, 0x80000100);
+		uint32_t cfg = 0xE0F0D0, cbg = 0x203040;
+		fbw(0, 0); fbw(4, 0); fbw(8, cbg); fbw(12, cfg);
+		wr(0x100480, 0); wr(0x300118, 0x80008004);
+		auto nearest = [&](uint32_t c) { int best = 0, bd = 1 << 30;
+			for (int i = 0; i < 256; i++) { uint32_t e = lut0[i]; int d = abs((int)(e >> 16) - (int)(c >> 16)) +
+				abs((int)((e >> 8) & 255) - (int)((c >> 8) & 255)) + abs((int)(e & 255) - (int)(c & 255));
+				if (d < bd) { bd = d; best = i; } } return best; };
+		int fgi = nearest(cfg), bgi = nearest(cbg);
+		// bitmaps: image = a diagonal band, mask = image plus a border
+		static uint64_t img[64], msk[64];
+		for (int r = 0; r < 64; r++) {
+			img[r] = 0; msk[r] = 0;
+			for (int c = 0; c < 64; c++) {
+				bool in = c >= r - 3 && c <= r + 3, m = c >= r - 6 && c <= r + 6;
+				if (in) img[r] |= 1ull << (63 - c);
+				if (m) msk[r] |= 1ull << (63 - c);
+			}
+		}
+		wr(0x11801C, 0x00000300);
+		for (int b = 6; b <= 7; b++) {
+			wr(0x118000, 0x28A00000 | b << 12);
+			for (int r = 0; r < 64; r++) {
+				uint64_t v = b == 6 ? img[r] : msk[r];
+				fbw(r << 13 | 0 << 2, v >> 32); fbw(r << 13 | 32 << 2, v & 0xFFFFFFFF);
+			}
+		}
+		wr(0x118000, 0x13602000);
+		auto pos = [&](int x, int y) {      // CURSOR_POS for (x, y) with CURSOR_CTRL = 0x80
+			int v = x + 384 - 23 + 8; return (uint32_t)((v >> 2) << 19 | (v & 3) << 16 | (1024 - y));
+		};
+		auto expect_cursor = [&](const char* what, int cx, int cy, bool on = true) {
+			int bad = 0;
+			for (int i = 0; i < 2048 * 1024; i++) {
+				int x = i % 2048, y = i / 2048, c = x - cx, r = y - cy;
+				uint8_t want = ref[i];
+				if (on && c >= 0 && c < 64 && r >= 0 && r < 64 && x < 1280 && y < 1024) {
+					bool im = img[r] >> (63 - c) & 1, mk = msk[r] >> (63 - c) & 1;
+					if (im) want = fgi; else if (mk) want = bgi;
+				}
+				if (vram[i] != want) { if (bad < 6) printf("  %s: %d,%d is %02x, expected %02x\n", what, x, y, vram[i], want); bad++; }
+			}
+			if (bad) { printf("FAIL: %s: %d pixels\n", what, bad); fails++; } else printf("ok   %s\n", what);
+		};
+		gsc(true, 0xF8300100, pos(100, 200)); gsc(true, 0xF8300104, 0x80);
+		for (int i = 0; i < 40000; i++) tick();
+		expect_cursor("cursor drawn at 100,200", 100, 200);
+		// a fill elsewhere takes it out first; right after it the VRAM is the plain image
+		wr(0x11801C, 0x00000302); wr(0x118010, 0x44); wr(0x118000, 0x2EA02000);
+		wr(0x100800, (500 << 16) | 600); wr(0x100A04, (30 << 16) | 10);
+		expect_cursor("cursor out while drawing", 0, 0, false);
+		for (int i = 0; i < 40000; i++) tick();
+		expect_cursor("cursor back after the drawing", 100, 200);
+		// a CPU read under it sees the image, not the cursor
+		wr(0x118000, 0x13A02000);
+		{
+			uint32_t want = 0; int x = 120, y = 220;
+			for (int i = 0; i < 4; i++) want |= ref[y * 2048 + x + i] << (24 - 8 * i);
+			expect("CPU read under the cursor", rd(FB + (y << 13 | x << 2)), want);
+		}
+		for (int i = 0; i < 40000; i++) tick();
+		// moved, partly off the left edge
+		gsc(true, 0xF8300100, pos(-20, 900));
+		for (int i = 0; i < 40000; i++) tick();
+		expect_cursor("cursor moved to -20,900", -20, 900);
+		gsc(true, 0xF8300104, 0x00);
+		for (int i = 0; i < 40000; i++) tick();
+		expect_cursor("cursor off", 0, 0, false);
+	}
 	check("final VRAM");
 
 	printf("%s (%llu cycles)\n", fails ? "FAILED" : "PASS", (unsigned long long)cyc);

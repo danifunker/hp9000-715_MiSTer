@@ -306,6 +306,46 @@ sdram64 #(.CLK_HZ(64_000_000)) sdram
 	.SDRAM_nWE(SDRAM_nWE), .SDRAM_CKE(SDRAM_CKE)
 );
 
+// a copy of LUT0, the active size and video-on in DDR3 at 0x3320_0000 for
+// the board tools (tools/mister/board.sh vram renders the VRAM with it):
+// written 4096 clocks after the last palette change, and when the size or
+// video-on changes; word i = entries 2i, 2i+1 (0x00RRGGBB), word 128 =
+// {height, width, video on}
+reg  [23:0] lut_e [128], lut_o [128];
+reg  [23:0] lut_qe, lut_qo;
+reg  [12:0] lut_quiet = 0;
+reg         lut_dirty = 0, lt_req = 0, lt_rd = 0, lt_rd2 = 0;
+reg   [7:0] lt_addr;
+reg  [63:0] lt_data;
+wire        lt_ack;
+reg  [24:0] lut_geom = 0;
+always @(posedge clk_sys) begin
+	if (gfx_pal_wr) begin
+		if (gfx_pal_addr[0]) lut_o[gfx_pal_addr[7:1]] <= gfx_pal_rgb;
+		else                 lut_e[gfx_pal_addr[7:1]] <= gfx_pal_rgb;
+	end
+	lut_qe <= lut_e[lt_addr[6:0]];
+	lut_qo <= lut_o[lt_addr[6:0]];
+end
+always @(posedge clk_sys) begin
+	lt_rd <= 1'b0; lt_rd2 <= lt_rd;
+	if (gfx_pal_wr || {gfx_height, gfx_width, gfx_on} != lut_geom) begin
+		lut_dirty <= 1'b1; lut_quiet <= 0; lut_geom <= {gfx_height, gfx_width, gfx_on};
+	end else if (lut_dirty && !lt_req && !lt_rd && !lt_rd2) begin
+		if (lut_quiet != 13'h1FFF) lut_quiet <= lut_quiet + 1'd1;
+		else begin lut_dirty <= 1'b0; lt_addr <= 8'd0; lt_rd <= 1'b1; end
+	end
+	// lt_rd: the entries of lt_addr are read this cycle; lt_rd2: the word goes out
+	if (lt_rd2) begin
+		lt_req <= 1'b1;
+		lt_data <= lt_addr[7] ? {39'd0, lut_geom} : {8'd0, lut_qo, 8'd0, lut_qe};
+	end
+	if (lt_req && lt_ack) begin
+		lt_req <= 1'b0;
+		if (lt_addr != 8'd128) begin lt_addr <= lt_addr + 1'd1; lt_rd <= 1'b1; end
+	end
+end
+
 wire        rl_busy, rl_wr, ld_busy;
 wire [17:3] rl_waddr;
 wire [63:0] rl_wdata;
@@ -326,6 +366,7 @@ ddr3_port ddr3
 	.chk_req(chk_req), .chk_we(chk_we), .chk_addr(chk_addr), .chk_be(chk_be), .chk_wdata(chk_wdata),
 	.chk_ack(chk_ack), .chk_rdata(chk_rdata),
 	.tr_req(tr_req), .tr_idx(tr_idx), .tr_data(tr_data), .tr_ack(tr_ack),
+	.lt_req(lt_req), .lt_addr(lt_addr), .lt_data(lt_data), .lt_ack(lt_ack),
 	.vr_req(vr_req), .vr_we(vr_we), .vr_addr(vr_addr), .vr_len(vr_len), .vr_ack(vr_ack),
 	.vr_wvalid(vr_wvalid), .vr_wdata(vr_wdata), .vr_be(vr_be), .vr_wready(vr_wready),
 	.vr_rvalid(vr_rvalid), .vr_rdata(vr_rdata),

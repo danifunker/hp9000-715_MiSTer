@@ -239,7 +239,9 @@ module hp715 #(
         .rtc_set(rtc_set), .rtc_value(rtc_value),
         .scsi_req(s_req), .scsi_we(s_we), .scsi_addr(s_addr), .scsi_be(s_be), .scsi_wdata(s_wdata),
         .scsi_rdata(s_rdata), .scsi_rst(s_rst), .scsi_irq(s_irq),
-        .pcr(lasi_pcr), .artist_rst(artist_rst));
+        .pcr(lasi_pcr), .artist_rst(artist_rst), .dbg_ps2_valid(l_ps2_v), .dbg_ps2(l_ps2));
+    logic        l_ps2_v;
+    logic [9:0]  l_ps2;
 
     // ------------------------------------------------------------ SCSI
     logic        s_req, s_we, s_rst, s_irq;
@@ -266,12 +268,14 @@ module hp715 #(
     // DSP, data = {DCMD/DBC, DSPS}), 3 SCSI interrupt (data = {DSTAT,
     // SSTAT0, DSPS}), 4/5 DMA read/write done (aux = byte enables), 6/7 CPU
     // line read/write accepted (a read's aux bit 0 = I-cache fill), 8/9 CPU
-    // uncached read/write of RAM or the 53C710 (aux = byte enables, data as
+    // uncached read/write of RAM, the 53C710 or Artist (aux = byte enables, data as
     // read/written), 10 selection (aux = ID, data = 1 answered / 0 nobody),
     // 11 interruption taken (aux = vector, addr = IIAOQ front, data =
     // {instruction word, IIASQ, PSW[15:0]}), 12 cache maintenance done (aux
     // = {I side, 3'b0, operation}, addr = the physical line {RPN, VA[11:0]},
-    // data = {VA, 32'd0}; of a run of FDCE or FICE only the first). Each
+    // data = {VA, 32'd0}; of a run of FDCE or FICE only the first), 13 a
+    // byte on a PS/2 port (aux = {port, 1 = device to host}, data = the
+    // byte), 14 a key event from hps_io (data = ps2_key). Each
     // source has a one-deep slot; the lowest-numbered full slot goes out
     // each cycle.
     //
@@ -284,16 +288,20 @@ module hp715 #(
     logic [7:0]  s_dstat, s_sstat0;
     logic        ev_ack_q, ev_irq_q, ev_dec_q;
     logic [32:0] ev_line_q;
-    logic [9:0]  ev_full;
-    logic [111:0] ev_slot [10];
+    logic [11:0] ev_full;
+    logic [111:0] ev_slot [12];
+    logic        ev_key_q;
     logic [10:0] ev_freeze_cnt;
     logic        ev_freeze_arm, ev_frozen;
     logic [4:0]  ev_cop_q;
     always_ff @(posedge clk) begin
-        logic [9:0]   set;
-        logic [111:0] e [10];
+        logic [11:0]  set;
+        logic [111:0] e [12];
         set = '0;
-        for (int i = 0; i < 10; i++) e[i] = '0;
+        for (int i = 0; i < 12; i++) e[i] = '0;
+        ev_key_q <= ps2_key[10];
+        if (l_ps2_v) begin set[9] = 1; e[9] = {8'd13, 6'd0, l_ps2[9:8], 32'd0, 56'd0, l_ps2[7:0]}; end
+        if (ps2_key[10] != ev_key_q) begin set[10] = 1; e[10] = {8'd14, 8'd0, 32'd0, 53'd0, ps2_key}; end
         ev_ack_q <= sb_ack; ev_irq_q <= s_irq; ev_dec_q <= s_dec;
         if (sb_ack && !ev_ack_q) begin set[0] = 1; e[0] = {8'd1, 5'd0, sb_phase, 32'd0, 56'd0, sb_phase[0] ? sb_tdata : sb_idata}; end
         if (s_dec && !ev_dec_q) begin set[1] = 1; e[1] = {8'd2, 8'd0, s_dsp, s_ins, s_dsps}; end
@@ -304,7 +312,8 @@ module hp715 #(
             ev_line_q <= {mem_we, mem_addr};
             if ({mem_we, mem_addr} != ev_line_q) begin set[4] = 1; e[4] = {mem_we ? 8'd7 : 8'd6, 7'd0, mem_ifill & ~mem_we, mem_addr, 64'd0}; end
         end
-        if (io_req && io_ack && !io_ifetch && (io_addr[31:12] == 20'hF0106 || io_addr[31:28] != 4'hF)) begin
+        if (io_req && io_ack && !io_ifetch && (io_addr[31:12] == 20'hF0106 || io_addr[31:28] != 4'hF ||
+                                               io_addr[31:25] == 7'h7C)) begin
             set[5] = 1; e[5] = {io_we ? 8'd9 : 8'd8, io_be, io_addr, io_we ? io_wdata : io_rdata};
         end
         if (sb_sel_done || sb_sel_fail) begin set[6] = 1; e[6] = {8'd10, 5'd0, sb_sel_id, 32'd0, 63'd0, sb_sel_done}; end
@@ -332,13 +341,13 @@ module hp715 #(
         if (rst_n) begin
             logic sent;
             sent = 1'b0;
-            for (int i = 0; i < 10; i++) begin
+            for (int i = 0; i < 12; i++) begin
                 if (ev_full[i] && !sent) begin
                     dbg_ev_valid <= 1'b1; dbg_ev <= ev_slot[i]; sent = 1'b1;
                     ev_full[i] <= 1'b0;
                 end
             end
-            for (int i = 0; i < 10; i++) if (set[i]) begin ev_full[i] <= 1'b1; ev_slot[i] <= e[i]; end
+            for (int i = 0; i < 12; i++) if (set[i]) begin ev_full[i] <= 1'b1; ev_slot[i] <= e[i]; end
         end
     end
 

@@ -6,10 +6,13 @@
 // scanning is enabled, sends the keys and mouse movements from hps_io.
 //
 // Keys arrive in hps_io's ps2_key format ({toggle, pressed, extended,
-// set-2 code}) and go out as scan code set 2 (E0 prefix, F0 break). HP-UX
-// selects set 3 (F0 03); the model stores the selection and reports it, but
-// still sends set 2 (STUBS S-014). Mouse packets come from hps_io's
-// ps2_mouse ({toggle, dy, dx, buttons/flags}) in standard 3-byte format.
+// set-2 code}) and go out in the scan code set the host selected: set 2 (E0
+// prefix, F0 break; also for a set-1 request) or set 3 (one code per key,
+// F0 break; HP-UX selects it with F0 03), translated by set3() -- the IBM
+// 101-key set-3 codes, as Linux's atkbd tables have them. Every key sends
+// make and break whatever FA..FD asked for (HP-UX only asks make/break). Mouse
+// packets come from hps_io's ps2_mouse ({toggle, dy, dx, buttons/flags}) in
+// standard 3-byte format.
 module ps2_dev #(
     parameter bit MOUSE      = 1'b0,
     parameter int BYTE_CLKS  = 64_000,      // spacing of the bytes it sends
@@ -42,6 +45,32 @@ module ps2_dev #(
     assign rx_valid = q_n != 5'd0 && gap == 20'd0;
     assign rx_byte  = q[q_rd];
 
+    // a set-2 key (E0 prefix or not) as its set-3 code; 0 = none
+    function automatic logic [7:0] set3(input logic ext, input logic [7:0] k);
+        if (ext) case (k)
+            8'h11: return 8'h39;  8'h14: return 8'h58;                          // right Alt, right Ctrl
+            8'h70: return 8'h67;  8'h6C: return 8'h6E;  8'h7D: return 8'h6F;    // Insert, Home, Page Up
+            8'h71: return 8'h64;  8'h69: return 8'h65;  8'h7A: return 8'h6D;    // Delete, End, Page Down
+            8'h75: return 8'h63;  8'h6B: return 8'h61;  8'h72: return 8'h60;  8'h74: return 8'h6A;   // arrows
+            8'h4A: return 8'h77;  8'h5A: return 8'h79;                          // keypad /, keypad Enter
+            8'h7C: return 8'h57;  8'h77, 8'h7E: return 8'h62;                   // Print Screen, Pause/Break
+            8'h1F: return 8'h8B;  8'h27: return 8'h8C;  8'h2F: return 8'h8D;    // Windows, Windows, Menu
+            default: return 8'h00;
+        endcase
+        case (k)
+            8'h76: return 8'h08;                                                // Esc
+            8'h05: return 8'h07;  8'h06: return 8'h0F;  8'h04: return 8'h17;  8'h0C: return 8'h1F;   // F1-F4
+            8'h03: return 8'h27;  8'h0B: return 8'h2F;  8'h83: return 8'h37;  8'h0A: return 8'h3F;   // F5-F8
+            8'h01: return 8'h47;  8'h09: return 8'h4F;  8'h78: return 8'h56;  8'h07: return 8'h5E;   // F9-F12
+            8'h7E: return 8'h5F;                                                // Scroll Lock
+            8'h5D: return 8'h5C;  8'h61: return 8'h13;                          // backslash, the ISO key
+            8'h58: return 8'h14;  8'h14: return 8'h11;  8'h11: return 8'h19;    // Caps Lock, left Ctrl, left Alt
+            8'h77: return 8'h76;  8'h7C: return 8'h7E;  8'h7B: return 8'h84;  8'h79: return 8'h7C;   // Num Lock, keypad * - +
+            default: return k;    // letters, digits, punctuation, Space, Tab, Enter, BS, shifts, keypad digits
+        endcase
+    endfunction
+    wire [7:0] k3 = set3(ps2_key[8], ps2_key[7:0]);
+
     // enqueue up to three bytes this cycle
     logic [7:0] e0, e1, e2;
     logic [1:0] en;
@@ -68,8 +97,13 @@ module ps2_dev #(
                 default: begin en = 2'd1; e0 = 8'hFA; end
             endcase
         end else if (scanning && !MOUSE && ps2_key[10] != key_t) begin
-            // a key from hps_io, in set 2
-            if (ps2_key[8]) begin
+            // a key from hps_io, in the selected set
+            if (set == 2'd3) begin
+                if (k3 != 8'h00) begin
+                    en = ps2_key[9] ? 2'd1 : 2'd2;
+                    e0 = ps2_key[9] ? k3 : 8'hF0; e1 = k3;
+                end
+            end else if (ps2_key[8]) begin
                 en = ps2_key[9] ? 2'd2 : 2'd3;
                 e0 = 8'hE0; e1 = ps2_key[9] ? ps2_key[7:0] : 8'hF0; e2 = ps2_key[7:0];
             end else begin

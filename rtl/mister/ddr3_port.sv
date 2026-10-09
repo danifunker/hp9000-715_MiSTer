@@ -16,6 +16,10 @@
 //   0x3300_0000  Artist's VRAM, 2 MB: 2048 x 1024 bytes, pixel (x, y) at
 //                byte y * 2048 + x -- the MiSTer frame buffer reads it
 //                from here (HP9K715.sv FB_BASE)
+//   0x3320_0000  a copy of Artist's LUT0 for the board tools (HP9K715.sv:
+//                word i = entries 2i (bits 31:0) and 2i+1 (63:32) as
+//                0x00RRGGBB; word 128 = {height, width, video on}),
+//                one doubleword per lt_req
 //
 // VRAM bursts (rtl/artist/artist.sv vr_*): a read is acknowledged when the
 // bridge takes the command, its beats follow as vr_rvalid; a write's beat 0
@@ -49,6 +53,11 @@ module ddr3_port (
     input  logic [15:0] tr_idx,
     input  logic [255:0] tr_data,
     output logic        tr_ack,
+    // the LUT copy: one doubleword at 0x3320_0000 + 8 * lt_addr, held until lt_ack
+    input  logic        lt_req,
+    input  logic [7:0]  lt_addr,
+    input  logic [63:0] lt_data,
+    output logic        lt_ack,
     // Artist's VRAM (word {y, x[10:3]}), bursts of 1..64
     input  logic        vr_req,
     input  logic        vr_we,
@@ -76,6 +85,7 @@ module ddr3_port (
     localparam logic [28:0] CHK_BASE = 29'h0620_0000;     // 0x3100_0000 / 8
     localparam logic [28:0] TRC_BASE = 29'h0640_0000;     // 0x3200_0000 / 8
     localparam logic [28:0] VRM_BASE = 29'h0660_0000;     // 0x3300_0000 / 8
+    localparam logic [28:0] LUT_BASE = 29'h0664_0000;     // 0x3320_0000 / 8
 
     // one loader doubleword waits here while the port is busy
     logic        ld_pend;
@@ -85,7 +95,7 @@ module ddr3_port (
 
     typedef enum logic [2:0] { S_IDLE, S_CMD, S_RDATA, S_DONE, S_TWR, S_VWR } st_e;
     st_e st;
-    logic [1:0] who;            // 0 loader, 1 check store, 2 ROM, 3 VRAM
+    logic [2:0] who;            // 0 loader, 1 check store, 2 ROM, 3 VRAM, 4 LUT copy
     logic [1:0] beat;
     logic       odd;
     logic [6:0] vleft;          // VRAM beats still to come
@@ -99,7 +109,7 @@ module ddr3_port (
 
     always_ff @(posedge clk) begin
         rom_ack <= 1'b0; rom_rvalid <= 1'b0; chk_ack <= 1'b0; tr_ack <= 1'b0;
-        vr_rack <= 1'b0; vr_rvalid <= 1'b0;
+        vr_rack <= 1'b0; vr_rvalid <= 1'b0; lt_ack <= 1'b0;
         if (ld_wr) begin ld_pend <= 1'b1; ld_a <= ld_addr; ld_d <= ld_data; end
         if (rst) begin
             st <= S_IDLE; DDRAM_RD <= 1'b0; DDRAM_WE <= 1'b0; ld_pend <= 1'b0;
@@ -107,17 +117,17 @@ module ddr3_port (
             S_IDLE: begin
                 DDRAM_BURSTCNT <= 8'd1; DDRAM_BE <= 8'hFF;
                 if (ld_pend) begin
-                    who <= 2'd0; st <= S_CMD;
+                    who <= 3'd0; st <= S_CMD;
                     DDRAM_WE <= 1'b1; DDRAM_ADDR <= ROM_BASE + {14'd0, ld_a}; DDRAM_DIN <= ld_d;
                 end else if (chk_req) begin
-                    who <= 2'd1; st <= S_CMD; odd <= chk_addr[0];
+                    who <= 3'd1; st <= S_CMD; odd <= chk_addr[0];
                     DDRAM_ADDR <= CHK_BASE + {7'd0, chk_addr[22:1]};
                     if (chk_we) begin
                         DDRAM_WE <= 1'b1; DDRAM_DIN <= {2{chk_wdata}};
                         DDRAM_BE <= chk_addr[0] ? {4'd0, chk_be} : {chk_be, 4'd0};
                     end else DDRAM_RD <= 1'b1;
                 end else if (rom_req) begin
-                    who <= 2'd2; st <= S_CMD; beat <= 2'd0;
+                    who <= 3'd2; st <= S_CMD; beat <= 2'd0;
                     DDRAM_RD <= 1'b1; DDRAM_BURSTCNT <= 8'd4;
                     DDRAM_ADDR <= ROM_BASE + {14'd0, rom_addr, 2'b00};
                 end else if (vr_start_w) begin
@@ -125,9 +135,12 @@ module ddr3_port (
                     DDRAM_WE <= 1'b1; DDRAM_BURSTCNT <= {1'b0, vr_len};
                     DDRAM_ADDR <= VRM_BASE + {11'd0, vr_addr}; DDRAM_DIN <= vr_wdata; DDRAM_BE <= vr_be;
                 end else if (vr_req && !vr_we) begin
-                    who <= 2'd3; st <= S_CMD; vleft <= vr_len;
+                    who <= 3'd3; st <= S_CMD; vleft <= vr_len;
                     DDRAM_RD <= 1'b1; DDRAM_BURSTCNT <= {1'b0, vr_len};
                     DDRAM_ADDR <= VRM_BASE + {11'd0, vr_addr};
+                end else if (lt_req && !lt_ack) begin
+                    who <= 3'd4; st <= S_CMD;
+                    DDRAM_WE <= 1'b1; DDRAM_ADDR <= LUT_BASE + {21'd0, lt_addr}; DDRAM_DIN <= lt_data;
                 end else if (tr_req && !tr_ack) begin
                     // a 4-beat burst: address and count with the first beat
                     st <= S_TWR; beat <= 2'd0;
@@ -139,21 +152,22 @@ module ddr3_port (
             S_CMD: if (!DDRAM_BUSY) begin
                 DDRAM_RD <= 1'b0; DDRAM_WE <= 1'b0;
                 if (DDRAM_WE) begin
-                    if (who == 2'd0) ld_pend <= ld_wr;      // a new one may have arrived
+                    if (who == 3'd0) ld_pend <= ld_wr;      // a new one may have arrived
+                    else if (who == 3'd4) lt_ack <= 1'b1;
                     else chk_ack <= 1'b1;
                     st <= S_DONE;
                 end else begin
-                    if (who == 2'd2) rom_ack <= 1'b1;
-                    if (who == 2'd3) vr_rack <= 1'b1;
+                    if (who == 3'd2) rom_ack <= 1'b1;
+                    if (who == 3'd3) vr_rack <= 1'b1;
                     st <= S_RDATA;
                 end
             end
             S_RDATA: if (DDRAM_DOUT_READY) begin
-                if (who == 2'd3) begin
+                if (who == 3'd3) begin
                     vr_rvalid <= 1'b1; vr_rdata <= DDRAM_DOUT;
                     vleft <= vleft - 7'd1;
                     if (vleft == 7'd1) st <= S_IDLE;
-                end else if (who == 2'd2) begin
+                end else if (who == 3'd2) begin
                     rom_rvalid <= 1'b1; rom_rdata <= DDRAM_DOUT;
                     beat <= beat + 2'd1;
                     if (beat == 2'd3) st <= S_IDLE;

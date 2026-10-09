@@ -27,7 +27,8 @@ Handles the three layers between the disk and a file such as /stand/vmunix:
    @8 as u64, 12 direct block pointers @40, 3 indirect @88; directory
    entries u32 ino, u16 reclen, u16 namlen, name). Block pointers are
    fragment numbers. The root filesystem on 10.20 is usually VxFS (magic
-   0xa501fcf5 at 8 KiB), which this tool does not read; /stand is HFS.
+   0xa501fcf5 at 8 KiB), which this tool does not read (tools/hpux/vxfs.py
+   does); /stand is HFS.
 
 usage:
     hpdisk.py IMAGE lif                      list the LIF directory

@@ -90,7 +90,7 @@ Every write is a **row span** `[x0, xend)` on row `y`, repeated over rows:
 | rectangle fill | 0x100A04 (LENXY + go), 0x100A00 (DSTXY + go) | FG if IBO bit 1 else BG (QEMU's rule; 08 2.3) |
 | block move | 0x100B00 (DSTXY + go), 0x100B04 (LENXY + go) | the source pixel; with DST Ots = 6 (indirect) recoloured: bit = OR(pixel AND plane mask) -> FG/BG (08 2.5) |
 | CPU store to the window | DST_BM_ACCESS (0x118004) | Otc 5: 32 pixels, bit 31-i -> FG/BG (Ots 6) or 1/0; otherwise 4 bytes, honouring the byte enables |
-| BINC data | 0x100620 (then row + 1), 0x100600/0x100604 (then x + 32, 4 or 1 pixels), 0x1005C0 | as a CPU store at the BINC destination address (0x1004A0) plus the row counter |
+| BINC data | 0x1005C0/0x100600/0x100604 (+x), 0x100620 (+y), 0x100640 (-y), 0x100660 (-x), 0x100680 (+x+y), 0x1006A0 (-x+y), 0x1006C0 (+x-y), 0x1006E0 (-x-y) | as a CPU store at the BINC destination address (0x1004A0), which then moves by the pixels a word carries (32, 4 or 1) and/or a line (NGLE manual 4) |
 
 and every pixel then goes through: enable (in the span; BINC mask 0x118024
 when IBO bit 29, for the CPU/BINC kinds; not a 0-bit when the background is
@@ -124,6 +124,10 @@ timeout is 4M cycles for Artist, 1023 for everything else); register reads
 and the status/video registers are never held. A write is acknowledged when
 its operation starts, a read when its data is there.
 
+A fill moves DSTXY's y down by the fill's height while 0x100080 holds
+0x7D (QEMU's rule from HP-UX's X server; the NGLE manual says HCRX and the
+PCI EG always do).
+
 ## 4. Colour map and display
 
 Writes through BA buffer 15 (CPU: `FB + 4i` in mode 0x3BA0F000; BINC: Linux's
@@ -133,6 +137,32 @@ BINC source (0x100480) bits 12:2 to LUT entries from `ctl[25:16]` on (08 3.1). L
 (entries 0..255) goes out on `pal_*` as it is written: on the board into the
 scaler's palette (`FB_PAL_*`), in the simulator into romsim's copy. LUT1 is
 not kept.
+
+The LUT blt's type field (ctl[15:14], NGLE manual 5): 0 = the colour map
+(LUT0 entries 0-255 go to the display; LUT1 is not kept), 2 = the cursor
+colours (four entries; 3 colours image pixels, 2 mask-only ones), 1 and 3
+are dropped.
+
+### 4.1 The hardware cursor
+
+A 64 x 64 sprite: the image in buffer 6, the mask in buffer 7, written
+through the window or BINC in an Otc32 mode, 32 pixels per word (x 0 or
+32 of a row; pixel x in bit 63-x of the row). Enabled by CURSOR_CTRL
+(0x300104) bit 7 while CURSOR_POS (0x300100) is non-zero and the video is
+on; the position is QEMU's X11R6.6 formula: x = 4 * POS[31:19] + POS[17:16]
++ 23 - 4 * (0x300200[23:16] + 0x300200[15:8] + 2) - CTRL[7:4], y = vactive
+- POS[15:0] - CTRL[3:0].
+
+There is no overlay stage after the MiSTer scaler, so the sprite is drawn
+into the VRAM. `K_CURSOR` reads the 64 x 64 area's words (up to 9 a row)
+into a save-under RAM (1024 x 64, row {r, k}) and writes the sprite pixels
+(image -> the LUT0 entry nearest cursor colour 3, mask only -> nearest
+colour 2; found by a 256-clock search after each LUT load); `K_RESTORE`
+writes the saved words back. The engine runs `K_RESTORE` before any GSC
+access to the engine or the window (so neither the CPU nor a drawing
+operation ever sees or overwrites the sprite) and when the sprite moves,
+changes or is switched off, and `K_CURSOR` once nothing has touched the
+engine for 16,000 clocks (0.25 ms). It is clipped to the active area.
 
 Video registers are storage that reads back exactly (MISC_VIDEO, 08 3.3);
 `gfx_width` = 4 * ((MISC_VIDEO[3:0] << 8 | 0x300200[31:24]) + 1), `gfx_height`
