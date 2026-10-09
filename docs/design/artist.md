@@ -87,10 +87,12 @@ Every write is a **row span** `[x0, xend)` on row `y`, repeated over rows:
 
 | Operation | Trigger | Source of each pixel |
 |---|---|---|
-| rectangle fill | 0x100A04 (LENXY + go), 0x100A00 (DSTXY + go) | FG if IBO bit 1 else BG (QEMU's rule; 08 2.3) |
+| rectangle fill | 0x100A04 (LENXY + go), 0x100A00 (DSTXY + go), 0x100A20 (TRANSFER_DATA + go) | TRANSFER_DATA bit 31 - ((x - x0) mod 32) ? FG : BG (review 09 5.1) |
 | block move | 0x100B00 (DSTXY + go), 0x100B04 (LENXY + go) | the source pixel; with DST Ots = 6 (indirect) recoloured: bit = OR(pixel AND plane mask) -> FG/BG (08 2.5) |
-| CPU store to the window | DST_BM_ACCESS (0x118004) | Otc 5: 32 pixels, bit 31-i -> FG/BG (Ots 6) or 1/0; otherwise 4 bytes, honouring the byte enables |
+| CPU store to the window | DST_BM_ACCESS (0x118004) | Otc 5: 32 pixels, bit 31-i -> FG/BG (Ots 6) or 1/0, 8 pixels per enabled byte lane (X writes glyph rows with `sth`); otherwise 4 bytes, honouring the byte enables |
 | BINC data | 0x1005C0/0x100600/0x100604 (+x), 0x100620 (+y), 0x100640 (-y), 0x100660 (-x), 0x100680 (+x+y), 0x1006A0 (-x+y), 0x1006C0 (+x-y), 0x1006E0 (-x-y) | as a CPU store at the BINC destination address (0x1004A0), which then moves by the pixels a word carries (32, 4 or 1) and/or a line (NGLE manual 4) |
+| font engine | 0x100AA0 (row counter := 0), 0x1008A0 | two 16-pixel rows a word (bits 31:16 row n, 15:0 row n+1) at DST + n, rows >= LEN h dropped; after the last row DST x += LEN w (review 09 2.3) |
+| line | 0x100E44 (end included), 0x100E04 (end excluded) | Bresenham from DST to the written point, one one-pixel span per pixel (`E_LINE`); DST := the end point (09 5.4) |
 
 and every pixel then goes through: enable (in the span; BINC mask 0x118024
 when IBO bit 29, for the CPU/BINC kinds; not a 0-bit when the background is
@@ -111,7 +113,12 @@ the 2048 x 1024 VRAM.
 CPU loads from the window (SRC_BM_ACCESS, 0x118008) read the words under
 pixels x..x+3 (or x..x+31) into registers and return 4 bytes (pixel x in
 bits 31:24) or, in the bitmap modes, 32 bits `OR(pixel AND plane mask)`
-(the ROM's VRAM probe, 08 0.3). Buffer 15 reads return the staging entry.
+(the ROM's VRAM probe, 08 0.3) -- or, when SRC_BM_ACCESS's J field (bits
+20:16) is non-zero, bit J of each pixel (X's CopyPlane, 09 5.2; the same
+rule recolours block moves). Buffer 15 reads return the staging entry.
+
+Timing: G_DEC only decides and captures an operation's operands; its
+set-up (clipping, coordinates) happens the next cycle in `E_LAUNCH`.
 
 Address decode in the window (08 1.4): BA field A = 3 is byte addressing
 (`x = off[10:2] << 2`, `y = off[20:11]`; the GSC address is word-aligned
@@ -148,16 +155,17 @@ are dropped.
 A 64 x 64 sprite: the image in buffer 6, the mask in buffer 7, written
 through the window or BINC in an Otc32 mode, 32 pixels per word (x 0 or
 32 of a row; pixel x in bit 63-x of the row). Enabled by CURSOR_CTRL
-(0x300104) bit 7 while CURSOR_POS (0x300100) is non-zero and the video is
-on; the position is QEMU's X11R6.6 formula: x = 4 * POS[31:19] + POS[17:16]
-+ 23 - 4 * (0x300200[23:16] + 0x300200[15:8] + 2) - CTRL[7:4], y = vactive
-- POS[15:0] - CTRL[3:0].
+(0x300104) bit 7 while the video is on; the position as HP-UX's X server
+computes it (review 09 3.4): x = 4 * POS[31:19] + POS[17:16] + 16 - 4 *
+(0x300200[23:16] + 0x300200[15:8] + 2), the first screen row shown =
+vactive - 1 - POS[15:0], and CTRL[5:0] sprite rows cut off at the top
+(the pointer above the screen's top edge). Mask 0 = transparent.
 
 There is no overlay stage after the MiSTer scaler, so the sprite is drawn
 into the VRAM. `K_CURSOR` reads the 64 x 64 area's words (up to 9 a row)
 into a save-under RAM (1024 x 64, row {r, k}) and writes the sprite pixels
-(image -> the LUT0 entry nearest cursor colour 3, mask only -> nearest
-colour 2; found by a 256-clock search after each LUT load); `K_RESTORE`
+(mask set: image ? the LUT0 entry nearest cursor colour 3 : nearest
+colour 2; found by a pipelined 256-clock search after each LUT load); `K_RESTORE`
 writes the saved words back. The engine runs `K_RESTORE` before any GSC
 access to the engine or the window (so neither the CPU nor a drawing
 operation ever sees or overwrites the sprite) and when the sprite moves,
