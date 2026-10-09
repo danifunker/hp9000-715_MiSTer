@@ -4,7 +4,7 @@ An FPGA recreation of the HP 9000 Model 715/64 workstation (PA-7100LC,
 LASI, built-in Artist graphics) for the MiSTer (DE10-Nano, Cyclone V
 5CSEBA6). All RTL is Verilog/SystemVerilog.
 
-**State (2026-10-09, afternoon):** documentation reviewed; HP's PDC 1.6 ROM
+**State (2026-10-09, evening):** documentation reviewed; HP's PDC 1.6 ROM
 obtained, disassembled and analysed (`docs/reference/rom/`); HP-UX 10.20's
 kernel extracted and its use of the hardware analysed (`docs/review/06*`).
 **The PA-7100LC core is built** (`rtl/cpu/`, `docs/design/cpu.md`): pipeline,
@@ -39,8 +39,9 @@ the console's 960, colours off), so **Artist now makes its own picture**
 raster at 64 MHz with LUT0/LUT1 by a 1-bit attribute plane and the cursor
 laid over, no more cursor in the VRAM); MiSTer.ini has `[HP9K715]`
 video_mode=8, vscale_mode=1. The real HDMI output can be seen through the
-user's OBS (`tools/mister/obs_shot.py`). Next: `RESUME-20261009-artist-x.md`
-and the build that carries the raster.
+user's OBS (`tools/mister/obs_shot.py`). **Build 23 is released** (graphics
+console by default; core-side integer scaling, OSD "Scale"). Next:
+`RESUME-20261009-artist-raster.md`.
 
 ## The user's process
 
@@ -81,7 +82,8 @@ and the build that carries the raster.
 | `RESUME-20261009-hpux-login.md` | superseded: the two user-mode FP bugs (trap 22 ISR/IOR, fr0 = +0) found and fixed, build 14 reaches `Console Login:` |
 | `RESUME-20261009-artist.md` | superseded: root login, the stale-text SIGILL fix (build 15); the Artist plan |
 | `RESUME-20261009-x11.md` | superseded: Artist built (builds 16-17), the PDC console and HP-UX's X login on it |
-| `RESUME-20261009-artist-x.md` | **current**: CDE on the board (build 18), review 09's X fixes + the timing split in build 20 (to check), the board tools (key/mouse/vram), what is still missing (HDMI check, LUT1/attribute planes, parametric/dashed lines, release) |
+| `RESUME-20261009-artist-raster.md` | **current**: build 23 released (Artist's own picture, LUT1/attribute plane, vectors, OBS tool), the window-move stubs to chase, what is left |
+| `RESUME-20261009-artist-x.md` | superseded: CDE on the board (build 18), review 09's X fixes + the timing split in build 20 (to check), the board tools (key/mouse/vram), what is still missing (HDMI check, LUT1/attribute planes, parametric/dashed lines, release) |
 | `docs/design/cpu-requests.md` | system -> CPU requests between those streams |
 | `docs/reference/rom/` | the ROM analysis: README (index + headline FPGA demands), BOOTFLOW, HARDWARE (incl. the reconstructed MIOC), FIRMWARE |
 | `rtl/cpu/` | the PA-7100LC core, being built: `pa_pkg.sv` (control word), `pa_decode.sv`, the units `pa_alu.sv` (adds/compares/logical/unit/DCOR/DS + conditions), `pa_shift.sv` (shift/extract/deposit), `pa_max1.sv` (MAX-1), `pa_ldst.sv` (address generation, store byte lanes, load extraction) -- unit-tested against every suite vector (`make -C verilator tb_alu tb_shift tb_max1 tb_ldst`); **`pa_cpu.sv` = the pipelined core** (cpu.md 6.8 ports; `pa_fetch.sv` F1/F2 + UIB, `pa_core.sv` D/E/M/W, `pa_regfile.sv` 2R2W MLAB GRs + shadows, `pa_icache.sv` L2-I + L1-I, `pa_dcache.sv` L2-D, `pa_cache_ram.sv`, `pa_tlb.sv` UTLB + block entries, `pa_biu.sv` line + uncached ports, `pa_cr16.sv`; the hardware walker and the I-LAB live in `pa_core`/`pa_fetch`), caches with full diagnose access, virtual mode; **`pa_fpunit.sv` + `pa_fpu.sv` = the FPU** (FR file, FPSR/compare queue/exception registers, the multi-cycle engine; one operation at a time, STUBS S-012; `make -C verilator tb_fpu` is its unit bench); `pa_core_seq.sv` is the sequential **reference** core it is co-simulated against |
