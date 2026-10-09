@@ -10,8 +10,10 @@ Also needed on the card: a disk image in `/media/fat/games/HP9K715/`, mounted
 in the OSD's disk slot (slot 0, SCSI ID 6). For tenox's HP-UX 10.20 image see
 `disks/README.md`: convert the qcow2 to raw (4 GiB, so an exFAT card), rewrite
 its LVM boot record to the 715's disk path (`tools/hpux/lvmbdra.py setpath IMG
-2/0/1.6.0`), and blank `lan0` in `/etc/rc.config.d/netconf` (the 715 core has
-no LAN; the kernel has no driver for it either). RAM: 16/32/64/128 MB in the
+2/0/1.6.0`), and from a single-user boot blank `lan0` in
+`/etc/rc.config.d/netconf` and point the hostname at 127.0.0.1 in `/etc/hosts`
+(the 715 core has no LAN; the kernel has no driver for it either; the
+Software Distributor agent needs an address to bind to). RAM: 16/32/64/128 MB in the
 OSD; 64 MB recommended for HP-UX.
 
 The MiSTer's own binary (Main_MiSTer) is the stock one: the core uses the
