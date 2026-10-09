@@ -141,6 +141,15 @@ tb_ldst: obj_dir_tb/mem_vectors.txt
 
 .PHONY: tb_ldst
 
+# Artist (rtl/artist/artist.sv) against a reference model of its drawing
+# semantics, with a VRAM model of random latency (tb/tb_artist.cpp)
+tb_artist:
+	$(TB_V) +define+SIMULATION=1 -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC --top-module artist -o tb_artist \
+		$(RTL)/artist/artist.sv tb/tb_artist.cpp
+	./obj_dir_tb/tb_artist
+
+.PHONY: tb_artist
+
 # ---------------------------------------------------------------------------
 # CPU test ROMs on the RTL core (verilator/cputest): `make cputest SUITE=alu1`
 # runs tests/cpu/build/<suite>.bin and checks the log with compare.py.
