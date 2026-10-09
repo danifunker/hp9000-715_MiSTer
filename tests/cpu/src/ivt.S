@@ -95,5 +95,5 @@ trap_common:
 data_traps:	/* per interruption number: all-ones if ISR/IOR are defined */
 	.word	0, 0, 0, 0, 0, 0, 0, 0			/* 0-7 */
 	.word	0, 0, 0, 0, 0, 0, 0, -1			/* 8-15: 15 data TLB miss */
-	.word	0, -1, -1, -1, -1, -1, 0, 0		/* 16-23: 17-21 data */
+	.word	0, -1, -1, -1, -1, -1, -1, 0		/* 16-23: 17-21 data; 22 for coprocessor loads/stores */
 	.word	0, 0, -1, -1, -1, 0, 0, 0		/* 24-31: 26-28 data */

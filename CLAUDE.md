@@ -139,6 +139,10 @@ Checked in the 11.1.1 source on 2026-10-07:
   bits 32-n..31 (Pa11_acd Table 5-2; found by the ALU unit bench and the
   reference model, `tests/cpu/model.py` `QEMU_BUGS`). DS conditions 4/5
   share the bug and also ignore PSW[V]'s subtract reading.
+- **No CCR**: an FP instruction with the FPU disabled executes instead of
+  taking trap 22, so QEMU never sets ISR/IOR for a coprocessor load/store
+  (HP-UX 10.20 emulates FP loads/stores from them, lazy FP switch; found
+  2026-10-08, `tests/cpu` trap `fpdis-*`).
 - Its 53C710 also clears DSTAT.DFE when raising an interrupt, which HP-UX
   treats as fatal (`06d`); its Artist MISC_VIDEO read overwrites bits HP's
   STI and HP-UX use as the monitor index (`06c`); its 82596 reads the PORT

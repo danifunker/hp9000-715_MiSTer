@@ -1386,6 +1386,29 @@ QEMU_BUGS = [
 # listed vectors are not compared and the group's trap count may differ by
 # "traps_delta" per such vector. compare.py --ref ... --known-qemu.
 QEMU_REF_BUGS = [
+    {"id": "no-ccr",
+     "suite": "trap",
+     "groups": r"^fpdis-",
+     "vector": lambda v: True,
+     "traps_delta": 1,
+     "summary": "QEMU does not model CCR (CR10): an FP instruction with the FPU "
+                "disabled executes instead of taking the assist emulation trap (22); "
+                "the vectors are checked against the generator's expectations instead "
+                "(ISR/IOR = the data address of a coprocessor load or store)",
+     "manual": "ACD p.4-25 (assist emulation trap: 'ISR and IOR contain valid data "
+               "only if the instruction is a coprocessor load or store'), Table 6-7",
+     "qemu": "target/hppa/cpu.h (CR_SCRCCR is only a register number; no check in translate.c)"},
+    {"id": "copr-uid",
+     "suite": "trap",
+     "groups": r"^asst-",
+     "vector": lambda v: True,
+     "traps_delta": 0,
+     "summary": "coprocessor loads/stores and COPR with uid != 0 (CLDx/CSTx, SPOP): "
+                "assist emulation trap 22 on a PA 1.1 CPU without those coprocessors; "
+                "QEMU's decode differs, so the vectors are checked against the "
+                "generator's expectations",
+     "manual": "ACD p.4-25, p.5-?? (CLDW/CLDD/CSTW/CSTD, COPR, SPOPn)",
+     "qemu": "target/hppa/insns.decode (the uid field is not decoded for 09/0B/0C)"},
     {"id": "pa20-majors",
      "suite": "trap",
      "groups": r"^illegal$",

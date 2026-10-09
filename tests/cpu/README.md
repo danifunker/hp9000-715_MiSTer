@@ -93,6 +93,15 @@ Group names are `<mnemonic>[,<completer>][.c0|.c1]`, e.g. `addc,<=.c1`,
 The other suites store different words. mem stores r5, the base minus
 AREA, and 16 memory words. branch stores a path bitmap, r3 and r4. trap
 stores r5, exec, and the trap log's number, IIR, ISR, IOR, IPSW and IIAOQ.
+Its `fpdis-*` groups (FP loads, stores and operations with the FPU
+disabled, CCR = 0) and `asst-*` groups (CLDx/CSTx, COPR and SPOP with
+uid != 0) take the assist emulation trap (22), which must carry the data
+address in ISR/IOR for a coprocessor load or store (ACD p.4-25; HP-UX
+10.20 emulates FP loads and stores from them instead of enabling the
+FPU). QEMU has no CCR, so those vectors carry their expected words in the
+JSON (`expect`; IIAOQ is normalised to 0 by the vector, IPSW is
+`PSW_INIT`) and `compare.py` checks them against that instead of QEMU's
+log (`model.QEMU_REF_BUGS` no-ccr, copr-uid).
 fp stores the double result, the status register and a pad word. fpedge
 stores 8 words: the status (with FPSR.T if the operation was unimplemented;
 `fstds %fr0` goes first because it is the one FP instruction that does not
@@ -323,6 +332,12 @@ reproduces QEMU's wrong output.
   - **Evidence:** A model of the bug reproduces QEMU's nullification on
     all 240 such vectors. 38 of them differ from the architecture; the
     other 202 agree by chance.
+- **no-ccr** (trap `fpdis-*`): QEMU does not model CCR (CR10), so an FP
+  instruction with the FPU disabled executes instead of taking trap 22.
+  The vectors are checked against the generator's `expect` words.
+- **copr-uid** (trap `asst-*`): the uid != 0 coprocessor forms (CLDx/CSTx,
+  COPR, SPOP) take trap 22 on the PA-7100LC (ACD p.4-25); QEMU's decode
+  differs. Checked against `expect` too.
 - **max1-illegal**: QEMU takes an illegal-instruction trap on every MAX-1
   instruction on a PA 1.1 CPU (already in `CLAUDE.md`). The PA-7100LC
   implements them (PCXL ERS s.2.1.4). Every max1 group in QEMU's log shows

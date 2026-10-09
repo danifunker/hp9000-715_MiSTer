@@ -662,6 +662,94 @@ def gen_trap(rng):
         w = illegal[v]
         return (["\t.word\t0x%08x" % w], (), {"word": w})
     group("illegal", mkill, len(illegal))
+    # ---- assist emulation traps (22) that carry a data address: an FP load
+    # or store with the FPU disabled (CCR = 0) and the coprocessor forms with
+    # uid != 0 (CLDx/CSTx) set ISR/IOR to the data address (ACD p.4-25).
+    # HP-UX 10.20's lazy FP context switch emulates such loads and stores
+    # from ISR/IOR instead of enabling the FPU ($emulation_trap -> pa1_ldst),
+    # so awk's double compares went wrong while they were stale (2026-10-08).
+    # FP operations with CCR = 0, COPR uid != 0 and SPOP trap the same way and
+    # leave ISR/IOR alone (undefined in the ACD; the core keeps them, so the
+    # vector clears them first and expects 0). QEMU has no CCR and decodes
+    # the uid forms differently (model.QEMU_REF_BUGS no-ccr, copr-uid): the
+    # JSON's "expect" holds the expected words instead of its log. IIAOQ is
+    # only known at link time, so the vector subtracts the trapping
+    # instruction's address (from b,l) and expects 0; IPSW is PSW_INIT.
+    def asst(lines, word, space, sr, ea, ccr_off, pre=(), data=True):
+        setup = list(pre) + li(1, space) + ["\tmtsp\t%%r1, %%sr%d" % sr,
+                                           "\tmtctl\t%r0, %cr20", "\tmtctl\t%r0, %cr21"]
+        if ccr_off:
+            setup.append("\tmtctl\t%r0, %cr10")
+        body = ["\tb,l\t1f, %r11", "\tnop", "1:"] + lines + [
+                "\tldi\t0xc0, %r1", "\tmtctl\t%r1, %cr10",
+                "\tldw\t20(%r12), %r10", "\tsub\t%r10, %r11, %r10", "\tstw\t%r10, 20(%r12)",
+                "\tmtsp\t%r0, %sr4"]          # sr4 = 0 again: the unaligned group's ISR (QEMU logs 0)
+        exp = [SENTINEL, 1, 22, word, space if data else 0, ea if data else 0, PSW_INIT, 0]
+        return (body, setup, {"word": word, "expect": exp, "ccr": 0 if ccr_off else 0xC0,
+                              "sr": sr, "space": space, "ea": ea})
+    def aspace(rng):
+        # the data space: an explicit sr1-3, or sr4, the implicit space of a
+        # base in the first quadrant (AREA is)
+        sr = rng.choice([1, 2, 3, 4])
+        return sr, rng.getrandbits(16), "" if sr == 4 else "%%sr%d, " % sr
+    def abase(rng):
+        return AREA + 64 + 8 * rng.randint(0, 100)
+    def freg(rng, dbl):
+        fr = rng.randint(4, 31)
+        return "%%fr%d" % fr if dbl else "%%fr%d%s" % (fr, rng.choice(["", "L", "R"]))
+    def mk_fpdis_ld(v):                       # FLDWS / FLDDS, FPU disabled
+        dbl = v % 2 == 1
+        base, (sr, space, ssfx) = abase(rng), aspace(rng)
+        disp = rng.choice([-16, -8, 0, 8] if dbl else [-16, -12, -8, -4, 0, 4, 8, 12])
+        ln = "\t%s\t%d(%s%%r3), %s" % ("fldds" if dbl else "fldws", disp, ssfx, freg(rng, dbl))
+        return asst([ln], encode_level11([ln])[0], space, sr, base + disp, True, li(3, base))
+    group("fpdis-ld", mk_fpdis_ld, 12)
+    def mk_fpdis_ldx(v):                      # FLDWX / FLDDX [,s], FPU disabled
+        dbl, scaled = v % 2 == 1, v % 4 >= 2
+        base, (sr, space, ssfx) = abase(rng), aspace(rng)
+        idx = rng.randint(0, 15) if scaled else rng.randint(0, 15) * (8 if dbl else 4)
+        ea = base + (idx << (3 if dbl else 2) if scaled else idx)
+        ln = "\t%s%s\t%%r4(%s%%r3), %s" % ("flddx" if dbl else "fldwx", ",s" if scaled else "",
+                                           ssfx, freg(rng, dbl))
+        return asst([ln], encode_level11([ln])[0], space, sr, ea, True, li(3, base) + li(4, idx))
+    group("fpdis-ldx", mk_fpdis_ldx, 12)
+    def mk_fpdis_st(v):                       # FSTWS / FSTDS / FSTWX / FSTDX, FPU disabled
+        dbl, indexed = v % 2 == 1, v % 4 >= 2
+        base, (sr, space, ssfx) = abase(rng), aspace(rng)
+        if indexed:
+            idx = rng.randint(0, 15) * (8 if dbl else 4)
+            ln = "\t%s\t%s, %%r4(%s%%r3)" % ("fstdx" if dbl else "fstwx", freg(rng, dbl), ssfx)
+            return asst([ln], encode_level11([ln])[0], space, sr, base + idx, True,
+                        li(3, base) + li(4, idx))
+        disp = rng.choice([-16, -8, 0, 8] if dbl else [-16, -12, -8, -4, 0, 4, 8, 12])
+        ln = "\t%s\t%s, %d(%s%%r3)" % ("fstds" if dbl else "fstws", freg(rng, dbl), disp, ssfx)
+        return asst([ln], encode_level11([ln])[0], space, sr, base + disp, True, li(3, base))
+    group("fpdis-st", mk_fpdis_st, 12)
+    fpops = ["\tfadd,dbl\t%fr4, %fr5, %fr6", "\tfcmp,dbl,=\t%fr4, %fr5", "\tftest",
+             "\tfcpy,sgl\t%fr4L, %fr6L", "\tfmpyadd,dbl\t%fr4, %fr5, %fr6, %fr7, %fr8",
+             "\txmpyu\t%fr4L, %fr5L, %fr6", "\tfcnvxf,sgl,dbl\t%fr4L, %fr7"]
+    def mk_fpdis_op(v):                       # FP operations, FPU disabled: ISR/IOR untouched
+        ln = fpops[v]
+        return asst([ln], encode_level11([ln])[0], rng.getrandbits(16), rng.choice([1, 2, 3]), 0,
+                    True, data=False)
+    group("fpdis-op", mk_fpdis_op, len(fpops))
+    def mk_cldx(v):                           # CLDW/CLDD/CSTW/CSTD: uid >= 2 (word) / >= 1 (dword)
+        dbl, st = v % 2 == 1, v % 4 >= 2
+        base, (sr, space, ssfx) = abase(rng), aspace(rng)
+        disp = rng.choice([-16, -8, 0, 8] if dbl else [-16, -12, -8, -4, 0, 4, 8, 12])
+        if st:
+            ln = "\t%s\t%%fr5, %d(%s%%r3)" % ("fstds" if dbl else "fstws", disp, ssfx)
+        else:
+            ln = "\t%s\t%d(%s%%r3), %%fr5" % ("fldds" if dbl else "fldws", disp, ssfx)
+        word = encode_level11([ln])[0] | (rng.randint(1 if dbl else 2, 7) << 6)   # the uid field
+        return asst(["\t.word\t0x%08x" % word], word, space, sr, base + disp, False, li(3, base))
+    group("asst-cldx", mk_cldx, 12)
+    nodata = [0x30000000 | (1 << 6), 0x30000000 | (5 << 6), 0x10000000, 0x10000000 | 0x12345]
+    def mk_nodata(v):                         # COPR uid != 0, SPOP: no data address
+        word = nodata[v]
+        return asst(["\t.word\t0x%08x" % word], word, rng.getrandbits(16), rng.choice([1, 2, 3]),
+                    0, False, data=False)
+    group("asst-nodata", mk_nodata, len(nodata))
     # unaligned data references (trap 28 / 18): IOR = the address
     un = [("ldw", 2), ("ldw", 1), ("ldh", 1), ("stw", 2), ("sth", 3), ("ldwm", 2),
           ("stwm", 1), ("ldcws", 4), ("ldcws", 8)]

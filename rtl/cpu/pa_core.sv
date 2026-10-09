@@ -590,10 +590,15 @@ module pa_core
             e_trap = TRAP_ILLEGAL;
         else if (e_c.priv && cur_pl != 2'd0)
             e_trap = TRAP_PRIV_OP;
-        else if (e_c.assist)
-            e_trap = TRAP_ASSIST_EM;
-        else if ((e_c.fu == FU_FP || e_c.fpm) && ccr[7:6] != 2'b11)   // FPU disabled (ACD table 6-7)
-            e_trap = TRAP_ASSIST_EM;
+        // assist emulation: ISR/IOR hold the data address of a coprocessor load or
+        // store (ACD p.4-25, "valid only if the instruction is a coprocessor load
+        // or store"); HP-UX emulates FP loads and stores with the FPU disabled
+        // from them (its lazy FP context switch, $emulation_trap -> pa1_ldst)
+        else if (e_c.assist) begin
+            e_trap = TRAP_ASSIST_EM; e_trap_data = e_c.fpm;
+        end else if ((e_c.fu == FU_FP || e_c.fpm) && ccr[7:6] != 2'b11) begin   // FPU disabled (ACD table 6-7)
+            e_trap = TRAP_ASSIST_EM; e_trap_data = e_c.fpm;
+        end
         else if ((e_c.fu == FU_FP || e_c.fpm) && fp_t && !e_fstd_fr0)  // delayed FP trap (sec. 3.5)
             e_trap = TRAP_ASSIST_EX;
         else case (e_c.fu)

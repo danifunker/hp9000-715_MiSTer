@@ -232,7 +232,7 @@ module pa_core_seq
             ex_trap = TRAP_ILLEGAL;
         else if (c.priv && cur_pl != 2'd0)
             ex_trap = TRAP_PRIV_OP;
-        else if (c.assist || c.fu == FU_FP)
+        else if (c.assist || c.fu == FU_FP || (c.fpm && ccr[7:6] != 2'b11))   // no FPU here; FP loads/stores trap when the FPU is disabled
             ex_trap = TRAP_ASSIST_EM;
         else case (c.fu)
             FU_ALU: begin
@@ -363,7 +363,8 @@ module pa_core_seq
                     dbg_retire <= 1'b1; dbg_nullified <= 1'b1;
                 end else if (ex_trap != TRAP_NONE) begin
                     enter_interruption(ex_trap, iaoq_f, iaoq_b, iasq_f, iasq_b, ir,
-                                       ex_trap == TRAP_UNALIGNED, ls_space, ls_ea, 1'b0);
+                                       ex_trap == TRAP_UNALIGNED || (ex_trap == TRAP_ASSIST_EM && c.fpm),   // ISR/IOR: coprocessor loads/stores too
+                                       ls_space, ls_ea, 1'b0);
                 end else if (ex_is_mem) begin
                     io_req <= 1'b1; io_ifetch <= 1'b0;
                     io_we <= (c.fu == FU_STORE);

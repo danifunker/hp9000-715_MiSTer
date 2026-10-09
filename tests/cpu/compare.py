@@ -350,8 +350,20 @@ def compare_group(suite, name, got, ref, inputs, use_model, nmax, known_qemu):
             r.refbad += 1
             if matches_bug(i, rv):
                 r.refknown += 1
-        if bad_words and i in skip:
-            r.known += 1
+        if i in skip:
+            # a vector QEMU cannot reference: the generator's own expectation
+            # ("expect" in the JSON) stands in for the reference, if it has one
+            exp = inputs[i].get("expect") if inputs is not None and i < len(inputs) else None
+            if exp is None:
+                if bad_words:
+                    r.known += 1
+                continue
+            bad_words = [w for w in range(max(len(g), len(exp)))
+                         if w >= len(g) or w >= len(exp) or g[w] != exp[w]]
+            if bad_words:
+                r.fail += 1
+                if nmax == 0 or len(r.details) < nmax:
+                    r.details.append(_detail(suite, i, g, exp, None, inputs[i], bad_words, None))
             continue
         if bad_words and known_qemu and matches_bug(i, g):
             r.known += 1
