@@ -79,11 +79,11 @@ console)
     ;;
 type)
     # one character every 30 ms: the ROM echoes while it polls the UART,
-    # and a burst overruns it
-    rsh "python3 -c 'import sys,time
-s=sys.argv[1].encode().decode(\"unicode_escape\")
+    # and a burst overruns it. The text goes over stdin, so quotes survive
+    printf '%s' "$1" | rsh "python3 -c 'import sys,time
+s=sys.stdin.read().encode().decode(\"unicode_escape\")
 f=open(\"/dev/ttyS1\",\"wb\",0)
-for c in s: f.write(c.encode(\"latin-1\")); time.sleep(0.03)' '$1'"
+for c in s: f.write(c.encode(\"latin-1\")); time.sleep(0.03)'"
     ;;
 shot)
     out="$1"
