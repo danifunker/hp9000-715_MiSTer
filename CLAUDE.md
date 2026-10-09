@@ -26,12 +26,15 @@ root logs in multi-user at 32 and 64 MB** (root password and lvmtab set up
 single-user, `disks/README.md`); user processes no longer die of SIGILL on
 freshly paged-in text (a no-execute fetch filled the I-cache, `68ec0f6`,
 cpu-requests #8); `release/` = build 15, release notes in the root README.
-**Artist is built** (`rtl/artist/artist.sv`, `docs/design/artist.md`,
-build 17): VRAM in DDR3 at 0x3300_0000 shown by the MiSTer frame buffer; the
-PDC draws its boot console on it, and with a graphics-console EEPROM **HP-UX
-10.20 boots on the board to its X11 login screen on Artist** (VRAM read over
-/dev/mem). Next: `RESUME-20261009-x11.md` (what HDMI shows, the keyboard in
-set 3, X's text and cursor).
+**Artist is built** (`rtl/artist/artist.sv`, `docs/design/artist.md`):
+VRAM in DDR3 at 0x3300_0000 shown by the MiSTer frame buffer; the PDC draws
+its boot console on it, and with a graphics-console EEPROM
+(`tools/eeprom/hp715_gfx.eep`) **HP-UX 10.20 boots on the board to CDE**
+(build 18: root logs in through `board.sh key`, terminal, File Manager;
+keyboard in scan-code set 3, mouse). HP-UX's X server analysed in
+`docs/review/09`; its fixes (sub-word glyph stores, font engine, fills,
+lines, cursor) and a timing split are in build 20, not yet checked. Next:
+`RESUME-20261009-artist-x.md`.
 
 ## The user's process
 
@@ -64,13 +67,15 @@ set 3, X's text and cursor).
 | `rtl/` | the core (`pll*` from the template) |
 | `docs/review/01..05` | the 2026-10-07 reviews: system docs, chip docs, QEMU/SeaBIOS, ROM and prior art, firmware (PDC/IODC/STI) requirements |
 | `docs/review/06*.md` | what HP-UX 10.20 and Linux need from the hardware: 06 by block, with sub-reports 06a audio, 06b PS/2/serial/parallel, 06c graphics/STI, 06d SCSI (c720 driver, SCRIPTS) |
+| `docs/review/09-hpux-x-artist.md` | **HP-UX 10.20's X server on Artist** (disassembly of `cg.1`/`crxutils.1`/`ucrx.1`): glyphs, font engine, cursor, LUTs and attribute planes, fills, lines; what the RTL must do |
 | `docs/review/08-artist-registers.md` | **the Artist at the register level**: what HP's STI routines (system ROM 0xF0024000), HP-UX and Linux use, QEMU's deviations, the first-milestone plan |
 | `docs/review/07-hpux-cpu-specifics.md` | HP-UX 10.20 / Linux versus PCX-L details: CPU revision (cpu.md Q3), walker CR28 (Q4), DIAG and implementation-specific opcodes (Q7, Q8), DR25 soft-power poll |
 | `RESUME-20261007-*.md` | resume prompts: `cpu-64mhz` (pipelined CPU at 64 MHz, owns `rtl/cpu/`; done, 65.1 MHz), `fpu` (the FPU, done to the fp suite), `fpu-finish` (done 2026-10-08: fits 10-15, fpedge model, S-012 measured and left) and `system` (the rest of the machine; superseded by `RESUME-20261008-system.md`) |
 | `RESUME-20261008-*.md` | `system` (superseded), `board-scsi` (the board-only SCSI failure; fixed by `20afb91`), **`system-next`** (the system stream after that: HP-UX in simulation, HP-UX on the board, Artist) and `hpux-kernel` (for Fable: the CPU's I-LAB livelock HP-UX hit, fixed in `5cec6d8`, and the two failures after it -- done: the walker/D-cache bug `665f2e8`, the SCSI MODE SELECT `c969097`, the LVM boot record `a289321`); `hpux-login` (superseded) |
 | `RESUME-20261009-hpux-login.md` | superseded: the two user-mode FP bugs (trap 22 ISR/IOR, fr0 = +0) found and fixed, build 14 reaches `Console Login:` |
 | `RESUME-20261009-artist.md` | superseded: root login, the stale-text SIGILL fix (build 15); the Artist plan |
-| `RESUME-20261009-x11.md` | **current**: Artist built (builds 16-17), the PDC console and HP-UX's X login on it; next the HDMI check, PS/2 set 3, X text/cursor |
+| `RESUME-20261009-x11.md` | superseded: Artist built (builds 16-17), the PDC console and HP-UX's X login on it |
+| `RESUME-20261009-artist-x.md` | **current**: CDE on the board (build 18), review 09's X fixes + the timing split in build 20 (to check), the board tools (key/mouse/vram), what is still missing (HDMI check, LUT1/attribute planes, parametric/dashed lines, release) |
 | `docs/design/cpu-requests.md` | system -> CPU requests between those streams |
 | `docs/reference/rom/` | the ROM analysis: README (index + headline FPGA demands), BOOTFLOW, HARDWARE (incl. the reconstructed MIOC), FIRMWARE |
 | `rtl/cpu/` | the PA-7100LC core, being built: `pa_pkg.sv` (control word), `pa_decode.sv`, the units `pa_alu.sv` (adds/compares/logical/unit/DCOR/DS + conditions), `pa_shift.sv` (shift/extract/deposit), `pa_max1.sv` (MAX-1), `pa_ldst.sv` (address generation, store byte lanes, load extraction) -- unit-tested against every suite vector (`make -C verilator tb_alu tb_shift tb_max1 tb_ldst`); **`pa_cpu.sv` = the pipelined core** (cpu.md 6.8 ports; `pa_fetch.sv` F1/F2 + UIB, `pa_core.sv` D/E/M/W, `pa_regfile.sv` 2R2W MLAB GRs + shadows, `pa_icache.sv` L2-I + L1-I, `pa_dcache.sv` L2-D, `pa_cache_ram.sv`, `pa_tlb.sv` UTLB + block entries, `pa_biu.sv` line + uncached ports, `pa_cr16.sv`; the hardware walker and the I-LAB live in `pa_core`/`pa_fetch`), caches with full diagnose access, virtual mode; **`pa_fpunit.sv` + `pa_fpu.sv` = the FPU** (FR file, FPSR/compare queue/exception registers, the multi-cycle engine; one operation at a time, STUBS S-012; `make -C verilator tb_fpu` is its unit bench); `pa_core_seq.sv` is the sequential **reference** core it is co-simulated against |
