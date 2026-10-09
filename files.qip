@@ -27,6 +27,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/lasi/ps2_dev.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/lasi/lasi.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/scsi/ncr53c710.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/scsi/scsi_targets.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/artist/artist.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/wax_stub.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/rom_loader.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/hp715.sv

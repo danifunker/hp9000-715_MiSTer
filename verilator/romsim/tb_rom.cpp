@@ -6,7 +6,9 @@
 //
 //   obj_dir_rom/Vemu [--rom FILE] [+eeprom=HEX] [--max-cycles N] [--until STR (after --type's text, if any)]
 //                    [--type STR] [--type-after STR (default BOOT_ADMIN>; "" = at once)]
-//                    [--then AFTER STR ...] (more typing, each after AFTER appears) [--serial-log FILE]
+//                    [--then AFTER STR ...] (more typing, each after AFTER appears; AFTER = @CYCLE: at
+//                    that cycle instead) [--ps2] (typing goes to the PS/2 keyboard as set-2 key
+//                    events, US layout, for a console on graphics) [--serial-log FILE]
 //                    [--model 0|1|2] [--ram-lg N] [--leds] [--buserr]
 //                    [--trace N] [--trace-from CYCLE] [--traps] [--stamp] [--sample N] [--gsctrace] [--scsitrace] [--miotrace] [--evtrace]
 //                    [--turbo N [--turbo-after CYCLE] [--turbo-until CYCLE]]  (CR16 N x faster from
@@ -19,6 +21,9 @@
 //                    checkpoints, at a cycle or when the console first prints STR; a restored
 //                    run keeps the cycle count, and needs the same build)
 //                    [--memdump CYCLE ADDR LEN FILE]   (the ideal RAM, LEN bytes from physical ADDR, at CYCLE)
+//                    [--fbshot CYCLE FILE] (may repeat) [--fbshot-end FILE]   (Artist's screen as a PPM: the
+//                    active area of the VRAM through LUT0, at CYCLE / when the run ends) [--arttrace]
+//                    (every Artist operation: fills, moves, pixel writes, reads, LUT loads)
 //                    [--watch A B]   (every retired load/store whose physical address is in [A, B): hit flags, the data)
 //                    [--watchval V]  (every retired load whose data is V, with its virtual and physical address)
 //                    [--pcwatch PC]  (that instruction's retirements, with the same fields; may repeat)
@@ -119,7 +124,47 @@ static void dump_mem(const char* file, unsigned long long addr, unsigned long lo
 	fclose(f);
 	fprintf(stderr, "romsim: dumped %llu bytes at %08llx to %s\n", len, addr, file);
 }
+// --fbshot: Artist's screen (the VRAM array in sim.v through LUT0, copied here
+// from its writes),
+// the active area (1280 x 1024 until the ROM programs a mode), as a PPM
+static unsigned lut0[256];
+static void fbshot(const char* file) {
+	unsigned w = top->gfx_width, h = top->gfx_height;
+	if (w == 0 || w > 2048 || h == 0 || h > 1024) { w = 1280; h = 1024; }
+	FILE* f = fopen(file, "wb");
+	if (!f) { perror(file); return; }
+	fprintf(f, "P6\n%u %u\n255\n", w, h);
+	for (unsigned y = 0; y < h; y++)
+		for (unsigned x = 0; x < w; x++) {
+			unsigned long long q = top->rootp->emu__DOT__vram[y * 256 + x / 8];
+			unsigned rgb = lut0[(q >> (8 * (x & 7))) & 0xFF];
+			fputc(rgb >> 16, f); fputc((rgb >> 8) & 0xFF, f); fputc(rgb & 0xFF, f);
+		}
+	fclose(f);
+	fprintf(stderr, "romsim: Artist screen %ux%u (video %s) to %s\n", w, h, top->gfx_on ? "on" : "off", file);
+}
 static uint64_t cyc = 0;
+
+// --ps2: a character as set-2 key events ({pressed, E0, code}), US layout
+static bool ps2_events(char c, std::vector<unsigned>& ev) {
+	static const char* lo = "abcdefghijklmnopqrstuvwxyz0123456789`-=\\[];',./ \r\b\t\x1b";
+	static const char* hi = "ABCDEFGHIJKLMNOPQRSTUVWXYZ)!@#$%^&*(~_+|{}:\"<>?";
+	static const unsigned char code[] = {
+		0x1C, 0x32, 0x21, 0x23, 0x24, 0x2B, 0x34, 0x33, 0x43, 0x3B, 0x42, 0x4B, 0x3A, 0x31, 0x44, 0x4D,
+		0x15, 0x2D, 0x1B, 0x2C, 0x3C, 0x2A, 0x1D, 0x22, 0x35, 0x1A,
+		0x45, 0x16, 0x1E, 0x26, 0x25, 0x2E, 0x36, 0x3D, 0x3E, 0x46,
+		0x0E, 0x4E, 0x55, 0x5D, 0x54, 0x5B, 0x4C, 0x52, 0x41, 0x49, 0x4A, 0x29, 0x5A, 0x66, 0x0D, 0x76 };
+	const char* p;
+	bool shift = false;
+	unsigned k;
+	if (c && (p = strchr(lo, c))) k = code[p - lo];
+	else if (c && (p = strchr(hi, c))) { k = code[p - hi]; shift = true; }
+	else return false;
+	if (shift) ev.push_back(0x200 | 0x12);
+	ev.push_back(0x200 | k); ev.push_back(k);
+	if (shift) ev.push_back(0x12);
+	return true;
+}
 
 // hps_io's block devices, for the SCSI images: the core raises sd_rd/sd_wr
 // with sd_lba and sd_blk_cnt; we raise sd_ack, move (sd_blk_cnt+1) x 512
@@ -234,6 +279,12 @@ int main(int argc, char** argv) {
 	unsigned wp_ea = 0, wp_rpn = 0, wp_hit = 0, wp_cch = 0, wp_ld = 0, wp_res = 0;
 	unsigned watch_val = 0; bool watch_val_on = false, watch_on = false;   // --watchval V: retired loads whose data is V
 	std::vector<unsigned> pcwatch;                        // --pcwatch PC: that instruction's retirements
+	std::map<unsigned long long, std::string> fbshots;   // --fbshot CYCLE FILE
+	const char* fbshot_end = nullptr;
+	bool ps2 = false;                                    // --ps2: type on the PS/2 keyboard
+	std::vector<unsigned> kev;                           // its pending key events
+	size_t kev_pos = 0;
+	unsigned kev_tog = 0;
 	for (int i = 1; i < argc; i++) {
 		std::string a = argv[i];
 		auto next = [&](void) -> const char* { return i + 1 < argc ? argv[++i] : ""; };
@@ -259,6 +310,10 @@ int main(int argc, char** argv) {
 		else if (a == "--scsitrace") trace_flags |= 4;
 		else if (a == "--miotrace") trace_flags |= 8;
 		else if (a == "--evtrace") trace_flags |= 16;
+		else if (a == "--arttrace") trace_flags |= 32;
+		else if (a == "--fbshot") { unsigned long long c = strtoull(next(), 0, 0); fbshots[c] = next(); }
+		else if (a == "--fbshot-end") fbshot_end = next();
+		else if (a == "--ps2") ps2 = true;
 		else if (a == "--flags-from") flags_from = strtoull(next(), 0, 0);
 		else if (a == "--turbo") turbo = atoi(next());
 		else if (a == "--turbo-after") turbo_after = strtoull(next(), 0, 0);
@@ -357,7 +412,24 @@ int main(int argc, char** argv) {
 	const char* why = "cycle limit";
 	while (cyc - start < max_cycles) {
 		top->uart_rx_strobe = 0;
-		if (typing && cyc >= next_type && !top->uart_rx_full) {
+		// a step that waits for a cycle (AFTER = @CYCLE)
+		if (!typing && step < steps.size() && steps[step].after.size() > 1 && steps[step].after[0] == '@' &&
+		    cyc - start >= strtoull(steps[step].after.c_str() + 1, 0, 0)) { typing = true; next_type = cyc + 1000; }
+		// PS/2: one key event every 30000 cycles
+		if (kev_pos < kev.size() && cyc >= next_type) {
+			kev_tog ^= 1;
+			top->ps2_key = (kev_tog << 10) | kev[kev_pos++];
+			next_type = cyc + 30000;
+		} else if (ps2 && typing && kev_pos == kev.size() && cyc >= next_type) {
+			const std::string& typed = steps[step].text;
+			kev.clear(); kev_pos = 0;
+			if (!ps2_events(typed[typed_pos], kev)) fprintf(stderr, "romsim: no PS/2 key for %02x\n", (unsigned char)typed[typed_pos]);
+			typed_pos++;
+			if (typed_pos == typed.size()) {
+				out.clear(); typing = false; typed_pos = 0; step++;
+				if (step < steps.size() && steps[step].after.empty()) { typing = true; next_type = cyc + 200000; }
+			}
+		} else if (!ps2 && typing && cyc >= next_type && !top->uart_rx_full) {
 			const std::string& typed = steps[step].text;
 			top->uart_rx_strobe = 1; top->uart_rx_byte = typed[typed_pos++];
 			next_type = cyc + 20000;
@@ -370,8 +442,10 @@ int main(int argc, char** argv) {
 		sd_step();
 		if (watch_on) { wp_ea = CORE_(w_ea); wp_rpn = CORE_(w_rpn); wp_hit = CORE_(w_hit); wp_cch = CORE_(w_cached); wp_ld = CORE_(ld_data); wp_res = CORE_(w_result); }
 		tick();
+		if (top->gfx_pal_wr) lut0[top->gfx_pal_addr] = top->gfx_pal_rgb;
 		unsigned long long t = cyc - start;
 		if (memdump_file && t == memdump_at) { dump_mem(memdump_file, memdump_addr, memdump_len); memdump_file = nullptr; }
+		if (!fbshots.empty() && t == fbshots.begin()->first) { fbshot(fbshots.begin()->second.c_str()); fbshots.erase(fbshots.begin()); }
 		if (fptrace && t >= fptrace_from) fptrace_line(t);
 		if (wtrace_b && t >= wtrace_a && t <= wtrace_b) {
 			if (t == wtrace_a) dump_tlb(t);
@@ -403,7 +477,7 @@ int main(int argc, char** argv) {
 				out.push_back(c);
 				if (out.size() > 4096) out.erase(0, out.size() - 2048);
 			}
-			if (!typing && step < steps.size() && out.find(steps[step].after) != std::string::npos) {
+			if (!typing && step < steps.size() && steps[step].after[0] != '@' && out.find(steps[step].after) != std::string::npos) {
 				typing = true; next_type = cyc + 200000;
 			}
 			if (!save_on.empty() && out.find(save_on) != std::string::npos) save_pending = true;
@@ -454,6 +528,7 @@ int main(int argc, char** argv) {
 	}
 	fprintf(stderr, "\nromsim: %s after %llu cycles, %llu instructions, %llu interruptions; LED %02X, IAOQ %08X\n",
 	        why, cyc - start, retired, traps, (~top->leds) & 0xFF, top->debug_iaoq_f);
+	if (fbshot_end) fbshot(fbshot_end);
 	if (log) fclose(log);
 	top->final();
 	delete top;

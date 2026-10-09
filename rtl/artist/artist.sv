@@ -114,7 +114,7 @@ module artist (
         st_q <= st_ram[g_addr[7:2]];
     end
 
-    // colour-map staging line (buffer 15) and LUT0
+    // colour-map staging line (buffer 15); LUT0 lives in the display (pal_*)
     logic [23:0] stg_ram [512];
     logic [23:0] stg_q;
     logic        stg_we;
@@ -124,8 +124,6 @@ module artist (
         if (stg_we) stg_ram[stg_wa] <= stg_wd;
         stg_q <= stg_ram[stg_ra];
     end
-    logic [23:0] lut0 [256];
-    always_ff @(posedge clk) if (pal_wr) lut0[pal_addr] <= pal_rgb;
 
     // line buffers: SB = a block move's source row, DB = the destination row
     logic [63:0] sb_ram [256];
@@ -278,49 +276,51 @@ module artist (
     wire         g_engine = g_fb || (g_reg2 && g_we &&
                     ((g_off >= 24'h100400 && g_off < 24'h101000) || g_off[23:6] == 18'h04600 || g_offw == 24'h300118));
 
-    function automatic logic [31:0] reg_rd(input logic [23:0] o);
-        case (o)
-            24'h1007C0: return r4c0;
-            24'h118000, 24'h118004: return dst_ba;
-            24'h118008: return src_ba;
-            24'h11800C: return ctl_plane;
-            24'h118010: return fg;
-            24'h118014: return bg;
-            24'h118018: return pmask;
-            24'h11801C: return ibo;
-            24'h118020: return r580;
-            24'h118024: return binc_mask;
-            24'h118028: return binc_dst;
-            24'h11802C: return binc_src;
-            24'h118034: return r520;
-            24'h300000: return {7'd0, e_busy, 24'd0};
-            24'h300004: return {8'd0, r300004};
-            24'h300008: return 32'h10;
-            24'h300100: return cur_pos;
-            24'h300104: return cur_ctl;
-            24'h300200: return reg19;
-            24'h300204: return r204;
-            24'h300208: return reg20;
-            24'h300218: return misc_video;
-            24'h300238: return {2'b00, r238[29:0]};
-            24'h30023C: return signature(hactive);
-            24'h300300: return pll;
-            24'h300308: return misc_ctrl;
-            24'h380000: return {7'd0, e_busy, 24'd0};
-            24'h380004: return 32'h6CC20006 | {6'd0, 1'b0, be_en, 15'd0, srst, 8'd0};
-            24'h380008: return 32'h10;
-            default:    return o[23:8] == 16'h1000 ? st_q : 32'd0;
+    // register reads (st_q, the state block's word, is valid in G_RD)
+    logic [31:0] reg_rdata;
+    always_comb begin
+        case (g_offw)
+            24'h1007C0: reg_rdata = r4c0;
+            24'h118000, 24'h118004: reg_rdata = dst_ba;
+            24'h118008: reg_rdata = src_ba;
+            24'h11800C: reg_rdata = ctl_plane;
+            24'h118010: reg_rdata = fg;
+            24'h118014: reg_rdata = bg;
+            24'h118018: reg_rdata = pmask;
+            24'h11801C: reg_rdata = ibo;
+            24'h118020: reg_rdata = r580;
+            24'h118024: reg_rdata = binc_mask;
+            24'h118028: reg_rdata = binc_dst;
+            24'h11802C: reg_rdata = binc_src;
+            24'h118034: reg_rdata = r520;
+            24'h300000: reg_rdata = {7'd0, e_busy, 24'd0};
+            24'h300004: reg_rdata = {8'd0, r300004};
+            24'h300008: reg_rdata = 32'h10;
+            24'h300100: reg_rdata = cur_pos;
+            24'h300104: reg_rdata = cur_ctl;
+            24'h300200: reg_rdata = reg19;
+            24'h300204: reg_rdata = r204;
+            24'h300208: reg_rdata = reg20;
+            24'h300218: reg_rdata = misc_video;
+            24'h300238: reg_rdata = {2'b00, r238[29:0]};
+            24'h30023C: reg_rdata = signature(hactive);
+            24'h300300: reg_rdata = pll;
+            24'h300308: reg_rdata = misc_ctrl;
+            24'h380000: reg_rdata = {7'd0, e_busy, 24'd0};
+            24'h380004: reg_rdata = 32'h6CC20006 | {6'd0, 1'b0, be_en, 15'd0, srst, 8'd0};
+            24'h380008: reg_rdata = 32'h10;
+            default:    reg_rdata = g_offw[23:8] == 16'h1000 ? st_q : 32'd0;
         endcase
-    endfunction
+    end
 
     always_ff @(posedge clk) begin
         // operations G_DEC launches, set up after the engine's case below
         logic        lp_put, lp_fill, lp_move;
-        logic [31:0] lp_ba, lp_d, lp_dxy, lp_wh, lp_sxy;
+        logic [31:0] lp_d, lp_dxy, lp_wh, lp_sxy;
         logic [21:0] lp_xy;
         logic [3:0]  lp_be;
         lp_put = 1'b0; lp_fill = 1'b0; lp_move = 1'b0;
-        lp_ba = dst_ba; lp_d = g_wdata; lp_be = g_be; lp_xy = 22'd0;
+        lp_d = g_wdata; lp_be = g_be; lp_xy = 22'd0;
         lp_dxy = dstxy; lp_wh = lenxy; lp_sxy = srcxy;
 
         ack <= 1'b0; err <= 1'b0;
@@ -336,7 +336,13 @@ module artist (
             r4c0 <= 32'd0; r520 <= 32'd0; r580 <= 32'd0;
             dstxy <= 32'd0; lenxy <= 32'd0; srcxy <= 32'd0; xfer <= 32'd0;
             cur_pos <= 32'd0; cur_ctl <= 32'd0; reg19 <= 32'd0; r204 <= 32'd0; reg20 <= 32'd0;
-            misc_video <= 32'd0; r238 <= 32'd0; r23c <= 32'd0; pll <= 32'd0; misc_ctrl <= 32'd0;
+            // MISC_VIDEO's active-size fields come out of reset at 1280 x 1024
+            // (bits 11:8 = 3, 3:0 = 1, as in every 1280-wide record), the rest 0:
+            // the STI keeps its state at (1536, 384) when bits 3:0 != 0, else at
+            // (1536, 776); its cold path writes freq_ref there before the first
+            // mode set, and the PDC's next init_graph reads it back from where the
+            // 1280 mode puts it -- from 0 it would divide by zero (artist.md 1)
+            misc_video <= 32'h0000_0301; r238 <= 32'd0; r23c <= 32'd0; pll <= 32'd0; misc_ctrl <= 32'd0;
             r300004 <= 24'd0; be_en <= 1'b1; srst_cnt <= 4'd0; srst <= 1'b0;
             vr_req <= 1'b0; f_n <= 4'd0; f_rp <= 3'd0; f_wp <= 3'd0; p1_v <= 1'b0;
         end else begin
@@ -457,7 +463,7 @@ module artist (
             end
             G_RD: begin
                 ack <= 1'b1;
-                rdata <= g_fb ? {8'd0, stg_q} : reg_rd(g_offw);
+                rdata <= g_fb ? {8'd0, stg_q} : reg_rdata;
                 g_st <= G_IDLE;
             end
             G_GET: if (e_st == E_IDLE) begin

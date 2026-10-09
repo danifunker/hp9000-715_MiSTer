@@ -1,0 +1,147 @@
+# Artist -- the built-in graphics as built
+
+The 715's Artist (8 planes, 1280x1024, HPA 0xF8000000) as `rtl/artist/artist.sv`.
+What the hardware must do is argued in `docs/review/08-artist-registers.md`
+("08"): this note says how we do it and what is left out. Every
+simplification is in `docs/STUBS.md` (S-023 Artist, S-024 the video path).
+
+Status: milestone 1 (08 6.1, HP's PDC 1.6 boot console) built 2026-10-09.
+
+## 1. Where it sits
+
+```
+ MIOC --gsc (dev 3)--> artist.sv --vr_* (64-bit bursts)--> ddr3_port (board) / sim.v array (simulator)
+                           |  \--pal_* (LUT0 writes)----> MiSTer scaler palette (FB_PAL_*)
+                           \--gfx_on, width, height ----> FB_EN / FB_WIDTH / FB_HEIGHT
+                     the scaler reads the VRAM from DDR3 0x3300_0000 itself (MISTER_FB)
+```
+
+* GSC decode (08 1.1): region 2 0xF8100000-0xF837FFFF and region 3
+  0xF8380000-0xF8380FFF are registers, 0xF9000000-0xF9FFFFFF the frame-buffer
+  window; the HPA page 0xF8000000-0xF80FFFFF (so PDC_ADD_VALID of the HPA
+  fails and the ROM takes its STI from 0xF0024000) and the rest of
+  0xF8000000-0xF8FFFFFF bus-error. `mioc.sv` sends 0xF8000000-0xF9FFFFFF to
+  device 3 when `HAS_ARTIST` (on in the simulator and on the board).
+* Reset: the machine reset or LASI IORESET bit 8 clear (`artist_rst`)
+  clears every register except MISC_VIDEO, which comes out of reset as
+  **0x00000301**; the VRAM is not cleared. The 0x380004 bit 8 reset clears
+  only the bus-error timer enable (08 4.6: HP-UX's warm path needs
+  MISC_VIDEO and the VRAM to survive it).
+* **Why MISC_VIDEO resets to 0x301** (found 2026-10-09 in romsim; 08 1.1
+  said 0, from bit 23 alone): the STI keeps its private state at (1536, 384)
+  when MISC_VIDEO[3:0] != 0 (a 1280-wide mode) and at (1536, 776) otherwise
+  (f0024fe0, recomputed after a mode set at f002560c). Its cold path writes
+  the state -- word 1 = `freq_ref` from page zero 0x610, byte 0 = the
+  friendly-boot countdown, the non-text colours -- *before* the first mode
+  set, at the address the reset value of MISC_VIDEO selects; the mode set
+  then rewrites only byte 1 (monitor index) and word 2 at the new place. The
+  PDC's third `init_graph` call (after `self_test`; reset + ext, so it
+  reprograms the mode explicitly) takes the warm path, reads `freq_ref` from
+  (1540, 384) and divides by `freq_ref >> 8` in the PLL search (`$$divI` at
+  f00253e0). With MISC_VIDEO = 0 at reset that word was never written: the
+  divide trapped (conditional trap 13, chassis 0x2100D, `halt_forever`).
+  A real 2 MB board must therefore leave reset with the size fields of its
+  default 1280-wide mode, 0x301 (bits 11:8 = (1024-1)>>8, 3:0 =
+  (1280/4-1)>>8; bit 23 clear so the first call still takes the cold path).
+  Consequence: a 1024-wide monitor type (BCH `monitor`) moves the state to
+  y = 776 at the first mode set and the third call reads word 1 there,
+  which nothing wrote -- on the board whatever DDR3 holds, in the simulator
+  0 (the trap). Not seen with the default monitor (EE 0x16CA unset).
+
+## 2. VRAM
+
+2048 x 1024 x 8 bits = 2 MB, outside the module on the `vr_*` port: 64-bit
+words, word address `{y[9:0], x[10:3]}`, pixel x in byte lane `x[2:0]`
+(little-endian lanes), i.e. pixel (x, y) at byte `y * 2048 + x`. On the
+board it is DDR3 0x3300_0000 (memory placement rule: VRAM in DDR3), where
+the MiSTer scaler reads it directly as an 8-bit indexed frame buffer with a
+2048-byte stride (the scaler byte-swaps the bridge's 64-bit words, so byte
+address order is pixel order). Buffers 1 and 2 (and every buffer number
+but 6, 7, 13, 15) are this one image (08 0.1).
+
+Port protocol: a read is `vr_req`, `vr_we` = 0, `vr_addr`, `vr_len`
+(1..64) held until `vr_ack`, then `vr_len` beats of `vr_rvalid`. A write is
+raised with beat 0 already valid (`vr_wvalid`, `vr_wdata`, `vr_be`);
+`vr_ack` comes with beat 0's `vr_wready`, then one `vr_wready` per beat.
+`ddr3_port.sv` turns these into DDRAM bursts (a beat's write strobe drops
+if the next one is not ready); `sim.v` serves them from an array with an
+8-cycle read latency; `tb_artist` serves them with random latency, gaps and
+acceptance delays.
+
+## 3. The drawing engine
+
+One operation at a time; busy (0x300000 and 0x380000 bit 24) while it runs.
+Every write is a **row span** `[x0, xend)` on row `y`, repeated over rows:
+
+| Operation | Trigger | Source of each pixel |
+|---|---|---|
+| rectangle fill | 0x100A04 (LENXY + go), 0x100A00 (DSTXY + go) | FG if IBO bit 1 else BG (QEMU's rule; 08 2.3) |
+| block move | 0x100B00 (DSTXY + go), 0x100B04 (LENXY + go) | the source pixel; with DST Ots = 6 (indirect) recoloured: bit = OR(pixel AND plane mask) -> FG/BG (08 2.5) |
+| CPU store to the window | DST_BM_ACCESS (0x118004) | Otc 5: 32 pixels, bit 31-i -> FG/BG (Ots 6) or 1/0; otherwise 4 bytes, honouring the byte enables |
+| BINC data | 0x100620 (then row + 1), 0x100600/0x100604 (then x + 32, 4 or 1 pixels), 0x1005C0 | as a CPU store at the BINC destination address (0x1004A0) plus the row counter |
+
+and every pixel then goes through: enable (in the span; BINC mask 0x118024
+when IBO bit 29, for the CPU/BINC kinds; not a 0-bit when the background is
+transparent, IBO bit 28 or 1), the raster op (IBO[11:8], all 16 X11 codes:
+`out = rop[{~s, ~d}]`) and the plane mask (`d' = d & ~pm | out & pm`).
+
+Per row: if the operation needs the destination (plane mask not 0xFF, or a
+raster op that reads it) the row's words are read into line buffer DB; a
+block move first reads the source row's words into SB; then a pipeline
+reads DB[k] and SB[k + (s >= 0)] (keeping the previous SB word, so each
+destination word sees a source word pair shifted by `s = (sx - dx) mod 8`
+bytes), computes the destination word and its byte enables, pushes it into
+an 8-deep FIFO, and the FIFO drains into write bursts of up to 64 words.
+Whole rows are buffered, so a move within the same rows works in either
+direction; a move down goes bottom-up. Spans and rectangles are clipped to
+the 2048 x 1024 VRAM.
+
+CPU loads from the window (SRC_BM_ACCESS, 0x118008) read the words under
+pixels x..x+3 (or x..x+31) into registers and return 4 bytes (pixel x in
+bits 31:24) or, in the bitmap modes, 32 bits `OR(pixel AND plane mask)`
+(the ROM's VRAM probe, 08 0.3). Buffer 15 reads return the staging entry.
+
+Address decode in the window (08 1.4): BA field A = 3 is byte addressing
+(`x = off[10:2] << 2`, `y = off[20:11]`; the GSC address is word-aligned
+and the byte enables select the pixels), every other A one word per pixel
+position (`x = off[12:2]`, `y = off[23:13]`).
+
+Ordering (08 2.7): a GSC access to the window, a write to 0x100400-0x100FFF,
+0x118000-0x11803F or 0x300118 waits while an operation runs (the MIOC's GSC
+timeout is 4M cycles for Artist, 1023 for everything else); register reads
+and the status/video registers are never held. A write is acknowledged when
+its operation starts, a read when its data is there.
+
+## 4. Colour map and display
+
+Writes through BA buffer 15 (CPU: `FB + 4i` in mode 0x3BA0F000; BINC: Linux's
+0xBBE0F000) store 0x00RRGGBB into a 512-entry staging line at x; a write to
+0x300118 with bit 31 copies `ctl[9:0]` entries (0 = 512) from staging x =
+BINC source (0x100480) bits 12:2 to LUT entries from `ctl[25:16]` on (08 3.1). LUT0
+(entries 0..255) goes out on `pal_*` as it is written: on the board into the
+scaler's palette (`FB_PAL_*`), in the simulator into romsim's copy. LUT1 is
+not kept.
+
+Video registers are storage that reads back exactly (MISC_VIDEO, 08 3.3);
+`gfx_width` = 4 * ((MISC_VIDEO[3:0] << 8 | 0x300200[31:24]) + 1), `gfx_height`
+= (MISC_VIDEO[11:8] << 8 | 0x300208[31:24]) + 1, `gfx_on` = MISC_VIDEO bits
+27 and 25. `HP9K715.sv`: FB_EN while the OSD "Display" says Auto and
+`gfx_on`, or Graphics; FB_FORMAT 8 bpp palette, FB_BASE 0x3300_0000,
+FB_STRIDE 2048. The analog output keeps the serial console (S-024).
+
+The self_test signature 0x30023C returns the constant for the current width
+(S-023); 0x300238's busy bits read 0.
+
+## 5. Tests
+
+* `make -C verilator tb_artist` (`verilator/tb/tb_artist.cpp`): the module
+  alone against a C++ reference model of section 3, the VRAM compared after
+  every operation: decode and bus errors, 0x380004's reset, MISC_VIDEO,
+  the signature, byte merges, the ROM's VRAM probe, byte-mode stores and
+  loads, fills (full screen, plane mask 7, xor, clipped, CONTROL_PLANE),
+  moves in every overlap direction incl. a 1280 x 1008 scroll in the text
+  planes, an xor move, the colour-change move, BINC glyphs (narrow and
+  wide), transparent bitmaps, both CPU read kinds, both LUT-load styles.
+* romsim (`verilator/romsim`): `--arttrace` prints every operation,
+  `--fbshot CYCLE FILE` / `--fbshot-end FILE` write the screen (active area
+  through LUT0) as a PPM.

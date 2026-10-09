@@ -6,10 +6,12 @@
 //  check store in DDR3 (rtl/mister/ddr3_port.sv), the EEPROM's image on an
 //  SD-card slot (rtl/mister/eeprom_save.sv), the LASI RS-232 port on the
 //  MiSTer UART, PS/2 keyboard and mouse from hps_io, the MiSTer clock into
-//  the LASI RTC. Until Artist exists the video shows the RS-232 console
-//  as text (rtl/mister/serial_term.sv) with the front-panel LEDs, and the
-//  MiSTer keyboard types into it (rtl/mister/ps2_ascii.sv) as well as
-//  reaching the LASI PS/2 port.
+//  the LASI RTC. Artist's VRAM is in DDR3 too, and the MiSTer scaler shows
+//  it as an 8-bit indexed frame buffer (MISTER_FB, MISTER_FB_PALETTE) while
+//  the Artist's video is on (OSD "Display"); otherwise the video shows the
+//  RS-232 console as text (rtl/mister/serial_term.sv) with the front-panel
+//  LEDs, and the MiSTer keyboard types into it (rtl/mister/ps2_ascii.sv) as
+//  well as reaching the LASI PS/2 port.
 //
 //  boot.rom (HP's PDC 1.6, games/HP9K715/boot.rom) is loaded by the MiSTer
 //  at core start (ioctl index 0); the machine waits in reset until it has
@@ -69,6 +71,7 @@ localparam CONF_STR = {
 	"O[2:1],Model (on reset),715/64,715/80,715/100;",
 	"O[5:3],RAM (on reset),16MB,32MB,64MB,128MB;",
 	"O[9:8],SDRAM read capture,Edge 3,Edge 2.75,Edge 2.5,Edge 4;",
+	"O[11:10],Display,Auto,Graphics,Serial console;",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"-;",
 	"T[6],TOC (front panel);",
@@ -240,7 +243,18 @@ wire        con_tx, con_rx_full, kbd_ascii_stb;
 wire  [7:0] con_tx_byte, kbd_ascii;
 ps2_ascii ps2_ascii (.clk(clk_sys), .rst(m_reset), .ps2_key(ps2_key), .strobe(kbd_ascii_stb), .ascii(kbd_ascii));
 
-hp715 #(.CLK_HZ(64_000_000)) hp715
+// Artist's VRAM (DDR3 at 0x3300_0000) and its display
+wire        vr_req, vr_we, vr_ack, vr_wvalid, vr_wready, vr_rvalid;
+wire [17:0] vr_addr;
+wire  [6:0] vr_len;
+wire [63:0] vr_wdata, vr_rdata;
+wire  [7:0] vr_be;
+wire        gfx_on, gfx_pal_wr;
+wire [11:0] gfx_width, gfx_height;
+wire  [7:0] gfx_pal_addr;
+wire [23:0] gfx_pal_rgb;
+
+hp715 #(.CLK_HZ(64_000_000), .HAS_ARTIST(1'b1)) hp715
 (
 	.clk(clk_sys), .reset(m_reset),
 	.cfg_model(cfg_model), .cfg_ram_lg(cfg_ram_lg), .sim_cr16_mul(4'd0),
@@ -262,6 +276,11 @@ hp715 #(.CLK_HZ(64_000_000)) hp715
 	.rtc_set(rtc_set), .rtc_value(TIMESTAMP[31:0]),
 	.ee_haddr(ee_haddr), .ee_hwe(ee_hwe), .ee_hwdata(ee_hwdata), .ee_hrdata(ee_hrdata),
 	.ee_dirty(ee_dirty), .ee_dirty_clr(ee_dirty_clr),
+	.vr_req(vr_req), .vr_we(vr_we), .vr_addr(vr_addr), .vr_len(vr_len), .vr_ack(vr_ack),
+	.vr_wvalid(vr_wvalid), .vr_wdata(vr_wdata), .vr_be(vr_be), .vr_wready(vr_wready),
+	.vr_rvalid(vr_rvalid), .vr_rdata(vr_rdata),
+	.gfx_on(gfx_on), .gfx_width(gfx_width), .gfx_height(gfx_height),
+	.gfx_pal_wr(gfx_pal_wr), .gfx_pal_addr(gfx_pal_addr), .gfx_pal_rgb(gfx_pal_rgb),
 	.dbg_ctl(8'd0), .dbg_retire(), .dbg_nullified(), .dbg_iaoq_f(), .dbg_iaoq_b(), .dbg_insn(),
 	.dbg_trap(), .dbg_trap_vec(), .dbg_psw(), .dbg_halted(), .dbg_buserr(), .dbg_buserr_addr(),
 	.dbg_gr(gr), .dbg_ev_valid(dbg_ev_valid), .dbg_ev(dbg_ev)
@@ -307,6 +326,9 @@ ddr3_port ddr3
 	.chk_req(chk_req), .chk_we(chk_we), .chk_addr(chk_addr), .chk_be(chk_be), .chk_wdata(chk_wdata),
 	.chk_ack(chk_ack), .chk_rdata(chk_rdata),
 	.tr_req(tr_req), .tr_idx(tr_idx), .tr_data(tr_data), .tr_ack(tr_ack),
+	.vr_req(vr_req), .vr_we(vr_we), .vr_addr(vr_addr), .vr_len(vr_len), .vr_ack(vr_ack),
+	.vr_wvalid(vr_wvalid), .vr_wdata(vr_wdata), .vr_be(vr_be), .vr_wready(vr_wready),
+	.vr_rvalid(vr_rvalid), .vr_rdata(vr_rdata),
 	.DDRAM_BUSY(DDRAM_BUSY), .DDRAM_BURSTCNT(DDRAM_BURSTCNT), .DDRAM_ADDR(DDRAM_ADDR),
 	.DDRAM_DOUT(DDRAM_DOUT), .DDRAM_DOUT_READY(DDRAM_DOUT_READY), .DDRAM_RD(DDRAM_RD),
 	.DDRAM_DIN(DDRAM_DIN), .DDRAM_BE(DDRAM_BE), .DDRAM_WE(DDRAM_WE)
@@ -345,12 +367,32 @@ eeprom_save #(.CLK_HZ(64_000_000)) eeprom_save
 	.ee_dirty(ee_dirty), .ee_dirty_clr(ee_dirty_clr)
 );
 
-///////////////////////   VIDEO (the serial console)   ////////////
+///////////////////////   VIDEO   ////////////////////////////////
 
-// 640x480 at 21.3 MHz (one pixel every third clock, 680 x 525 total, 59.7
-// Hz): the machine's RS-232 console as text, the front-panel LEDs and the
-// power LED (green while LASI's PWR_ON_L is clear, blinking with FLASH_LED)
-// on a status line -- until Artist exists (STUBS S-018)
+// Artist: the scaler reads the VRAM from DDR3 itself (2048-byte lines, the
+// active width x height from the Artist's timing registers) through LUT0,
+// which Artist writes into the scaler's palette as it loads it. OSD
+// "Display": Auto = Artist while its video is on, else the serial console;
+// Graphics = always Artist; Serial console = never. Only the HDMI output
+// (the scaler) shows Artist; the analog output keeps the serial console
+// (STUBS S-024).
+wire fb_show = status[11:10] == 2'd2 ? 1'b0 : status[11:10] == 2'd1 ? 1'b1 : gfx_on;
+assign FB_EN     = fb_show && gfx_width != 12'd0 && gfx_height != 12'd0;
+assign FB_FORMAT = 5'b00011;          // 8 bpp through the palette
+assign FB_WIDTH  = gfx_width;
+assign FB_HEIGHT = gfx_height;
+assign FB_BASE   = 32'h3300_0000;
+assign FB_STRIDE = 14'd2048;
+assign FB_FORCE_BLANK = 1'b0;
+assign FB_PAL_CLK  = clk_sys;
+assign FB_PAL_ADDR = gfx_pal_addr;
+assign FB_PAL_DOUT = gfx_pal_rgb;
+assign FB_PAL_WR   = gfx_pal_wr;
+
+// The serial console: 640x480 at 21.3 MHz (one pixel every third clock,
+// 680 x 525 total, 59.7 Hz): the machine's RS-232 console as text, the
+// front-panel LEDs and the power LED (green while LASI's PWR_ON_L is clear,
+// blinking with FLASH_LED) on a status line (STUBS S-018)
 reg  [1:0] pdiv = 0;
 reg  [9:0] hc = 0, vc = 0;
 reg  [24:0] blink = 0;

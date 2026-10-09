@@ -236,7 +236,7 @@ module mioc
     logic [63:0] u_rdata;
     logic        u_err;
     logic        u_hi_pending, u_lo_pending;   // GSC words still to do
-    logic [9:0]  tmo;
+    logic [21:0] tmo;            // a GSC timeout: 1023 cycles, 4M for Artist (it stalls while drawing)
 
     // ROM line buffer
     logic [63:0] rb [4];
@@ -432,7 +432,7 @@ module mioc
                 u_cls <= c;
                 u_blk <= blk_decode(u_addr);
                 cnt <= 3'd0;
-                tmo <= 10'd0;
+                tmo <= 22'd0;
                 u_hi_pending <= u_be[7:4] != 4'd0 || u_be == 8'd0;
                 u_lo_pending <= u_be[3:0] != 4'd0;
                 if (u_dma && c != C_MEM) begin
@@ -608,12 +608,12 @@ module mioc
                 end else begin
                     gsc_addr <= {u_addr[31:3], 3'd4}; gsc_be <= u_be[3:0]; gsc_wdata <= u_wdata[31:0];
                 end
-                tmo <= 10'd0;
+                tmo <= 22'd0;
                 st <= S_IGSCW;
             end
             S_IGSCW: begin
-                tmo <= tmo + 10'd1;
-                if (gsc_ack || &tmo) begin
+                tmo <= tmo + 22'd1;
+                if (gsc_ack || (u_cls == C_ART ? &tmo : &tmo[9:0])) begin
                     if (u_hi_pending) begin u_rdata[63:32] <= gsc_rdata; u_hi_pending <= 1'b0; end
                     else              begin u_rdata[31:0]  <= gsc_rdata; u_lo_pending <= 1'b0; end
                     if (!gsc_ack || gsc_err) begin

@@ -101,7 +101,11 @@ Reset: LASI IORESET bit 8 (RST_ARTIST_L, `rtl/lasi/lasi.sv:77`
 `artist_rst`) holds Artist in reset during early boot (f00000d8 writes 0,
 f00001b4 writes 0x1FF). Required reset state [V-derived]: **MISC_VIDEO = 0**
 (bit 23 clear makes the first `init_graph` take the cold path); busy = 0;
-0xF8380004 bit 25 = 0.
+0xF8380004 bit 25 = 0. **Correction 2026-10-09** (romsim, `docs/design/artist.md`
+1): MISC_VIDEO[3:0] must already be non-zero (0x301 = the 1280 x 1024 size
+fields) at reset, or the cold path writes the STI state (freq_ref) at
+(1536, 776) and the PDC's third `init_graph` divides by zero reading it from
+(1536, 384).
 
 ### 1.2 Register window, region 2 (0xF8100000-0xF837FFFF)
 

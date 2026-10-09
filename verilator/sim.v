@@ -5,8 +5,8 @@
 //  `emu` here is the SIMULATION top: the machine (rtl/hp715.sv) with
 //  behavioural memories -- system RAM, the ECC check store, the boot ROM
 //  store (filled through rtl/rom_loader.sv by the ioctl download, so the
-//  STUBS S-011 patch is applied as on the board) -- and a small video
-//  generator that shows the eight front-panel LEDs until Artist exists.
+//  STUBS S-011 patch is applied as on the board), Artist's VRAM -- and a
+//  small video generator that shows the eight front-panel LEDs.
 //  sim_main.cpp (GUI) and romsim/tb_rom.cpp (headless) both drive it.
 //
 //  sim_status: [1:0] model (0 = 715/64, 1 = /80, 2 = /100),
@@ -90,7 +90,16 @@ module emu #(
 	output [31:0] debug_psw,
 	output        debug_halted,
 	output        debug_buserr,
-	output [31:0] debug_buserr_addr
+	output [31:0] debug_buserr_addr,
+
+	// Artist: its video is on, the active size, LUT0 writes (romsim's
+	// --fbshot keeps a copy of LUT0 and reads the VRAM array below)
+	output        gfx_on,
+	output [11:0] gfx_width,
+	output [11:0] gfx_height,
+	output        gfx_pal_wr,
+	output [7:0]  gfx_pal_addr,
+	output [23:0] gfx_pal_rgb
 );
 
 localparam int RAM_WORDS = 1 << (RAM_LG_MAX + 17);     // 64-bit words
@@ -144,7 +153,13 @@ logic [63:0] rom_rdata;
 logic [31:0] gr [32];
 logic [31:0] pcr;
 
-hp715 #(.CLK_HZ(64_000_000), .SIM_FAST(1'b1)) u_hp715 (
+logic        vr_req, vr_we, vr_ack, vr_wvalid, vr_wready, vr_rvalid;
+logic [17:0] vr_addr;
+logic [6:0]  vr_len;
+logic [63:0] vr_wdata, vr_rdata;
+logic [7:0]  vr_be;
+
+hp715 #(.CLK_HZ(64_000_000), .SIM_FAST(1'b1), .HAS_ARTIST(1'b1)) u_hp715 (
 	.clk(clk_sys), .reset(m_reset),
 	.cfg_model(sim_status[1:0]), .cfg_ram_lg(ram_lg), .sim_cr16_mul(sim_status[9:6]),
 	.soft_pwr_n(!soft_power_off), .toc_button(toc_button),
@@ -164,6 +179,11 @@ hp715 #(.CLK_HZ(64_000_000), .SIM_FAST(1'b1)) u_hp715 (
 	.sd_buff_din(sd_buff_din), .sd_buff_wr(sd_buff_wr), .scsi_activity(),
 	.rtc_set(1'b0), .rtc_value(32'd0),
 	.ee_haddr(11'd0), .ee_hwe(1'b0), .ee_hwdata(32'd0), .ee_hrdata(), .ee_dirty(), .ee_dirty_clr(1'b0),
+	.vr_req(vr_req), .vr_we(vr_we), .vr_addr(vr_addr), .vr_len(vr_len), .vr_ack(vr_ack),
+	.vr_wvalid(vr_wvalid), .vr_wdata(vr_wdata), .vr_be(vr_be), .vr_wready(vr_wready),
+	.vr_rvalid(vr_rvalid), .vr_rdata(vr_rdata),
+	.gfx_on(gfx_on), .gfx_width(gfx_width), .gfx_height(gfx_height),
+	.gfx_pal_wr(gfx_pal_wr), .gfx_pal_addr(gfx_pal_addr), .gfx_pal_rgb(gfx_pal_rgb),
 	.dbg_ctl(sim_trace), .dbg_retire(debug_retire), .dbg_nullified(debug_nullified), .dbg_iaoq_f(debug_iaoq_f),
 	.dbg_iaoq_b(debug_iaoq_b), .dbg_insn(debug_insn), .dbg_trap(debug_trap), .dbg_trap_vec(debug_trap_vec),
 	.dbg_psw(debug_psw), .dbg_halted(debug_halted), .dbg_buserr(debug_buserr),
@@ -233,6 +253,44 @@ always_ff @(posedge clk_sys) begin
 	if (reset) r_state <= 2'd0;
 end
 `endif
+
+//----------------------------------------------------------------------------
+// Artist's VRAM, 2 MB (DDR3 on the board): a write burst's beat 0 is taken
+// with the request, the others one a cycle; a read burst's beats start 8
+// cycles after the acknowledge.
+//----------------------------------------------------------------------------
+logic [63:0] vram [262144];
+logic [1:0]  v_st;                // 0 idle, 1 write burst, 2 read burst
+logic [17:0] v_addr;
+logic [6:0]  v_left;
+logic [3:0]  v_wait;
+wire         v_wtake = (v_st == 2'd0 && vr_req && vr_we && vr_wvalid) || (v_st == 2'd1 && vr_wvalid);
+assign vr_wready = v_wtake;
+assign vr_ack = (v_st == 2'd0 && vr_req && (vr_we ? vr_wvalid : 1'b1));
+always_ff @(posedge clk_sys) begin
+	vr_rvalid <= 1'b0;
+	if (v_wtake) for (int b = 0; b < 8; b++) if (vr_be[b]) vram[v_st == 2'd0 ? vr_addr : v_addr][8*b +: 8] <= vr_wdata[8*b +: 8];
+	case (v_st)
+		2'd0: if (vr_req) begin
+			if (vr_we) begin
+				if (vr_wvalid && vr_len != 7'd1) begin v_st <= 2'd1; v_addr <= vr_addr + 18'd1; v_left <= vr_len - 7'd1; end
+			end else begin
+				v_st <= 2'd2; v_addr <= vr_addr; v_left <= vr_len; v_wait <= 4'd8;
+			end
+		end
+		2'd1: if (v_wtake) begin
+			v_addr <= v_addr + 18'd1; v_left <= v_left - 7'd1;
+			if (v_left == 7'd1) v_st <= 2'd0;
+		end
+		default: if (v_wait != 4'd0) v_wait <= v_wait - 4'd1;
+		else begin
+			vr_rvalid <= 1'b1; vr_rdata <= vram[v_addr];
+			v_addr <= v_addr + 18'd1; v_left <= v_left - 7'd1;
+			if (v_left == 7'd1) v_st <= 2'd0;
+		end
+	endcase
+	if (reset) v_st <= 2'd0;
+end
 
 // check store
 logic [31:0] chk [CHK_WORDS];

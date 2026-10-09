@@ -1,6 +1,6 @@
 // The HP 9000/715 machine (docs/design/system.md): the PA-7100LC, the MIOC,
-// LASI, the 8-bit bus (EEPROM, LEDs, board ID) and the WAX stub, on one
-// clock. Memory comes in through plain request/acknowledge ports -- system
+// LASI, the 8-bit bus (EEPROM, LEDs, board ID), the WAX stub and Artist, on
+// one clock. Memory comes in through plain request/acknowledge ports -- system
 // RAM, the ECC check store, the boot ROM store -- that the MiSTer top wires
 // to SDRAM/DDR3 and the simulator to arrays. Nothing here is MiSTer-specific.
 module hp715 #(
@@ -76,8 +76,25 @@ module hp715 #(
     output logic [31:0] ee_hrdata,
     output logic        ee_dirty,
     input  logic        ee_dirty_clr,
+    // Artist's VRAM (rtl/artist/artist.sv: 2048 x 1024 x 8, 64-bit words
+    // {y, x[10:3]}, pixel x in byte lane x[2:0]) and its display outputs
+    output logic        vr_req, vr_we,
+    output logic [17:0] vr_addr,
+    output logic [6:0]  vr_len,
+    input  logic        vr_ack,
+    output logic        vr_wvalid,
+    output logic [63:0] vr_wdata,
+    output logic [7:0]  vr_be,
+    input  logic        vr_wready,
+    input  logic        vr_rvalid,
+    input  logic [63:0] vr_rdata,
+    output logic        gfx_on,             // the Artist's video is enabled
+    output logic [11:0] gfx_width, gfx_height,
+    output logic        gfx_pal_wr,         // LUT0 entry gfx_pal_addr := gfx_pal_rgb
+    output logic [7:0]  gfx_pal_addr,
+    output logic [23:0] gfx_pal_rgb,
     // debug
-    input  logic [7:0]  dbg_ctl,            // simulator trace switches: [0] GSC accesses, [1] I-cache, [2] SCSI
+    input  logic [7:0]  dbg_ctl,            // simulator trace switches: [0] GSC accesses, [1] I-cache, [2] SCSI, [5] Artist
     // debug events for the board's recorder (rtl/mister/trace_ddr3.sv):
     // {type, aux, addr, data}, one per cycle at most
     output logic        dbg_ev_valid,
@@ -403,11 +420,31 @@ module hp715 #(
     end
 `endif
 
-    // Artist (gsc_dev 3) does not exist yet: HAS_ARTIST = 0 makes the MIOC
-    // bus-error its range, so nothing is ever sent to it
+    // Artist (gsc_dev 3); with HAS_ARTIST = 0 the MIOC bus-errors its range,
+    // so nothing is ever sent to it
+    logic        a_ack, a_err;
+    logic [31:0] a_rdata;
+    generate if (HAS_ARTIST) begin : g_artist
+        artist u_artist (
+            .clk(clk), .rst_n(rst_n), .chip_rst(artist_rst), .dbg_trace(dbg_ctl[5]),
+            .req(gsc_req && gsc_dev == 2'd3), .we(gsc_we), .addr(gsc_addr), .be(gsc_be), .wdata(gsc_wdata),
+            .ack(a_ack), .err(a_err), .rdata(a_rdata),
+            .vr_req(vr_req), .vr_we(vr_we), .vr_addr(vr_addr), .vr_len(vr_len), .vr_ack(vr_ack),
+            .vr_wvalid(vr_wvalid), .vr_wdata(vr_wdata), .vr_be(vr_be), .vr_wready(vr_wready),
+            .vr_rvalid(vr_rvalid), .vr_rdata(vr_rdata),
+            .video_on(gfx_on), .hactive(gfx_width), .vactive(gfx_height),
+            .pal_wr(gfx_pal_wr), .pal_addr(gfx_pal_addr), .pal_rgb(gfx_pal_rgb), .busy());
+    end else begin : g_no_artist
+        assign a_ack = 1'b0; assign a_err = 1'b0; assign a_rdata = 32'd0;
+        assign vr_req = 1'b0; assign vr_we = 1'b0; assign vr_addr = 18'd0; assign vr_len = 7'd0;
+        assign vr_wvalid = 1'b0; assign vr_wdata = 64'd0; assign vr_be = 8'd0;
+        assign gfx_on = 1'b0; assign gfx_width = 12'd0; assign gfx_height = 12'd0;
+        assign gfx_pal_wr = 1'b0; assign gfx_pal_addr = 8'd0; assign gfx_pal_rgb = 24'd0;
+    end endgenerate
+
     always_comb begin
-        gsc_ack = x_ack | l_ack | w_ack;
-        gsc_err = w_ack & w_err;
-        gsc_rdata = x_ack ? x_rdata : l_ack ? l_rdata : w_rdata;
+        gsc_ack = x_ack | l_ack | w_ack | a_ack;
+        gsc_err = (w_ack & w_err) | (a_ack & a_err);
+        gsc_rdata = x_ack ? x_rdata : l_ack ? l_rdata : w_ack ? w_rdata : a_rdata;
     end
 endmodule
