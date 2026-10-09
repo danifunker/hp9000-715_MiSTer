@@ -350,6 +350,7 @@ s.4 item 2).
 | U bit / I/O space | always an uncached transaction, the cache is not looked up (ERS s.5.3.6 "D-Cache Miss is signalled for accesses to I/O or U-bit space") | ACD p.3-22 table 3-2 |
 | DMA | not snooped; OS flushes/purges (HP-UX: flush before DMA; Linux: FDC both ways + an uncached window, L pci-dma.c:401-456) | R06 s.3.4 |
 | I-cache vs stores | data stores and D-fills never touch the I-caches; SMC needs FDC + FIC (ROM 0x42097); the ROM's memory test relies on it to keep code planted in the I-cache at PA 0 (BOOT s.4.5) | ACD p.3-16 |
+| Fetch without execute rights | **no fill**: an instruction whose page denies execute at its PL (trap 7) is fetched as a NOP, no I-cache line or UIB burst is read for it. HP-UX 10.20 reads text pages in by DMA under an in-transit mapping with no execute rights and never FICs the frame afterwards (cpu-requests #8); a fill on the trapping fetch kept the frame's old contents | HP-UX `vx_pagein`; 2026-10-09 |
 
 ---
 

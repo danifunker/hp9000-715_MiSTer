@@ -1930,6 +1930,31 @@ def gen_tlbx(rng):
                 to_real(l3) + page_purge(va) + log_words([(0, 6)]) + store_regs([3, 4, 6])
         return lines, [0x55, 8, 0], 0
     vecs.append(gate_vector(6))
+    # a fetch without execute rights (trap 7) must not fill the I-cache: HP-UX 10.20 maps a
+    # page that is being read in (DMA) without execute rights and never FICs the frame after
+    # the DMA; a process that jumps into the page sleeps on trap 7 and later runs what the
+    # I-cache holds. The core used to fill the line on the trapping fetch, so the frame's old
+    # contents ran (csh and grep died of SIGILL on the MiSTer, 2026-10-09). Here: the old words
+    # in RAM, the IMP fetch, the new code into RAM behind the I-cache (stores + FDC, no FIC),
+    # execute rights, the fetch again -- the new code must run (a stale line traps 8)
+    def imp_nofill_vector(k):
+        va, pa = VWIN + 0x1000 * k, PBASE + 0x1000 * k
+        v = rng.randint(-512, 511)
+        STALE = 0x7B01A2F8                  # what csh fetched: a stack address, major opcode 0x1E
+        l1, l2, l3, l4, l5, l6 = lab(), lab(), lab(), lab(), lab(), lab()
+        lines = plant(pa, [STALE] * 8) + page_insert(va, pa, tlb_prot(1 << 4 | 0b1111))   # type 1: no execute
+        lines += ["\tldil\tL%%%sf, %%r14" % l2, "\tldo\tR%%%sf(%%r14), %%r14" % l2, "\tstw\t%r14, 32(%r12)"] + \
+                 to_virt(l1) + li(13, va) + ["\tbv\t%r0(%r13)", "\tnop", "%s:" % l2] + to_real(l3) + \
+                 page_purge(va) + log_words([(0, 7)]) + log_clear()
+        lines += li(13, pa)
+        for i, w in enumerate([LDI_R5(v), BV_R14, NOP, NOP]):
+            lines += li(14, w) + ["\tstw\t%%r14, %d(%%r13)" % (4 * i)]
+        lines += ["\tfdc\t%r0(%r13)", SYNC] + page_insert(va, pa, tlb_prot(AR_RWX))
+        lines += ["\tldil\tL%%%sf, %%r14" % l5, "\tldo\tR%%%sf(%%r14), %%r14" % l5, "\tstw\t%r14, 32(%r12)"] + \
+                 to_virt(l4) + li(13, va) + ["\tbv\t%r0(%r13)", "\tnop", "%s:" % l5, "\tcopy\t%r5, %r3"] + \
+                 to_real(l6) + ["\tstw\t%r0, 32(%r12)"] + page_purge(va) + log_words([(0, 6)]) + store_regs([3, 6, 7])
+        return lines, [v & 0xFFFFFFFF, 0, 7], 1
+    vecs.append(imp_nofill_vector(7))
     group("vfetch", vecs)
     return suite
 

@@ -29,7 +29,9 @@
 // page's translation {space, vpn, rpn, execute rights per PL, AR type}; a
 // fetch outside it asks the core for a TLB lookup (the M stage has priority)
 // and reloads the I-LAB, or marks the instruction ITLB-miss (it then goes
-// down the pipeline as a NOP for W to walk or trap on). The I-LAB is
+// down the pipeline as a NOP for W to walk or trap on). A fetch without
+// execute rights goes down as a NOP marked IMP the same way, and never
+// fills a line. The I-LAB is
 // invalidated by every W redirect, which covers RFI, the TLB and PID
 // writes and PSW.C changes (all serialising).
 module pa_fetch (
@@ -130,12 +132,19 @@ module pa_fetch (
     wire uib_hit  = uib_valid && uib_tag == f1_pa[31:5];
     wire f1_io    = f1_pa[31:28] == 4'hF;
     logic f1_ferr;                      // the I-cache fill that served F1 had a bus error
-    wire f1_ready = f1_valid && (f1_tmiss || (f1_xlat && (f1_io ? uib_hit : ic_hit)));
-    wire [63:0] uib_dw = uib[f1_iaoq_f[4:3]];
-    wire [31:0] f1_word = f1_tmiss ? 32'h0800_0240 : f1_io ? (f1_iaoq_f[2] ? uib_dw[31:0] : uib_dw[63:32]) : ic_word;
-    wire        f1_err  = !f1_tmiss && (f1_io ? uib_err : f1_ferr);
-    wire [3:0]  f1_perr = (f1_io || f1_tmiss) ? 4'd0 : ic_perr;
+    // No execute rights at this PL (trap 7): like an ITLB miss, the
+    // instruction is ready at once as a NOP and fetches nothing -- no I-cache
+    // fill, no UIB burst. HP-UX 10.20 maps a page that is being read in
+    // without execute rights and never FICs the frame after the DMA (it
+    // relies on the I-cache holding none of it); a process that jumped into
+    // the page used to fill the line with the frame's old contents first,
+    // and later ran them (csh and grep dying of SIGILL, 2026-10-09).
     wire        f1_imp  = f1_virt && !f1_tmiss && !ilab_xok[f1_iaoq_f[1:0]];
+    wire f1_ready = f1_valid && (f1_tmiss || (f1_xlat && (f1_imp || (f1_io ? uib_hit : ic_hit))));
+    wire [63:0] uib_dw = uib[f1_iaoq_f[4:3]];
+    wire [31:0] f1_word = (f1_tmiss || f1_imp) ? 32'h0800_0240 : f1_io ? (f1_iaoq_f[2] ? uib_dw[31:0] : uib_dw[63:32]) : ic_word;
+    wire        f1_err  = !f1_tmiss && !f1_imp && (f1_io ? uib_err : f1_ferr);
+    wire [3:0]  f1_perr = (f1_io || f1_tmiss || f1_imp) ? 4'd0 : ic_perr;
 
     // I-cache: look up the instruction entering F1; re-issue F1's lookup when
     // the engine took the read port in between
@@ -258,7 +267,7 @@ module pa_fetch (
             // I-cache line fill: non-speculative, only for a missing, unkilled F1
             if (ic_fill_req) begin
                 if (ic_fill_done) begin ic_fill_req <= 1'b0; f1_ferr <= ic_fill_err; end
-            end else if (f1_valid && f1_xlat && !f1_tmiss && !f1_io && !ic_hit && ic_lk_valid && !ic_busy &&
+            end else if (f1_valid && f1_xlat && !f1_tmiss && !f1_imp && !f1_io && !ic_hit && ic_lk_valid && !ic_busy &&
                          drained && !f2_valid && !redir && !redir_kill_all) begin
                 ic_fill_req <= 1'b1;
                 ic_fill_addr <= f1_iaoq_f;
@@ -268,7 +277,7 @@ module pa_fetch (
 
             // UIB fill: non-speculative, only for a missing, unkilled F1
             if (!burst) begin
-                if (f1_valid && f1_xlat && !f1_tmiss && f1_io && !uib_hit && drained && !f2_valid && !redir && !redir_kill_all) begin
+                if (f1_valid && f1_xlat && !f1_tmiss && !f1_imp && f1_io && !uib_hit && drained && !f2_valid && !redir && !redir_kill_all) begin
                     burst <= 1'b1;
                     uib_valid <= 1'b0;
                     uib_tag <= f1_pa[31:5];
