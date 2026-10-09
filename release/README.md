@@ -1,8 +1,8 @@
-# HP9K715 for MiSTer -- release files (build 12, 2026-10-08)
+# HP9K715 for MiSTer -- release files (build 14, 2026-10-09)
 
 | file | goes to | what |
 |---|---|---|
-| `HP9K715.rbf` | `/media/fat/_Unstable/` (or `_Computer/`) | the core, Quartus build 12 (`docs/design/system.md` 10): 64 MHz, HP-UX 10.20 boots |
+| `HP9K715.rbf` | `/media/fat/_Unstable/` (or `_Computer/`) | the core, Quartus build 14 (`docs/design/system.md` 10): 64 MHz, HP-UX 10.20 boots to `Console Login:` |
 | `boot0.rom` | `/media/fat/games/HP9K715/` | HP's PDC 1.6 boot ROM for the 715/64, 258,728 bytes (`roms/README.md`: HP firmware patch PF_C7X50016, image IMAGE1A's payload). Loaded by the framework at core start; the loader patches one word (STUBS S-011) |
 | `hp715.eep` | `/media/fat/games/HP9K715/` | the EEPROM image (8 KB, `tools/eeprom/mkrelease.sh`): manufacturing and chassis codes off, RS-232 console, primary path scsi.6, autoboot and autosearch on. Mount it in the OSD's EEPROM slot (slot 1); it is written back |
 

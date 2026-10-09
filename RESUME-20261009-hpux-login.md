@@ -47,9 +47,13 @@ system.md 11.
 
 ## Where things stand
 
-* Build 14 (= both fixes) -- see system.md 10 for its timing and whether it
-  reached the login prompt on the board (this file is written while it
-  builds; the end of the session's final message has the result).
+* **Build 14 (= both fixes) reaches `Console Login:` on the board** (16 MB;
+  setup +0.254 ns, hold +0.251 ns, 28,601 ALMs; system.md 10): the whole
+  start-up sequence runs, VUE fails to start its X server (no graphics yet)
+  and offers the console login. `root` asks for a password: the image's
+  (tenox's) root password is not recorded anywhere here, so the login is
+  the user's to do (or, if the user wants, blank it from a single-user boot).
+  `release/` holds build 14.
 * romsim: `obj_dir_rom_fix4` = both fixes; `ck_su16_fix4.sav` (scratch
   `keep/`, session 9348ed10's INDEX.md) at "INIT: SINGLE USER MODE", 16 MB,
   if the boot got there; a single-user boot with the awk test ran on it.
@@ -65,14 +69,12 @@ system.md 11.
 
 ## Next steps
 
-1. **Login.** With build 14 on the board: the start-up sequence should pass
-   swagentd; watch for `Console Login:` (`board.sh console`), log in
-   (`board.sh type 'root\r'`), `uname -a`, `ioscan -f`, `vgdisplay`, `bdf`.
+1. **Login** (the user, with the root password; `board.sh type` types it
+   only if the user asks): then `uname -a`, `ioscan -f`, `vgdisplay`, `bdf`.
    Note what HP-UX complains about (`vxfs fsck: sanity check failed: cannot
    stat #` appeared in the rc output; `lvlnboot: couldn't query physical
    volume /dev/dsk/c0t6d0` in single-user: the device file naming after the
    BDRA rewrite, `disks/README.md`).
-2. **release/**: build 14's rbf + README once the login works.
 3. The 32 MB boot in romsim (`--ram-lg 5`) and a kernel-start checkpoint.
 4. Then `RESUME-20261008-system-next.md` steps 3-5: Artist graphics (STI
    console), the release EEPROM with the graphics console, 82596 LAN,
