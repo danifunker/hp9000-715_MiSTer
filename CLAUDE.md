@@ -4,7 +4,7 @@ An FPGA recreation of the HP 9000 Model 715/64 workstation (PA-7100LC,
 LASI, built-in Artist graphics) for the MiSTer (DE10-Nano, Cyclone V
 5CSEBA6). All RTL is Verilog/SystemVerilog.
 
-**State (2026-10-09, morning):** documentation reviewed; HP's PDC 1.6 ROM
+**State (2026-10-09, afternoon):** documentation reviewed; HP's PDC 1.6 ROM
 obtained, disassembled and analysed (`docs/reference/rom/`); HP-UX 10.20's
 kernel extracted and its use of the hardware analysed (`docs/review/06*`).
 **The PA-7100LC core is built** (`rtl/cpu/`, `docs/design/cpu.md`): pipeline,
@@ -26,7 +26,12 @@ root logs in multi-user at 32 and 64 MB** (root password and lvmtab set up
 single-user, `disks/README.md`); user processes no longer die of SIGILL on
 freshly paged-in text (a no-execute fetch filled the I-cache, `68ec0f6`,
 cpu-requests #8); `release/` = build 15, release notes in the root README.
-Next: `RESUME-20261009-artist.md` (Artist graphics, `docs/review/08`).
+**Artist is built** (`rtl/artist/artist.sv`, `docs/design/artist.md`,
+build 17): VRAM in DDR3 at 0x3300_0000 shown by the MiSTer frame buffer; the
+PDC draws its boot console on it, and with a graphics-console EEPROM **HP-UX
+10.20 boots on the board to its X11 login screen on Artist** (VRAM read over
+/dev/mem). Next: `RESUME-20261009-x11.md` (what HDMI shows, the keyboard in
+set 3, X's text and cursor).
 
 ## The user's process
 
@@ -64,11 +69,13 @@ Next: `RESUME-20261009-artist.md` (Artist graphics, `docs/review/08`).
 | `RESUME-20261007-*.md` | resume prompts: `cpu-64mhz` (pipelined CPU at 64 MHz, owns `rtl/cpu/`; done, 65.1 MHz), `fpu` (the FPU, done to the fp suite), `fpu-finish` (done 2026-10-08: fits 10-15, fpedge model, S-012 measured and left) and `system` (the rest of the machine; superseded by `RESUME-20261008-system.md`) |
 | `RESUME-20261008-*.md` | `system` (superseded), `board-scsi` (the board-only SCSI failure; fixed by `20afb91`), **`system-next`** (the system stream after that: HP-UX in simulation, HP-UX on the board, Artist) and `hpux-kernel` (for Fable: the CPU's I-LAB livelock HP-UX hit, fixed in `5cec6d8`, and the two failures after it -- done: the walker/D-cache bug `665f2e8`, the SCSI MODE SELECT `c969097`, the LVM boot record `a289321`); `hpux-login` (superseded) |
 | `RESUME-20261009-hpux-login.md` | superseded: the two user-mode FP bugs (trap 22 ISR/IOR, fr0 = +0) found and fixed, build 14 reaches `Console Login:` |
-| `RESUME-20261009-artist.md` | **current**: root login, the stale-text SIGILL fix (build 15), the recorder's new events; next the Artist (milestone 1: the ROM's boot console) |
+| `RESUME-20261009-artist.md` | superseded: root login, the stale-text SIGILL fix (build 15); the Artist plan |
+| `RESUME-20261009-x11.md` | **current**: Artist built (builds 16-17), the PDC console and HP-UX's X login on it; next the HDMI check, PS/2 set 3, X text/cursor |
 | `docs/design/cpu-requests.md` | system -> CPU requests between those streams |
 | `docs/reference/rom/` | the ROM analysis: README (index + headline FPGA demands), BOOTFLOW, HARDWARE (incl. the reconstructed MIOC), FIRMWARE |
 | `rtl/cpu/` | the PA-7100LC core, being built: `pa_pkg.sv` (control word), `pa_decode.sv`, the units `pa_alu.sv` (adds/compares/logical/unit/DCOR/DS + conditions), `pa_shift.sv` (shift/extract/deposit), `pa_max1.sv` (MAX-1), `pa_ldst.sv` (address generation, store byte lanes, load extraction) -- unit-tested against every suite vector (`make -C verilator tb_alu tb_shift tb_max1 tb_ldst`); **`pa_cpu.sv` = the pipelined core** (cpu.md 6.8 ports; `pa_fetch.sv` F1/F2 + UIB, `pa_core.sv` D/E/M/W, `pa_regfile.sv` 2R2W MLAB GRs + shadows, `pa_icache.sv` L2-I + L1-I, `pa_dcache.sv` L2-D, `pa_cache_ram.sv`, `pa_tlb.sv` UTLB + block entries, `pa_biu.sv` line + uncached ports, `pa_cr16.sv`; the hardware walker and the I-LAB live in `pa_core`/`pa_fetch`), caches with full diagnose access, virtual mode; **`pa_fpunit.sv` + `pa_fpu.sv` = the FPU** (FR file, FPSR/compare queue/exception registers, the multi-cycle engine; one operation at a time, STUBS S-012; `make -C verilator tb_fpu` is its unit bench); `pa_core_seq.sv` is the sequential **reference** core it is co-simulated against |
 | `rtl/hp715.sv` | **the machine** (`docs/design/system.md`): `pa_cpu` + `mioc.sv` (address decoder, memory blocks, ECC with `mioc_ecc.sv`, MIOC registers, CPU HPA, broadcast), `lasi/` (interrupt controller, misc registers, `lasi_uart.sv` 16550A, `lasi_ps2.sv` ports, `ps2_dev.sv` keyboard/mouse models), `hp_xbus.sv` (EEPROM, LED latch, board ID), `wax_stub.sv`, `rom_loader.sv` (ioctl ROM download + the S-011 patch). RAM, check store and ROM store are ports |
+| `rtl/artist/` | `artist.sv`: the built-in graphics (`docs/design/artist.md`; review 08): registers, the row-span drawing engine on the `vr_*` VRAM port, the LUT load; unit bench `make -C verilator tb_artist` |
 | `rtl/scsi/` | `ncr53c710.sv` (the 53C710 in LASI page 6: SCRIPTS, DMA via the MIOC `dma_*` port) and `scsi_targets.sv` (disks ID 6/5, CD-ROM ID 2 on hps_io block devices) -- written 2026-10-08, not yet exercised (STUBS S-020/S-021) |
 | `rtl/mister/` | board side, all on the 64 MHz clock: `sdram64.sv` (system RAM; `make -C verilator tb_sdram64`), `ddr3_port.sv` (boot ROM + ECC check store in DDR3), `eeprom_save.sv` (EEPROM image on hps_io slot 1). `HP9K715.sv` is the MiSTer top (system.md 9); whole-core builds in system.md 10 |
 | `tests/run-rom.sh` | **the ROM milestone ratchet**: HP's PDC 1.6 on the whole machine to `BOOT_ADMIN>` (~6 min) |
