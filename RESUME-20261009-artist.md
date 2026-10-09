@@ -74,8 +74,10 @@ This replaces `RESUME-20261009-hpux-login.md` (its steps 1 and 3 are done).
 2. The release EEPROM with the graphics console (S-016), then HP-UX's ITE
    (08 6.2), then X (08 6.3: disassemble the X server's Artist driver from
    the image).
-3. Later: 82596 LAN, Harmony, CD audio; CPU: dual-issue self-test patch
-   (S-011), P-016.
+3. Later: 82596 LAN, Harmony, CD audio. CPU items (the dual-issue
+   self-test patch S-011, P-016) only if the user asks.
+4. The Main_MiSTer branch `hp9000715` is local (not pushed); push it only
+   when the user says so.
 
 ## How to work
 
@@ -87,7 +89,7 @@ This replaces `RESUME-20261009-hpux-login.md` (its steps 1 and 3 are done).
 * Board: `tools/mister/board.sh push|load|console|type|shot|setup`; HP-UX
   login root / `password`; single-user: Escape at "Press <ESCAPE>",
   `boot scsi.6 isl`, `hpux -is`.
-* Gates after `rtl/cpu` changes: `tests/run-cputest.sh`, `tests/run-cosim.sh`,
+* Gates after any `rtl/cpu` change the user asked for: `tests/run-cputest.sh`, `tests/run-cosim.sh`,
   `tests/run-rom.sh`. Quartus: `quartus_sh --flow compile HP9K715` with
   `setsid nohup`, ~30 min, one flow at a time (`pgrep -a quartus`).
 * Rules (CLAUDE.md, memory): commit often with explicit paths, every stub in
