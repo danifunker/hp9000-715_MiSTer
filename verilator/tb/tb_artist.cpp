@@ -105,7 +105,8 @@ static void wait_idle() { for (int n = 0; n < 4000000 && t->busy; n++) tick(); }
 // ------------------------------------------------------------- reference model
 struct Regs {
 	uint32_t dst_ba = 0, src_ba = 0, fg = 0, bg = 0, pm = 0, ibo = 0, mask = 0, cp = 0;
-	uint32_t dstxy = 0, lenxy = 0, srcxy = 0, binc_dst = 0, binc_src = 0, r80 = 0, xfer = 0; int frow = 0;
+	uint32_t dstxy = 0, lenxy = 0, srcxy = 0, binc_dst = 0, binc_src = 0, r80 = 0, xfer = 0, r80c = 0; int frow = 0;
+	bool pat = false;        // a dashed vector is open (0x100ECC/EC4 .. a DST write)
 } R;
 static uint32_t curcol[4];
 static uint32_t stg[512];
@@ -182,9 +183,43 @@ static void ref_move(uint32_t sxy, uint32_t dxy, uint32_t wh) {
 		}
 }
 
+// vectors, as X's ngleBiffVectorEmulator steps them (docs/review/09 5.4): plot,
+// then if e >= 0 the minor axis moves and e -= dec, else e += inc; the major axis
+// always moves. The colour bit is ph (TRANSFER_DATA[31], flipped per dash)
+struct Vec { int x = 0, y = 0, e = 0, inc = 0, dec = 0, sx = 1, sy = 1, ph = 1; bool ymaj = false; } V;
+static void vec_draw(int n) {
+	bool transp = (R.ibo >> 28 & 1) || (R.ibo >> 1 & 1);
+	for (; n > 0; n--) {
+		if (!R.cp && image(R.dst_ba) && (V.ph || !transp)) ref_px(V.x, V.y, V.ph ? R.fg : R.bg);
+		bool minor = V.e >= 0;
+		V.e += minor ? -V.dec : V.inc;
+		if (V.ymaj) { V.y += V.sy; if (minor) V.x += V.sx; }
+		else { V.x += V.sx; if (minor) V.y += V.sy; }
+	}
+}
+// from a point to another: returns the major delta
+static int vec_to(uint32_t from, uint32_t to) {
+	int x0 = (int16_t)(from >> 16), y0 = (int16_t)from, dx = (int16_t)(to >> 16) - x0, dy = (int16_t)to - y0;
+	int adx = abs(dx), ady = abs(dy);
+	V.x = x0; V.y = y0; V.sx = dx < 0 ? -1 : 1; V.sy = dy < 0 ? -1 : 1;
+	V.ymaj = ady >= adx;
+	int maj = V.ymaj ? ady : adx, mnr = V.ymaj ? adx : ady;
+	V.e = 2 * mnr - maj - ((V.ymaj ? dx >= 0 : dy >= 0) ? 1 : 0);
+	V.inc = 2 * mnr; V.dec = 2 * (maj - mnr); V.ph = R.xfer >> 31;
+	return maj;
+}
+// from DST with the terms in LEN (dx, dy) and SRC (major-axis sign, error term)
+static void vec_terms() {
+	int dx = (int16_t)(R.lenxy >> 16), dy = (int16_t)R.lenxy, sh = (int16_t)(R.srcxy >> 16);
+	V.x = (int16_t)(R.dstxy >> 16); V.y = (int16_t)R.dstxy; V.sx = dx < 0 ? -1 : 1; V.sy = dy < 0 ? -1 : 1;
+	V.ymaj = sh >= 0;
+	V.e = (int16_t)R.srcxy - ((V.ymaj ? dx >= 0 : dy >= 0) ? 1 : 0);
+	V.inc = 2 * (V.ymaj ? abs(dx) : abs(dy)); V.dec = 2 * abs(sh); V.ph = R.xfer >> 31;
+}
+
 // register writes through the GSC, mirrored into the reference
 static const uint32_t REG = 0xF8000000, FB = 0xF9000000;
-static void wr(uint32_t off, uint32_t d) {
+static void wr(uint32_t off, uint32_t d, unsigned be = 0xF) {
 	switch (off) {
 	case 0x118000: R.dst_ba = R.src_ba = d; break;
 	case 0x118004: R.dst_ba = d; break;
@@ -198,12 +233,12 @@ static void wr(uint32_t off, uint32_t d) {
 	case 0x100480: R.binc_src = d; break;
 	case 0x1004A0: R.binc_dst = d; break;
 	case 0x100080: R.r80 = d; break;
-	case 0x100800: R.dstxy = d; break;
+	case 0x100800: R.dstxy = d; R.pat = false; break;
 	case 0x100804: R.lenxy = d; break;
 	case 0x100808: R.srcxy = d; break;
 	case 0x100820: R.xfer = d; break;
 	case 0x100A04: R.lenxy = d; ref_fill(R.dstxy, R.lenxy); if (R.r80 == 0x7D || R.r80 == 8) R.dstxy += R.lenxy & 0xFFFF; break;
-	case 0x100A00: R.dstxy = d; ref_fill(R.dstxy, R.lenxy); if (R.r80 == 0x7D || R.r80 == 8) R.dstxy += R.lenxy & 0xFFFF; break;
+	case 0x100A00: R.dstxy = d; R.pat = false; ref_fill(R.dstxy, R.lenxy); if (R.r80 == 0x7D || R.r80 == 8) R.dstxy += R.lenxy & 0xFFFF; break;
 	case 0x100A20: R.xfer = d; ref_fill(R.dstxy, R.lenxy); if (R.r80 == 0x7D || R.r80 == 8) R.dstxy += R.lenxy & 0xFFFF; break;
 	case 0x100AA0: case 0x1008A0: {
 		int n = off == 0x100AA0 ? 0 : R.frow, h = R.lenxy & 0xFFFF, x = R.dstxy >> 16, y = R.dstxy & 0xFFFF;
@@ -221,21 +256,23 @@ static void wr(uint32_t off, uint32_t d) {
 		if (n + 2 >= h) R.dstxy += (R.lenxy >> 16) << 16;
 		break;
 	}
-	case 0x100E44: case 0x100E04: {
-		int x0 = R.dstxy >> 16, y0 = R.dstxy & 0xFFFF, x1 = d >> 16, y1 = d & 0xFFFF;
-		int dxa = abs(x1 - x0), dya = abs(y1 - y0), sx = x1 < x0 ? -1 : 1, sy = y1 < y0 ? -1 : 1;
-		int err = dxa - dya, n = std::max(dxa, dya) + (off == 0x100E44), x = x0, y = y0;
-		for (; n > 0; n--) {
-			int b = R.xfer >> 31 & 1;
-			if (b || !((R.ibo >> 28 & 1) || (R.ibo >> 1 & 1))) ref_px(x, y, b ? R.fg : R.bg);
-			int e2 = 2 * err;
-			if (e2 > -dya) { err -= dya; x += sx; }
-			if (e2 < dxa) { err += dxa; y += sy; }
-		}
-		R.dstxy = d;
+	case 0x100E44: case 0x100E04: case 0x100C40: {
+		if (off == 0x100C40) R.dstxy = d;
+		int maj = vec_to(R.dstxy, d);
+		vec_draw(maj + (off != 0x100E04));
+		R.dstxy = d; R.pat = false;
 		break;
 	}
-	case 0x100B00: R.dstxy = d; ref_move(R.srcxy, R.dstxy, R.lenxy); break;
+	case 0x10080C: R.r80c = d; break;
+	case 0x100EC4: vec_to(R.dstxy, d); vec_draw(R.r80c >> 16); R.dstxy = d; R.pat = true; break;
+	case 0x100ECC: R.r80c = d; vec_to(R.dstxy, R.lenxy); vec_draw(d >> 16); R.pat = true; break;
+	case 0x100CCC:
+		R.r80c = d;
+		if (R.pat) V.ph ^= 1;
+		else vec_terms();
+		vec_draw(d >> 16);
+		break;
+	case 0x100B00: R.dstxy = d; R.pat = false; ref_move(R.srcxy, R.dstxy, R.lenxy); break;
 	case 0x100B04: R.lenxy = d; ref_move(R.srcxy, R.dstxy, R.lenxy); break;
 	case 0x1005C0: case 0x100600: case 0x100620: case 0x100640: case 0x100660:
 	case 0x100680: case 0x1006A0: case 0x1006C0: case 0x1006E0: {
@@ -259,7 +296,7 @@ static void wr(uint32_t off, uint32_t d) {
 		}
 		break;
 	}
-	gsc(true, REG + off, d);
+	gsc(true, REG + off, d, be);
 	wait_idle();
 }
 static void fbw(uint32_t off, uint32_t d, unsigned be = 0xF) {
@@ -438,6 +475,60 @@ int main(int argc, char** argv) {
 	wr(0x100800, (1499 << 16) | 99); wr(0x100E04, (1470 << 16) | 60);
 	wr(0x100800, (1500 << 16) | 50); wr(0x100E04, (1530 << 16) | 50); wr(0x100E04, (1530 << 16) | 80); wr(0x100E44, (1500 << 16) | 80);
 	check("lines");
+	// ---- clipped lines (X's ucrxSolid_PolySegment after duClipVector): DST = the first pixel
+	// shown, LEN = (dx, dy), SRC = (|dy| - |dx|, error term), sth 0x100CCC = pixels; each must
+	// draw exactly the tail of the whole line from its k-th pixel
+	{
+		auto wrh = [](uint32_t off, unsigned h) { wr(off, h << 16 | h, 0xC); };
+		struct L { int x0, y0, x1, y1, k; } ls[] = {
+			{1560, 300, 1610, 317, 7}, {1560, 330, 1571, 391, 20}, {1650, 399, 1590, 380, 11},
+			{1650, 300, 1640, 360, 0}, {1580, 420, 1620, 420, 13}, {1600, 430, 1650, 480, 9}};
+		bool same = true;
+		for (const L& l : ls) {
+			// the model's whole line, and its state after k pixels
+			uint32_t a = l.x0 << 16 | l.y0, b = l.x1 << 16 | l.y1;
+			int maj = vec_to(a, b);
+			std::vector<std::pair<int, int>> full;
+			Vec s = V;
+			for (int i = 0; i <= maj; i++) { full.push_back({V.x, V.y}); bool m = V.e >= 0; V.e += m ? -V.dec : V.inc;
+				if (V.ymaj) { V.y += V.sy; if (m) V.x += V.sx; } else { V.x += V.sx; if (m) V.y += V.sy; } }
+			V = s;
+			for (int i = 0; i < l.k; i++) { bool m = V.e >= 0; V.e += m ? -V.dec : V.inc;
+				if (V.ymaj) { V.y += V.sy; if (m) V.x += V.sx; } else { V.x += V.sx; if (m) V.y += V.sy; } }
+			int dx = l.x1 - l.x0, dy = l.y1 - l.y0, bias = (V.ymaj ? dx >= 0 : dy >= 0) ? 1 : 0;
+			uint32_t dst = (uint32_t)V.x << 16 | (V.y & 0xFFFF), len = (uint32_t)(dx & 0xFFFF) << 16 | (dy & 0xFFFF);
+			uint32_t src = (uint32_t)((abs(dy) - abs(dx)) & 0xFFFF) << 16 | ((V.e + bias) & 0xFFFF);
+			// the parametric form, run in the model, must give the same pixels
+			R.dstxy = dst; R.lenxy = len; R.srcxy = src; vec_terms();
+			for (int i = l.k; i <= maj; i++) {
+				if (V.x != full[i].first || V.y != full[i].second) same = false;
+				bool m = V.e >= 0; V.e += m ? -V.dec : V.inc;
+				if (V.ymaj) { V.y += V.sy; if (m) V.x += V.sx; } else { V.x += V.sx; if (m) V.y += V.sy; }
+			}
+			wr(0x100800, dst); wr(0x100804, len); wr(0x100808, src); wrh(0x100CCC, maj + 1 - l.k);
+		}
+		if (!same) { printf("FAIL: the model's parametric vectors leave the whole lines\n"); fails++; }
+		check("clipped lines (DST/LEN/SRC + 0x100CCC)");
+		// ---- dashed lines: a segment (0x100ECC + 0x100CCC dashes; on-off, gaps transparent),
+		// a double dash starting in a gap (opaque: gaps in BG), a dashed polyline (0x10080C +
+		// 0x100EC4 per vertex, TRANSFER_DATA = the phase of the dash it starts in)
+		wr(0x11801C, 0x23000302); wr(0x118010, 0x4E); wr(0x118014, 0x19); wr(0x100080, 0);
+		wr(0x100820, 0xFFFFFFFF); wr(0x100800, (1560 << 16) | 500); wr(0x100804, (1620 << 16) | 530);
+		wrh(0x100ECC, 5); for (int n : {3, 7, 2, 9, 4, 6, 3, 8, 5, 9, 4}) wrh(0x100CCC, n);
+		wr(0x11801C, 0x23000300); wr(0x100820, 0);
+		wr(0x100800, (1640 << 16) | 560); wr(0x100804, (1600 << 16) | 500);
+		wrh(0x100ECC, 2); for (int n : {6, 4, 6, 4, 6, 4, 6, 4, 6, 13}) wrh(0x100CCC, n);
+		wr(0x11801C, 0x23000302); wr(0x100820, 0xFFFFFFFF); wr(0x100800, (1700 << 16) | 500);
+		wrh(0x10080C, 4); wr(0x100EC4, (1740 << 16) | 500); for (int n : {4, 4, 4, 4, 4, 4, 4, 4, 4}) wrh(0x100CCC, n);
+		wr(0x100820, 0); wrh(0x10080C, 3); wr(0x100EC4, (1740 << 16) | 540); for (int n : {4, 4, 4, 4, 4, 4, 4, 4, 4, 2}) wrh(0x100CCC, n);
+		wr(0x100820, 0xFFFFFFFF); wrh(0x10080C, 2); wr(0x100EC4, (1705 << 16) | 560);
+		check("dashed lines (0x100ECC, 0x10080C + 0x100EC4, 0x100CCC dashes)");
+		// ---- points through 0x100C40 (the vector emulator's pixels)
+		wr(0x100080, 0x3003C); wr(0x100804, 0); wr(0x100808, 0);
+		for (int i = 0; i < 6; i++) wr(0x100C40, (uint32_t)(1760 + 3 * i) << 16 | (500 + i * i));
+		wr(0x100080, 0);
+		check("points (0x100C40)");
+	}
 	// ---- a recolouring move from bit plane 2 (SRC BA J = 2)
 	wr(0x11801C, 0x23000300); wr(0x118018, 0xFF); wr(0x118010, 0x77); wr(0x118014, 0x11);
 	wr(0x118008, 0x28A22000); wr(0x118004, 0x2EA02000);

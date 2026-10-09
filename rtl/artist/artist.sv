@@ -170,7 +170,7 @@ module artist (
 
     // ------------------------------------------------------------ the engine
     typedef enum logic [2:0] { K_SOLID, K_BITS, K_BYTES, K_MOVE, K_CURSOR, K_RESTORE } kind_e;
-    typedef enum logic [3:0] { E_IDLE, E_LAUNCH, E_ROW, E_RDS, E_RDD, E_WR, E_NEXT, E_RDG, E_GET, E_LUT, E_LINE } est_e;
+    typedef enum logic [3:0] { E_IDLE, E_LAUNCH, E_ROW, E_RDS, E_RDD, E_WR, E_NEXT, E_RDG, E_GET, E_LUT, E_LSET, E_LINE } est_e;
     est_e        e_st;
     kind_e       e_kind;
     logic [11:0] e_x0, e_xend, e_sx;      // span [x0, xend), source x
@@ -187,18 +187,29 @@ module artist (
     logic        e_font;                  // a font-engine write: the second row takes e_pat2
     logic [31:0] e_pat2;
     logic [4:0]  f_row;                   // the font engine's row counter (0x100AA0 / 0x1008A0)
-    // lines (0x100E44 inclusive, 0x100E04 exclusive): Bresenham from DSTXY, one pixel per span
+    // vectors (09 5.4), one pixel per span: 0x100E44/E04 from DST to a point (with / without
+    // the end pixel), 0x100C40 a point; X's clipped lines start at DST with the terms in
+    // LEN (signed dx, dy) and SRC (major-axis sign, error term) and a count (0x100CCC);
+    // dashed lines start with 0x100ECC (to LEN) or 0x100EC4 (to a vertex; first dash in
+    // 0x10080C) and go on with one 0x100CCC per further dash, the colour bit flipping
     logic        e_line;
+    logic [31:0] r80c;                    // the count register (bits 31:16): 0x10080C, 0x100CCC, 0x100ECC
+    logic        pat_mode;                // a dashed vector is open: 0x100CCC draws its next dash
     // an operation's operands, captured by G_DEC for E_LAUNCH
-    logic        lq_put, lq_fill, lq_move, lq_font, lq_line, lq_incl;
+    logic        lq_put, lq_fill, lq_move, lq_font, lq_line, lq_incl, lq_lto, lq_dash, lq_cont;
     logic [31:0] lq_d, lq_dxy, lq_wh, lq_sxy, lq_xfer, lq_end;
+    logic [15:0] lq_n;
     logic [4:0]  lq_frow;
     logic [21:0] lq_xy;
     logic [3:0]  lq_be;
-    logic [11:0] l_x, l_y;
-    logic signed [13:0] l_err, l_dxa, l_dya;
+    logic [15:0] l_x, l_y;                // the next pixel (two's complement)
+    logic [15:0] l_adx, l_ady;            // |dx|, |dy|
+    logic signed [17:0] l_e, l_inc, l_dec;  // error term; its step on the major axis alone / with the minor one
     logic        l_sx, l_sy;              // 1 = decreasing
-    logic [11:0] l_n;                     // pixels left
+    logic        l_ymaj, l_ph;            // y is the major axis; the colour bit (TRANSFER_DATA[31], flipped per dash)
+    logic        l_lto, l_incl, l_dash;   // to an end point (else the terms in LEN/SRC); with the end pixel; a dash count
+    logic [31:0] l_src;
+    logic [15:0] l_n;                     // pixels left
     logic [9:0]  e_lut_n, e_lut_i, e_lut_off;
     logic [1:0]  e_lut_type;              // 0 colour map, 2 cursor colours (NGLE manual 5), 1/3 dropped
     // per row
@@ -459,13 +470,15 @@ module artist (
 
     always_ff @(posedge clk) begin
         // operations G_DEC launches, set up after the engine's case below
-        logic        lp_put, lp_fill, lp_move, lp_hide, lp_show, lp_font, lp_line, lp_incl;
+        logic        lp_put, lp_fill, lp_move, lp_hide, lp_show, lp_font, lp_line, lp_incl, lp_lto, lp_dash, lp_cont;
         logic [31:0] lp_d, lp_dxy, lp_wh, lp_sxy, lp_xfer, lp_end;
+        logic [15:0] lp_n;
         logic [4:0]  lp_frow;
         logic [21:0] lp_xy;
         logic [3:0]  lp_be;
         lp_put = 1'b0; lp_fill = 1'b0; lp_move = 1'b0; lp_hide = 1'b0; lp_show = 1'b0;
         lp_font = 1'b0; lp_line = 1'b0; lp_incl = 1'b0; lp_frow = 5'd0; lp_end = 32'd0; lp_xfer = xfer;
+        lp_lto = 1'b0; lp_dash = 1'b0; lp_cont = 1'b0; lp_n = 16'd0;
         lp_d = g_wdata; lp_be = g_be; lp_xy = 22'd0;
         lp_dxy = dstxy; lp_wh = lenxy; lp_sxy = srcxy;
 
@@ -480,7 +493,7 @@ module artist (
             pmask <= 32'd0; ibo <= 32'd0;
             binc_src <= 32'd0; binc_dst <= 32'd0; binc_mask <= 32'd0; r100080 <= 32'd0;
             r4c0 <= 32'd0; r520 <= 32'd0; r580 <= 32'd0;
-            dstxy <= 32'd0; lenxy <= 32'd0; srcxy <= 32'd0; xfer <= 32'd0;
+            dstxy <= 32'd0; lenxy <= 32'd0; srcxy <= 32'd0; xfer <= 32'd0; r80c <= 32'd0; pat_mode <= 1'b0;
             cur_pos <= 32'd0; cur_ctl <= 32'd0; reg19 <= 32'd0; r204 <= 32'd0; reg20 <= 32'd0;
             // MISC_VIDEO's active-size fields come out of reset at 1280 x 1024
             // (bits 11:8 = 3, 3:0 = 1, as in every 1280-wide record), the rest 0:
@@ -562,11 +575,12 @@ module artist (
                             ym = g_offw == 24'h100640 || g_offw == 24'h1006C0 || g_offw == 24'h1006E0;
                             binc_dst <= binc_dst + (xp ? dx : 32'd0) - (xm ? dx : 32'd0) + (yp ? dy : 32'd0) - (ym ? dy : 32'd0);
                         end
-                        24'h100800: dstxy <= bmerge(dstxy, g_wdata, g_be);
+                        24'h100800: begin dstxy <= bmerge(dstxy, g_wdata, g_be); pat_mode <= 1'b0; end
                         24'h100804: lenxy <= bmerge(lenxy, g_wdata, g_be);
                         24'h100808: srcxy <= bmerge(srcxy, g_wdata, g_be);
+                        24'h10080C: r80c <= bmerge(r80c, g_wdata, g_be);
                         24'h100820: xfer <= bmerge(xfer, g_wdata, g_be);
-                        24'h100A00: begin lp_dxy = bmerge(dstxy, g_wdata, g_be); dstxy <= lp_dxy; lp_fill = 1'b1; end
+                        24'h100A00: begin lp_dxy = bmerge(dstxy, g_wdata, g_be); dstxy <= lp_dxy; lp_fill = 1'b1; pat_mode <= 1'b0; end
                         24'h100A04: begin lp_wh = bmerge(lenxy, g_wdata, g_be); lenxy <= lp_wh; lp_fill = 1'b1; end
                         24'h100A20: begin xfer <= bmerge(xfer, g_wdata, g_be); lp_xfer = bmerge(xfer, g_wdata, g_be); lp_fill = 1'b1; end
                         24'h100AA0, 24'h1008A0: begin
@@ -579,13 +593,35 @@ module artist (
                             if ({11'd0, n} + 16'd2 >= lenxy[15:0])
                                 dstxy[31:16] <= dstxy[31:16] + lenxy[31:16];
                         end
-                        24'h100E44, 24'h100E04: begin
-                            // a line from DST to this point (E44 with, E04 without the end pixel)
-                            lp_line = 1'b1; lp_end = bmerge(32'd0, g_wdata, g_be);
-                            lp_incl = g_offw == 24'h100E44;
-                            dstxy <= bmerge(32'd0, g_wdata, g_be);
+                        24'h100E44, 24'h100E04, 24'h100C40: begin
+                            // a vector from DST to this point (E44 with, E04 without the end
+                            // pixel); C40 plots the point (X's software vector emulator); DST := it
+                            lp_line = 1'b1; lp_lto = 1'b1; lp_end = bmerge(32'd0, g_wdata, g_be);
+                            lp_incl = g_offw != 24'h100E04;
+                            if (g_offw == 24'h100C40) lp_dxy = lp_end;
+                            dstxy <= lp_end; pat_mode <= 1'b0;
                         end
-                        24'h100B00: begin lp_dxy = bmerge(dstxy, g_wdata, g_be); dstxy <= lp_dxy; lp_move = 1'b1; end
+                        24'h100EC4: begin
+                            // a dashed polyline's next vertex: its first dash, 0x10080C pixels
+                            lp_line = 1'b1; lp_lto = 1'b1; lp_dash = 1'b1; lp_end = bmerge(32'd0, g_wdata, g_be);
+                            lp_n = r80c[31:16];
+                            dstxy <= lp_end; pat_mode <= 1'b1;
+                        end
+                        24'h100ECC: begin
+                            // a dashed segment from DST to LEN: its first dash
+                            logic [31:0] v;
+                            v = bmerge(r80c, g_wdata, g_be); r80c <= v;
+                            lp_line = 1'b1; lp_lto = 1'b1; lp_dash = 1'b1; lp_end = lenxy; lp_n = v[31:16];
+                            pat_mode <= 1'b1;
+                        end
+                        24'h100CCC: begin
+                            // the next dash of an open dashed vector, else a vector from DST
+                            // with the terms in LEN and SRC (X's clipped lines)
+                            logic [31:0] v;
+                            v = bmerge(r80c, g_wdata, g_be); r80c <= v;
+                            lp_line = 1'b1; lp_cont = pat_mode; lp_n = v[31:16];
+                        end
+                        24'h100B00: begin lp_dxy = bmerge(dstxy, g_wdata, g_be); dstxy <= lp_dxy; lp_move = 1'b1; pat_mode <= 1'b0; end
                         24'h100B04: begin lp_wh = bmerge(lenxy, g_wdata, g_be); lenxy <= lp_wh; lp_move = 1'b1; end
                         24'h118000: begin dst_ba <= bmerge(dst_ba, g_wdata, g_be); src_ba <= bmerge(src_ba, g_wdata, g_be); end
                         24'h118004: dst_ba <= bmerge(dst_ba, g_wdata, g_be);
@@ -707,21 +743,44 @@ module artist (
             end
             E_GET: e_st <= E_IDLE;              // get_data is ready; G_GET answers
             E_LAUNCH: e_st <= E_IDLE;           // the launch blocks below choose the next state
-            // a line's next pixel: a one-pixel span, then step
+            // a vector's terms (the launch latched |dx|, |dy| and the signs): the major
+            // axis, the error term -- 2*minor - major to an end point, SRC[15:0] as loaded --
+            // less one when the minor axis steps forward (X's ngleBiffVectorEmulator,
+            // which reproduces the hardware for the vectors it cannot give it)
+            E_LSET: begin
+                logic        ymaj;
+                logic [15:0] maj, mnr, sh;
+                logic signed [17:0] e;
+                ymaj = l_lto ? l_ady >= l_adx : !l_src[31];
+                maj = ymaj ? l_ady : l_adx;
+                mnr = ymaj ? l_adx : l_ady;
+                sh = l_src[31] ? 16'(-l_src[31:16]) : l_src[31:16];
+                e = l_lto ? $signed({1'b0, mnr, 1'b0}) - $signed({2'b00, maj}) : 18'($signed(l_src[15:0]));
+                if (ymaj ? !l_sx : !l_sy) e = e - 18'sd1;
+                l_ymaj <= ymaj; l_e <= e;
+                l_inc <= {1'b0, mnr, 1'b0};
+                l_dec <= l_lto ? {1'b0, maj - mnr, 1'b0} : {1'b0, sh, 1'b0};
+                if (l_lto && !l_dash) l_n <= maj + {15'd0, l_incl};
+                e_st <= ctl_plane == 32'd0 && ba_image(dst_ba) ? E_LINE : E_IDLE;
+            end
+            // a vector's next pixel: a one-pixel span, then the step (the minor axis
+            // moves while the error term is >= 0)
             E_LINE: begin
-                if (l_n == 12'd0) begin e_line <= 1'b0; e_st <= E_IDLE; end
+                if (l_n == 16'd0) begin e_line <= 1'b0; e_st <= E_IDLE; end
                 else begin
-                    logic signed [14:0] e2;
-                    logic signed [13:0] err;
-                    e_x0 <= l_x; e_xend <= l_x + 12'd1; e_y <= l_y[10:0];
-                    e_rows <= l_x < 12'd2048 && l_y < 12'd1024 ? 11'd1 : 11'd0;
+                    e_x0 <= l_x[11:0]; e_xend <= l_x[11:0] + 12'd1; e_y <= l_y[10:0];
+                    e_rows <= l_x[15:11] == 5'd0 && l_y[15:10] == 6'd0 ? 11'd1 : 11'd0;
+                    e_pat <= {l_ph, 31'd0};
                     e_st <= E_ROW;
-                    l_n <= l_n - 12'd1;
-                    e2 = {l_err, 1'b0};
-                    err = l_err;
-                    if (e2 > -$signed({1'b0, l_dya})) begin err = err - l_dya; l_x <= l_sx ? l_x - 12'd1 : l_x + 12'd1; end
-                    if (e2 < $signed({1'b0, l_dxa})) begin err = err + l_dxa; l_y <= l_sy ? l_y - 12'd1 : l_y + 12'd1; end
-                    l_err <= err;
+                    l_n <= l_n - 16'd1;
+                    l_e <= l_e[17] ? l_e + l_inc : l_e - l_dec;
+                    if (l_ymaj) begin
+                        l_y <= l_sy ? l_y - 16'd1 : l_y + 16'd1;
+                        if (!l_e[17]) l_x <= l_sx ? l_x - 16'd1 : l_x + 16'd1;
+                    end else begin
+                        l_x <= l_sx ? l_x - 16'd1 : l_x + 16'd1;
+                        if (!l_e[17]) l_y <= l_sy ? l_y - 16'd1 : l_y + 16'd1;
+                    end
                 end
             end
             // compute and write back the destination words
@@ -830,7 +889,8 @@ module artist (
             // their operands now, set them up next cycle (E_LAUNCH; split for timing)
             if (lp_put || lp_fill || lp_move || lp_font || lp_line) begin
                 lq_put <= lp_put; lq_fill <= lp_fill; lq_move <= lp_move; lq_font <= lp_font; lq_line <= lp_line;
-                lq_incl <= lp_incl; lq_d <= lp_d; lq_dxy <= lp_dxy; lq_wh <= lp_wh; lq_sxy <= lp_sxy;
+                lq_incl <= lp_incl; lq_lto <= lp_lto; lq_dash <= lp_dash; lq_cont <= lp_cont; lq_n <= lp_n;
+                lq_d <= lp_d; lq_dxy <= lp_dxy; lq_wh <= lp_wh; lq_sxy <= lp_sxy;
                 lq_xfer <= lp_xfer; lq_end <= lp_end; lq_frow <= lp_frow; lq_xy <= lp_xy; lq_be <= lp_be;
                 e_st <= E_LAUNCH;
             end
@@ -940,21 +1000,27 @@ module artist (
                 e_st <= E_ROW;
             end
             if (e_st == E_LAUNCH && lq_line) begin
-                // Bresenham from DST to lq_end, one pixel at a time (E_LINE)
-                logic [11:0] x0, y0, x1, y1;
-                logic [11:0] dxa, dya;
-                x0 = lq_dxy[27:16]; y0 = lq_dxy[11:0]; x1 = lq_end[27:16]; y1 = lq_end[11:0];
-                dxa = x1 >= x0 ? x1 - x0 : x0 - x1;
-                dya = y1 >= y0 ? y1 - y0 : y0 - y1;
-                e_kind <= K_SOLID; e_pat <= xfer; e_line <= 1'b1;
-                l_x <= x0; l_y <= y0; l_sx <= x1 < x0; l_sy <= y1 < y0;
-                l_dxa <= {2'b00, dxa}; l_dya <= {2'b00, dya};
-                l_err <= $signed({2'b00, dxa}) - $signed({2'b00, dya});
-                l_n <= (dxa > dya ? dxa : dya) + {11'd0, lq_incl};
-                e_rows <= 11'd0;
-                e_st <= ctl_plane == 32'd0 && ba_image(dst_ba) ? E_LINE : E_IDLE;
+                // a vector: its deltas now, its terms in E_LSET, then a pixel at a time (E_LINE)
+                e_kind <= K_SOLID; e_line <= 1'b1; e_rows <= 11'd0;
+                l_n <= lq_n; l_lto <= lq_lto; l_incl <= lq_incl; l_dash <= lq_dash;
+                if (lq_cont) begin
+                    // the next dash: the colour bit flips, the vector goes on where it stopped
+                    l_ph <= !l_ph;
+                    e_st <= ctl_plane == 32'd0 && ba_image(dst_ba) ? E_LINE : E_IDLE;
+                end else begin
+                    logic [15:0] dx, dy;
+                    dx = lq_lto ? lq_end[31:16] - lq_dxy[31:16] : lq_wh[31:16];
+                    dy = lq_lto ? lq_end[15:0] - lq_dxy[15:0] : lq_wh[15:0];
+                    l_x <= lq_dxy[31:16]; l_y <= lq_dxy[15:0];
+                    l_sx <= dx[15]; l_sy <= dy[15];
+                    l_adx <= dx[15] ? 16'(-dx) : dx;
+                    l_ady <= dy[15] ? 16'(-dy) : dy;
+                    l_src <= lq_sxy; l_ph <= lq_xfer[31];
+                    e_st <= E_LSET;
+                end
 `ifdef SIMULATION
-                if (dbg_trace) $display("artist: line %0d,%0d -> %0d,%0d %s", x0, y0, x1, y1, lq_incl ? "incl" : "excl");
+                if (dbg_trace) $display("artist: line %s %0d,%0d %s %08x n %0d", lq_cont ? "dash" : lq_lto ? "to" : "terms",
+                                        lq_dxy[31:16], lq_dxy[15:0], lq_lto ? "->" : "len", lq_lto ? lq_end : lq_wh, lq_n);
 `endif
             end
         end

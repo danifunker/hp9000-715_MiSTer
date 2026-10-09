@@ -92,7 +92,7 @@ Every write is a **row span** `[x0, xend)` on row `y`, repeated over rows:
 | CPU store to the window | DST_BM_ACCESS (0x118004) | Otc 5: 32 pixels, bit 31-i -> FG/BG (Ots 6) or 1/0, 8 pixels per enabled byte lane (X writes glyph rows with `sth`); otherwise 4 bytes, honouring the byte enables |
 | BINC data | 0x1005C0/0x100600/0x100604 (+x), 0x100620 (+y), 0x100640 (-y), 0x100660 (-x), 0x100680 (+x+y), 0x1006A0 (-x+y), 0x1006C0 (+x-y), 0x1006E0 (-x-y) | as a CPU store at the BINC destination address (0x1004A0), which then moves by the pixels a word carries (32, 4 or 1) and/or a line (NGLE manual 4) |
 | font engine | 0x100AA0 (row counter := 0), 0x1008A0 | two 16-pixel rows a word (bits 31:16 row n, 15:0 row n+1) at DST + n, rows >= LEN h dropped; after the last row DST x += LEN w (review 09 2.3) |
-| line | 0x100E44 (end included), 0x100E04 (end excluded) | Bresenham from DST to the written point, one one-pixel span per pixel (`E_LINE`); DST := the end point (09 5.4) |
+| vector | 0x100E44 (end included), 0x100E04 (end excluded): from DST to the written point, DST := it; 0x100C40: the written point alone (DST := it); 0x100CCC (`sth`, count in bits 31:16) outside a dashed vector: count pixels from DST with the terms in LEN (signed dx, dy) and SRC (bits 31:16 = \|dy\| - \|dx\|, its sign the major axis; 15:0 = the error term), X's clipped lines; dashed: 0x100ECC (first dash count) from DST to LEN, 0x10080C (count) + 0x100EC4 (vertex, DST := it) for polylines, then one 0x100CCC per further dash until a DST write | one one-pixel span per pixel (`E_LSET` the terms, `E_LINE` the pixels), stepped as X's `ngleBiffVectorEmulator` (09 5.4): plot; if e >= 0 the minor axis moves and e -= dec, else e += inc; the major axis moves. To an end point e = 2*minor - major, inc = 2*minor, dec = 2*(major - minor); from the terms e = SRC[15:0], dec = 2\|SRC[31:16]\|; e less 1 when the minor axis steps forward (x-major: dy >= 0, y-major: dx >= 0). Colour bit TRANSFER_DATA[31] at the start, flipped by each further dash -> FG/BG |
 
 and every pixel then goes through: enable (in the span; BINC mask 0x118024
 when IBO bit 29, for the CPU/BINC kinds; not a 0-bit when the background is
@@ -191,7 +191,10 @@ The self_test signature 0x30023C returns the constant for the current width
   loads, fills (full screen, plane mask 7, xor, clipped, CONTROL_PLANE),
   moves in every overlap direction incl. a 1280 x 1008 scroll in the text
   planes, an xor move, the colour-change move, BINC glyphs (narrow and
-  wide), transparent bitmaps, both CPU read kinds, both LUT-load styles.
+  wide), transparent bitmaps, both CPU read kinds, both LUT-load styles,
+  `sth` glyph rows, the font engine, vectors (whole, clipped -- each must
+  draw the tail of the whole line --, dashed segments, a double dash, a
+  dashed polyline, points), J-plane moves, the cursor.
 * romsim (`verilator/romsim`): `--arttrace` prints every operation,
   `--fbshot CYCLE FILE` / `--fbshot-end FILE` write the screen (active area
   through LUT0) as a PPM.

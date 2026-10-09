@@ -498,7 +498,76 @@ FG; then
   0x100CCC = pixel count** in bits 31:16 [X `ucrx:0xe3d0-0xe3e4`];
   hard cases fall back to `ngleBiffVectorEmulator` (software).
 * Dashed lines (`ngleSolidDashed_*`): 0x100080 = 0, `sth` 0x100CCC and
-  0x100ECC (PATTERN_LINE_START), BINC 0x1004A0 — not traced.
+  0x100ECC (PATTERN_LINE_START), BINC 0x1004A0 — see 5.5.
+
+### 5.5 The vector terms, clipped and dashed lines (traced 2026-10-09, second session)
+
+**Clipped segments** [X `ucrx:0xdcb4-0xdd08`, `0xe240-0xe3e4`]. With
+dx = x2 - x1, dy = y2 - y1 (signed), adx/ady their magnitudes, the server
+writes:
+
+* 0x100800 = the first pixel inside the clip box `(x << 16) | y`;
+* **0x100804 = `(dx << 16) | (dy & 0xFFFF)`** — the signed deltas of the whole
+  segment (r12/r13, kept across the call to `duClipVector`);
+* **0x100808 = `((ady - adx) << 16) | (e & 0xFFFF)`** — the high half's
+  sign gives the major axis (`< 0` x-major; `ady >= adx` is y-major, ties
+  included), the low half the error term at the first pixel shown;
+* `sth` 0x100CCC = the pixel count.
+
+Both halves are range-checked to ±16383 [X `0xe2bc-0xe2d0`, `0xe30c-0xe320`;
+r7 = 0xFFFFC000, r8 = 0x3FFF]; out of range, the same seven values go to
+`ngleBiffVectorEmulator` [X `crxutils:0x29394-0x29620`] in a struct
+{regs, 0x30000, -1, 1, x, y, dx, dy, ady - adx, e, fifo} with the count —
+**the emulator draws what the hardware would**, one point at a time through
+**0x100C40** (`stw (x << 16) | y`, after 0x100804 = 0x100808 = 0 and
+0x100080 = 0x3003C). Its loop, x-major (y-major mirrored):
+
+```
+e  = SRC.lo - (dy >= 0)              y-major: - (dx >= 0)
+inc = 2*ady, dec = 2*(adx - ady)     = 2*|SRC.hi|   (y-major: inc = 2*adx)
+repeat count:                        (at most adx, then the end point if flag 0xC)
+    plot (x, y)
+    if e >= 0: y += sy; e -= dec
+    else:      e += inc
+    x += sx
+```
+
+For an unclipped segment the server's value is `e = 2*minor - major`
+(`-f8(sp)` = major + bias before the clipper, the bias taken off after it,
+then `2*minor - e`), so the hardware's own vectors (0x100E04/E44) are
+assumed to start the same way: e = 2*minor - major, less one when the minor
+axis steps forward — X11's zero-width-line tie rule for those octants.
+
+**Dashed segments** [X `crxutils:ngleSolidDashed_PolySegment` 0x25778,
+`0x26490-0x26930`]: the dash list is walked in software; a two-node ring
+{~0, 0} holds the on/off state of the current dash; per segment 0x1004A0 = 0,
+**TRANSFER_DATA = ~0 or 0** (the dash the segment starts in), 0x100800 =
+start, **0x100804 = the end point**, then **`sth` 0x100ECC = the first
+(possibly partial) dash's length** and **one `sth` 0x100CCC per further dash**,
+the last cut to what is left of the segment (the server sums the lengths to
+the segment's pixel count: `max(adx, ady)` plus one unless CapNotLast). So:
+0x100ECC starts a vector from DST to LEN and draws that many pixels with
+colour bit TRANSFER_DATA[31]; each 0x100CCC draws the next dash where the
+last one stopped with the colour bit flipped (0 -> BG, or nothing with a
+transparent IBO: on-off vs double dash). QEMU (`draw_line_pattern_*`)
+models the same: its pattern mode is set by 0x100ECC and cleared by a
+DST write — which tells it apart from the clipped form above.
+
+**Dashed polylines** [X `ngleSolidDashed_Polylines` 0x27250,
+`0x286b4-0x28820`]: per vertex **`sth` 0x10080C = the first dash's length,
+then 0x100EC4 = the vertex**, then 0x100CCC per further dash; between
+vertices TRANSFER_DATA is rewritten when the next vertex starts in another
+dash. 0x100EC4 must leave DST at the vertex (no DST write between vertices).
+
+**The address pattern**, as far as these ports go [I]: `0x100800 | op << 8 |
+f << 6 | reg << 2` with reg 0 DST, 1 LEN, 2 SRC, 3 the count (0x10080C),
+op 2 fill, 3 move, 4 a vector from the current terms (0xC40, 0xCCC),
+6 a vector to an end point (0xE04, 0xE44, 0xEC4, 0xECC), f = 1 the end pixel
+included (0x44, 0x40), f = 3 dashed / counted (0xC4, 0xCC).
+
+`render_vector`/`ucrxRendCursor` in `ucrx` (software cursors of other
+boards) use 0x100E44 and 0x100CCC too; `ucrxInitSprite`'s 0xCC0-0xCCC
+stores go to the screen private (r3 there is `pScreenPriv`), not to Artist.
 
 ---------------------------------------------------------------------------
 
@@ -534,8 +603,9 @@ FG; then
    start fill), and the DST.y advance for 0x100080 = 0x08 as well as 0x7D
    (5.1).
 4. **Lines**: 0x100E44 (inclusive) and 0x100E04 (exclusive), Bresenham
-   from DST in FG through ROP/plane mask, then DST := end. Later: the
-   0x100CCC parametric form and dashed lines 0x100ECC.
+   from DST in FG through ROP/plane mask, then DST := end; the 0x100CCC
+   parametric form, dashed lines (0x100ECC, 0x10080C + 0x100EC4, 0x100CCC)
+   and 0x100C40 points (5.5).
 5. **Cursor position/enable**: `x = 4*POS[31:19] + POS[17:16] + 16 - 4*hbp`,
    `y = vactive - 1 - POS[15:0] - CTRL[5:0]`, shown while CTRL[7]; mask 0 =
    transparent (3.4, 3.5).
@@ -564,7 +634,7 @@ FG; then
 | 3 | fill colour = IBO bit 1 ? FG : BG, TRANSFER_DATA unused (`artist.sv:737`; artist.md 3; 08 2.3/2.4) | colour from TRANSFER_DATA bits; screen clear with IBO bit 1 clear and only FG set; opaque stipples (5.1) | clear uses the stale BG; stipples wrong |
 | 4 | 0x100A20 not decoded | stipple/tile fills, one row per write (5.1) | stippled fills missing |
 | 5 | DST.y advance only for 0x100080 = 0x7D (`artist.sv:798`) | also 0x08 (5.1) | pattern rows drawn on one line |
-| 6 | 0x100E04, 0x100E44, 0x100CCC, 0x100ECC not decoded | all line drawing (5.4) | lines missing |
+| 6 | 0x100E04, 0x100E44, 0x100CCC, 0x100ECC not decoded | all line drawing (5.4, 5.5) | lines missing (all built since: `8944cfe` E04/E44, then 5.5's forms) |
 | 7 | cursor `x = 4*xhi + 23 - 4*hbp + xlo - CTRL[7:4]`, `y = vactive - POS.y - CTRL[3:0]` (`artist.sv:254-257`, QEMU's formula; 08 1.2.5/3.6 "bits 7:4 / 3:0 hotspot offsets") | CTRL = 0x80 \| yoff (bits 5:0); `x = 4*xhi + xlo + 16 - 4*hbp`, `y = vactive - 1 - POS.y - yoff` (3.4) | pointer 1 px left, 1 row low; 1..3 px further left and wrong rows when it is clipped ≥ 16 rows at the top |
 | 8 | cursor pixel = image ? colour 3 : colour 2 where image or mask (`artist.sv:332-333`) | mask 0 = transparent (3.5) | source bits outside the mask shown |
 | 9 | Otc32 read bit = OR(pixel AND plane mask) (`artist.sv:348`, recolouring move `:323`; S-023; 08 2.2) | SBA J field selects the plane (5.2) | CopyPlane / XYPixmap GetImage of planes ≠ 0 wrong. The ROM uses J = 0 (probe: pixels 0x00/0xFF, unaffected; colour block_move: text colours with bit 0 clear would read as 0 — check against the ROM before changing) |
