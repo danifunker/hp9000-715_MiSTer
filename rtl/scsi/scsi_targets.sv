@@ -440,9 +440,13 @@ module scsi_targets #(
                 T_DOUT: begin
                     if (ack && req) begin
                         req <= 1'b0;
+                        // MODE SELECT's parameter bytes are counted by d_left alone: chunk
+                        // stays 0 so the completion test below holds after the last byte
+                        // (decrementing it here wrapped it to 0xFE8 and the target asked
+                        // for DATA_OUT forever; HP-UX 10.20's first MODE SELECT then looped
+                        // on phase-mismatch interrupts, 2026-10-08)
                         if (x_blocks == 0 && d_left != 0) d_left <= d_left - 16'd1;      // MODE SELECT
-                        else begin b_we <= 1'b1; b_wdata <= idata; end
-                        chunk <= chunk - 12'd1;
+                        else begin b_we <= 1'b1; b_wdata <= idata; chunk <= chunk - 12'd1; end
                     end else if (!req) begin
                         if (b_we) b_addr <= b_addr + 11'd1;
                         if (x_blocks == 0 && d_left == 0 && chunk == 0 && !b_we) go_status(8'h00);
