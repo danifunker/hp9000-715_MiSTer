@@ -46,7 +46,15 @@ module pa_cpu
     output logic [31:0] dbg_psw,
     output logic        dbg_halted,
     output logic        dbg_fp_stall,
-    output logic [31:0] dbg_gr [32]
+    output logic [31:0] dbg_gr [32],
+    // cache maintenance as the caches finish it (the board's event recorder):
+    // FDC/FDCE/PDC (dbg_cop_i = 0) or FIC/FICE (1), the VA and the physical
+    // page the line was compared against
+    output logic        dbg_cop_valid,
+    output logic        dbg_cop_i,
+    output logic [3:0]  dbg_cop,
+    output logic [31:0] dbg_cop_addr,
+    output logic [19:0] dbg_cop_rpn
 );
     // caches
     logic        dc_ready, dc_lk_en, dc_m_hit, dc_m_dirty, dc_st_we, dc_op_req, dc_op_done, dc_op_err, dc_op_hit;
@@ -205,6 +213,16 @@ module pa_cpu
         .dbg_gr_we(dbg_gr_we), .dbg_gr_num0(dbg_gr_num0), .dbg_gr_num1(dbg_gr_num1),
         .dbg_gr_data0(dbg_gr_data0), .dbg_gr_data1(dbg_gr_data1), .dbg_psw(dbg_psw), .dbg_halted(dbg_halted), .dbg_fp_stall(dbg_fp_stall),
         .dbg_gr(dbg_gr));
+
+    always_comb begin
+        dbg_cop_valid = 1'b0; dbg_cop_i = 1'b0;
+        dbg_cop = dc_op; dbg_cop_addr = dc_op_addr; dbg_cop_rpn = dc_op_rpn;
+        if (dc_op_done && (dc_op == DC_FDC || dc_op == DC_FDCE || dc_op == DC_PDC)) dbg_cop_valid = 1'b1;
+        else if (ic_op_done && (ic_op == IC_FIC || ic_op == IC_FICE)) begin
+            dbg_cop_valid = 1'b1; dbg_cop_i = 1'b1;
+            dbg_cop = ic_op; dbg_cop_addr = ic_op_addr; dbg_cop_rpn = ic_op_rpn;
+        end
+    end
 
     pa_fpunit u_fpu (
         .clk(clk), .rst_n(rst_n),

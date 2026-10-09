@@ -1175,6 +1175,7 @@ clock crossing, the memory map, MIOC registers and the CPU HPA page.
 | dbg_gr_we, dbg_gr_num, dbg_gr_data | out | 2, 2x5, 2x32 | the two GR write ports |
 | dbg_mem_* | out | -- | committed data access: PA, size, we, data |
 | dbg_psw | out | 32 | committed PSW |
+| dbg_cop_valid, dbg_cop_i, dbg_cop, dbg_cop_addr, dbg_cop_rpn | out | 1, 1, 4, 32, 20 | a cache-maintenance operation finished: FDC/FDCE/PDC (`dc_op_e`, I = 0) or FIC/FICE (`ic_op_e`, I = 1), its VA and the RPN it compared against (the board's event recorder, system.md 7; 2026-10-09) |
 | dbg_halted | out | 1 | a branch-to-self loop is committing with no way out (PSW.I = 0 or EIEM & EIRR-able = 0, no HPMC/TOC pending) -- e.g. the ROM's `halt_forever` (`sync; diag TOC_EN; b .`, BOOT s.2.1) |
 | dbg_perf | out | n x 32 | counters: cycles, retired, F/D/E/W stall cycles by cause, I/D fills, write-backs, uncached ops, TLB walks (the Indy core's lesson, `SGIIndy_MiSTer/docs/design/cpu-speed-tlb-icache.md`) |
 

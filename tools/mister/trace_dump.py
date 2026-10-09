@@ -14,8 +14,12 @@ Output lines match the simulator's --evtrace ("EV seq tT aAA addr data"),
 decoded unless --raw:
     1 SCSI byte (aux = phase)      2 SCRIPTS instruction (addr = DSP)
     3 SCSI interrupt                4/5 DMA read/write (aux = byte enables)
-    6/7 CPU line read/write         8/9 CPU uncached read/write (RAM, 53C710)
-    10 selection (aux = ID)
+    6/7 CPU line read/write (lineRI = I-cache fill)
+    8/9 CPU uncached read/write (RAM, 53C710)
+    10 selection (aux = ID)         11 interruption (vector, IIAOQ, insn, IIASQ)
+    12 cache maintenance (FDC/FDCE/PDC/FIC/FICE: physical line, VA)
+The recorder freezes 1024 events after a user-mode trap 8/10/11 (until the
+core is reset), so after a SIGILL the ring ends with what led to it.
 """
 import mmap, os, struct, sys
 
@@ -34,7 +38,15 @@ def decode(t, a, addr, d):
     if t == 2: return 'scr  %08x: %08x %08x' % (addr, d >> 32, d & 0xFFFFFFFF)
     if t == 3: return 'irq  dstat %02x sstat0 %02x dsps %08x' % (d >> 56, (d >> 48) & 0xFF, d & 0xFFFFFFFF)
     if t in (4, 5): return 'dma%s %08x be=%02x %016x' % ('R' if t == 4 else 'W', addr, a, d)
-    if t in (6, 7): return 'line%s %08x' % ('R' if t == 6 else 'W', addr)
+    if t == 6: return 'line%s %08x' % ('RI' if a & 1 else 'R', addr)
+    if t == 7: return 'lineW %08x' % addr
+    if t == 11:
+        return 'trap %2d at %08x insn %08x space %04x psw %04x' % (
+            a & 0x3F, addr, d >> 32, (d >> 16) & 0xFFFF, d & 0xFFFF)
+    if t == 12:
+        ops = (['FIL', 'FIC', 'FICE'] if a & 0x80 else ['MISS', 'FDC', 'FDCE', 'PDC'])
+        op = a & 0xF
+        return '%-4s pa %08x va %08x' % (ops[op] if op < len(ops) else 'op%d' % op, addr, d >> 32)
     if t in (8, 9): return 'io%s  %08x be=%02x %016x' % ('R' if t == 8 else 'W', addr, a, d)
     if t == 10: return 'sel  id %d %s' % (a & 7, 'answered' if d & 1 else 'no target')
     return 't%d a%02x %08x %016x' % (t, a, addr, d)

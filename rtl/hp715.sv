@@ -149,9 +149,16 @@ module hp715 #(
         .eir_set(eir_set), .eir_num(eir_num), .toc_req(toc_req), .hpmc_req(hpmc_req), .lpmc_req(lpmc_req),
         .powerfail(1'b0), .soft_pwr_n(soft_pwr_n),
         .dbg_retire(dbg_retire), .dbg_nullified(dbg_nullified), .dbg_iaoq_f(dbg_iaoq_f), .dbg_iaoq_b(dbg_iaoq_b),
-        .dbg_iasq_f(), .dbg_insn(dbg_insn), .dbg_trap(dbg_trap), .dbg_trap_vec(dbg_trap_vec),
+        .dbg_iasq_f(c_iasq_f), .dbg_insn(dbg_insn), .dbg_trap(dbg_trap), .dbg_trap_vec(dbg_trap_vec),
         .dbg_gr_we(), .dbg_gr_num0(), .dbg_gr_num1(), .dbg_gr_data0(), .dbg_gr_data1(),
-        .dbg_psw(dbg_psw), .dbg_halted(dbg_halted), .dbg_gr(dbg_gr));
+        .dbg_psw(dbg_psw), .dbg_halted(dbg_halted), .dbg_gr(dbg_gr),
+        .dbg_cop_valid(c_cop_valid), .dbg_cop_i(c_cop_i), .dbg_cop(c_cop), .dbg_cop_addr(c_cop_addr),
+        .dbg_cop_rpn(c_cop_rpn));
+    logic [15:0] c_iasq_f;
+    logic        c_cop_valid, c_cop_i;
+    logic [3:0]  c_cop;
+    logic [31:0] c_cop_addr;
+    logic [19:0] c_cop_rpn;
 
     // --------------------------------------------------------------- MIOC
     logic        gsc_req, gsc_we, gsc_ack, gsc_err;
@@ -241,10 +248,20 @@ module hp715 #(
     // types: 1 SCSI bus byte (aux = phase), 2 SCRIPTS instruction (addr =
     // DSP, data = {DCMD/DBC, DSPS}), 3 SCSI interrupt (data = {DSTAT,
     // SSTAT0, DSPS}), 4/5 DMA read/write done (aux = byte enables), 6/7 CPU
-    // line read/write accepted, 8/9 CPU uncached read/write of RAM or the
-    // 53C710 (aux = byte enables, data as read/written), 10 selection
-    // (aux = ID, data = 1 answered / 0 nobody). Each source has a one-deep
-    // slot; the lowest-numbered full slot goes out each cycle.
+    // line read/write accepted (a read's aux bit 0 = I-cache fill), 8/9 CPU
+    // uncached read/write of RAM or the 53C710 (aux = byte enables, data as
+    // read/written), 10 selection (aux = ID, data = 1 answered / 0 nobody),
+    // 11 interruption taken (aux = vector, addr = IIAOQ front, data =
+    // {instruction word, IIASQ, PSW[15:0]}), 12 cache maintenance done (aux
+    // = {I side, 3'b0, operation}, addr = the physical line {RPN, VA[11:0]},
+    // data = {VA, 32'd0}; of a run of FDCE or FICE only the first). Each
+    // source has a one-deep slot; the lowest-numbered full slot goes out
+    // each cycle.
+    //
+    // Freeze: 1024 events after a user-mode (PL 3) illegal-instruction,
+    // privileged-operation or privileged-register trap (8, 10, 11) the
+    // recorder stops until the next reset, so the ring keeps what led up to
+    // it (HP-UX's user processes dying of SIGILL on stale text, 2026-10-09).
     logic        s_dec;
     logic [31:0] s_dsp, s_ins, s_dsps;
     logic [7:0]  s_dstat, s_sstat0;
@@ -252,6 +269,9 @@ module hp715 #(
     logic [32:0] ev_line_q;
     logic [9:0]  ev_full;
     logic [111:0] ev_slot [10];
+    logic [10:0] ev_freeze_cnt;
+    logic        ev_freeze_arm, ev_frozen;
+    logic [4:0]  ev_cop_q;
     always_ff @(posedge clk) begin
         logic [9:0]   set;
         logic [111:0] e [10];
@@ -265,15 +285,34 @@ module hp715 #(
         // a line read repeating the previous one (a polling loop) is not recorded
         if (mem_req && mem_ack) begin
             ev_line_q <= {mem_we, mem_addr};
-            if ({mem_we, mem_addr} != ev_line_q) begin set[4] = 1; e[4] = {mem_we ? 8'd7 : 8'd6, 8'd0, mem_addr, 64'd0}; end
+            if ({mem_we, mem_addr} != ev_line_q) begin set[4] = 1; e[4] = {mem_we ? 8'd7 : 8'd6, 7'd0, mem_ifill & ~mem_we, mem_addr, 64'd0}; end
         end
         if (io_req && io_ack && !io_ifetch && (io_addr[31:12] == 20'hF0106 || io_addr[31:28] != 4'hF)) begin
             set[5] = 1; e[5] = {io_we ? 8'd9 : 8'd8, io_be, io_addr, io_we ? io_wdata : io_rdata};
         end
         if (sb_sel_done || sb_sel_fail) begin set[6] = 1; e[6] = {8'd10, 5'd0, sb_sel_id, 32'd0, 63'd0, sb_sel_done}; end
+        if (dbg_trap) begin set[7] = 1; e[7] = {8'd11, 2'd0, dbg_trap_vec, dbg_iaoq_f, dbg_insn, c_iasq_f, dbg_psw[15:0]}; end
+        // a whole-cache loop (FDCE/FICE, op 2 on either side) is recorded by its first operation only
+        if (c_cop_valid) begin
+            ev_cop_q <= {c_cop_i, c_cop};
+            if (!(c_cop == 4'd2 && {c_cop_i, c_cop} == ev_cop_q)) begin
+                set[8] = 1; e[8] = {8'd12, c_cop_i, 3'd0, c_cop, c_cop_rpn, c_cop_addr[11:0], c_cop_addr, 32'd0};
+            end
+        end
+        if (ev_frozen) set = '0;
         dbg_ev_valid <= 1'b0;
-        if (!rst_n) ev_full <= '0;
-        else begin
+        if (!rst_n) begin
+            ev_full <= '0; ev_freeze_arm <= 1'b0; ev_frozen <= 1'b0; ev_freeze_cnt <= '0;
+        end else begin
+            if (dbg_trap && dbg_iaoq_f[1:0] == 2'b11 && !ev_freeze_arm
+                && (dbg_trap_vec == 6'd8 || dbg_trap_vec == 6'd10 || dbg_trap_vec == 6'd11)) begin
+                ev_freeze_arm <= 1'b1; ev_freeze_cnt <= 11'd1024;
+            end else if (ev_freeze_arm && !ev_frozen && |set) begin
+                if (ev_freeze_cnt == 11'd0) ev_frozen <= 1'b1;
+                else ev_freeze_cnt <= ev_freeze_cnt - 11'd1;
+            end
+        end
+        if (rst_n) begin
             logic sent;
             sent = 1'b0;
             for (int i = 0; i < 10; i++) begin
