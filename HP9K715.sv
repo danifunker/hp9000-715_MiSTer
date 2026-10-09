@@ -72,6 +72,7 @@ localparam CONF_STR = {
 	"O[9:8],SDRAM read capture,Edge 3,Edge 2.75,Edge 2.5,Edge 4;",
 	"O[11:10],Display,Auto,Graphics,Serial console;",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
+	"O[125:123],Scale,V-Integer,Normal,Narrower HV-Integer,Wider HV-Integer,HV-Integer;",
 	"-;",
 	"T[6],TOC (front panel);",
 	"T[7],Soft power off;",
@@ -424,11 +425,25 @@ eeprom_save #(.CLK_HZ(64_000_000)) eeprom_save
 // attribute plane, the hardware cursor laid over it. OSD "Display": Auto =
 // Artist while its video is on, else the serial console; Graphics = always
 // Artist; Serial console = never. Both outputs (scaler and analog) carry it
-// (STUBS S-024). "Original" aspect: square pixels (the active size) for
-// Artist, 4:3 for the console.
+// (STUBS S-024). The scaler's window: "Original" aspect = square pixels (the
+// active size) for Artist, 4:3 for the console; OSD "Scale" (default
+// V-Integer: 1024 lines 1:1 on a 1080-line HDMI mode, a fit when the mode
+// has fewer lines) computed from the HDMI mode by sys/video_freak.sv. The
+// HDMI mode itself is the MiSTer's (MiSTer.ini video_mode).
 wire gfx_show = status[11:10] == 2'd2 ? 1'b0 : status[11:10] == 2'd1 ? 1'b1 : gfx_on;
-assign VIDEO_ARX = (!ar) ? (gfx_show ? {1'b0, gfx_width} : 13'd4) : (ar - 1'd1);
-assign VIDEO_ARY = (!ar) ? (gfx_show ? {1'b0, gfx_height} : 13'd3) : 13'd0;
+wire [2:0] scale_osd = status[125:123];
+wire       vid_de;
+video_freak video_freak
+(
+	.CLK_VIDEO(CLK_VIDEO), .CE_PIXEL(CE_PIXEL), .VGA_VS(VGA_VS),
+	.HDMI_WIDTH(HDMI_WIDTH), .HDMI_HEIGHT(HDMI_HEIGHT),
+	.VGA_DE(VGA_DE), .VIDEO_ARX(VIDEO_ARX), .VIDEO_ARY(VIDEO_ARY),
+	.VGA_DE_IN(vid_de),
+	.ARX((!ar) ? (gfx_show ? gfx_width : 12'd4) : (ar - 1'd1)),
+	.ARY((!ar) ? (gfx_show ? gfx_height : 12'd3) : 12'd0),
+	.CROP_SIZE(12'd0), .CROP_OFF(5'd0),
+	.SCALE(scale_osd == 3'd0 ? 3'd1 : scale_osd == 3'd1 ? 3'd0 : scale_osd)
+);
 
 // The serial console: 640x480 at 21.3 MHz (one pixel every third clock,
 // 680 x 525 total, 59.7 Hz): the machine's RS-232 console as text, the
@@ -462,7 +477,7 @@ serial_term serial_term
 
 assign CLK_VIDEO = clk_sys;
 assign CE_PIXEL  = gfx_show ? 1'b1 : pdiv == 2'd0;
-assign {VGA_R, VGA_G, VGA_B, VGA_HS, VGA_VS, VGA_DE} = gfx_show ? {gfx_r, gfx_g, gfx_b, gfx_hs, gfx_vs, gfx_de}
+assign {VGA_R, VGA_G, VGA_B, VGA_HS, VGA_VS, vid_de} = gfx_show ? {gfx_r, gfx_g, gfx_b, gfx_hs, gfx_vs, gfx_de}
                                                                   : {st_r, st_g, st_b, st_hs, st_vs, st_de};
 
 ///////////////////////   LEDS   /////////////////////////////////
