@@ -41,8 +41,8 @@ the same 8 KB block (`dd ... bs=512 seek=256 conv=notrunc`). With it HP-UX
 10.20 boots to its start-up sequence on the board (system.md 10, build 12).
 
 **The image expects QEMU's LAN** (2026-10-08). `/etc/rc.config.d/netconf`
-configures `lan0` at 10.0.2.15 and `/etc/hosts` maps the hostname `hpux` to
-that address. The 715 core has no LAN (and the kernel no driver for the
+configures `lan0` at 10.0.2.15 with a default route through 10.0.2.2, and
+`/etc/hosts` maps the hostname `hpux` to that address. The 715 core has no LAN (and the kernel no driver for the
 82596), so "Configure LAN interfaces" fails and the Software Distributor agent
 (`swagentd`) cannot bind its RPC endpoint and keeps dying while the start-up
 sequence waits for it. Fix it once from a single-user boot (`BOOT_ADMIN> boot
@@ -50,7 +50,8 @@ scsi.6 isl`, `ISL> hpux -is`):
 
 ```sh
 cp /etc/rc.config.d/netconf /etc/rc.config.d/netconf.qemu
-sed -e 's/=lan0$/=""/' -e 's/=10.0.2.15$/=""/' /etc/rc.config.d/netconf.qemu > /etc/rc.config.d/netconf
+sed -e 's/=lan0$/=""/' -e 's/=10.0.2.15$/=""/' -e 's/^ROUTE_DESTINATION.0.=.*/ROUTE_DESTINATION[0]=""/' \
+    -e 's/^ROUTE_GATEWAY.0.=.*/ROUTE_GATEWAY[0]=""/' /etc/rc.config.d/netconf.qemu > /etc/rc.config.d/netconf
 cp /etc/hosts /etc/hosts.qemu
 sed 's/^10.0.2.15/127.0.0.1/' /etc/hosts.qemu > /etc/hosts
 sync; reboot
