@@ -56,11 +56,17 @@ module pa_fpunit
             default: rd_ff = {xr[5], xr[6]};
         endcase
     endfunction
-    // three read ports: the two operands and the store source
+    // three read ports: the two operands and the store source. As an operand
+    // of a non-load/store instruction fr0 "encodes a floating-point +0 or a
+    // fixed-point 0" (ACD p.6-4, 6-9): HP's compilers zero registers with
+    // FCPY fr0 and compare against fr0; only FSTD/FSTW fr0 read the status.
+    // Found 2026-10-09: awk's `fcmp,dbl,< fr4,fr0` compared against the
+    // status word, so its truth tests went wrong and its loops never ended.
+    // fr1-fr3 as operands are undefined (ACD p.6-5); they read as themselves.
     logic [4:0]  rd_a_n, rd_b_n, rd_s_n;
     logic [63:0] rd_a, rd_b, rd_s;
-    assign rd_a = (rd_a_n < 5'd4) ? rd_ff(rd_a_n) : {frl_a[rd_a_n], frr_a[rd_a_n]};
-    assign rd_b = (rd_b_n < 5'd4) ? rd_ff(rd_b_n) : {frl_b[rd_b_n], frr_b[rd_b_n]};
+    assign rd_a = (rd_a_n == 5'd0) ? 64'd0 : (rd_a_n < 5'd4) ? rd_ff(rd_a_n) : {frl_a[rd_a_n], frr_a[rd_a_n]};
+    assign rd_b = (rd_b_n == 5'd0) ? 64'd0 : (rd_b_n < 5'd4) ? rd_ff(rd_b_n) : {frl_b[rd_b_n], frr_b[rd_b_n]};
     assign rd_s = (rd_s_n < 5'd4) ? rd_ff(rd_s_n) : {frl_s[rd_s_n], frr_s[rd_s_n]};
     // a single operand (left-justified for the engine) from the selected half
     function automatic logic [63:0] opnd(input logic [63:0] r, input logic single, input logic half);

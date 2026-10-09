@@ -22,6 +22,8 @@
 //                    [--watch A B]   (every retired load/store whose physical address is in [A, B): hit flags, the data)
 //                    [--watchval V]  (every retired load whose data is V, with its virtual and physical address)
 //                    [--pcwatch PC]  (that instruction's retirements, with the same fields; may repeat)
+//                    [--fptrace [--fptrace-from CYCLE]]   (the FP unit: every operation issued, its
+//                    operands, result and the FPSR before and after, FP loads' data, FP stores' data)
 //                    [--wtrace A B]   (every cycle from A to B: the core's W and M stages and the
 //                    TLB's state, with a dump of all TLB entries at A and at B; reads the model's
 //                    internal signals, so it follows pa_core / pa_tlb renames)
@@ -37,6 +39,8 @@
 #include <vector>
 
 static Vemu* top;
+static unsigned long long fptrace_from = 0;
+static bool fptrace = false;
 
 // --wtrace: the pipeline's W/M stages and the TLB, from the model's internals
 #define CORE_(x) top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__u_core__DOT__##x
@@ -77,6 +81,31 @@ static void wtrace_line(unsigned long long t) {
 		fprintf(stderr, "%12s   walker pdir %08x %08x %08x %08x cr28we%d cr28val %08x tr4 %08x dr24 %08x dr25 %08x\n", "",
 		        top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__dc_op_rd2[3], top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__dc_op_rd2[2], top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__dc_op_rd2[1], top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__dc_op_rd2[0],
 		        CORE_(w_cr28_we), CORE_(w_cr28_val), CORE_(tr)[4], CORE_(dr24), CORE_(dr25));
+}
+// --fptrace: the FP unit's events (pa_fpunit): every FP operation issued at W
+// commit with the FPSR before it, the operands the engine starts from, its
+// result and the FPSR afterwards, every FP load's data and every FP store's
+#define FPU_(x) top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__u_fpu__DOT__##x
+static void fptrace_line(unsigned long long t) {
+	unsigned insn = CORE_(w_insn), op = insn >> 26;
+	bool commit = CORE_(w_commit) && !CORE_(w_nul);
+	bool is_fp = op == 0x0C || op == 0x0E || op == 0x06 || op == 0x26;
+	bool is_fpm = op == 0x09 || op == 0x0B;
+	if (commit && is_fp)
+		fprintf(stderr, "%12llu FP issue  pc %08x insn %08x fpsr %08x\n", t, CORE_(w_iaoq_f), insn, FPU_(fpsr));
+	if (commit && is_fpm && !(insn & 0x200))
+		fprintf(stderr, "%12llu FP load   pc %08x insn %08x data %016llx ea %08x\n", t, CORE_(w_iaoq_f), insn,
+		        (unsigned long long)CORE_(w_ld), CORE_(w_ea));
+	if (commit && is_fpm && (insn & 0x200))
+		fprintf(stderr, "%12llu FP store  pc %08x insn %08x data %016llx ea %08x\n", t, CORE_(w_iaoq_f), insn,
+		        (unsigned long long)top->rootp->emu__DOT__u_hp715__DOT__u_cpu__DOT__fp_st_data, CORE_(w_ea));
+	if (FPU_(start_r))
+		fprintf(stderr, "%12llu FP start  op %d sgl %d a %016llx b %016llx cond %d\n", t, FPU_(hold_op), FPU_(hold_sgl),
+		        (unsigned long long)FPU_(hold_a), (unsigned long long)FPU_(hold_b), FPU_(hold_cond));
+	if (FPU_(eng_done))
+		fprintf(stderr, "%12llu FP done   result %016llx we %d cmp %d flags %02x unimpl %d st %d fpsr %08x\n", t,
+		        (unsigned long long)FPU_(eng_result), FPU_(eng_we), FPU_(eng_cmp), FPU_(eng_flags), FPU_(eng_unimpl),
+		        FPU_(st), FPU_(fpsr));
 }
 // --memdump CYCLE ADDR LEN FILE: the ideal RAM array (64-bit words, byte 0 of
 // a doubleword in bits 63:56) written out big-endian as the CPU sees it
@@ -241,6 +270,8 @@ int main(int argc, char** argv) {
 		else if (a == "--restore") restore_file = next();
 		else if (a == "--sample") sample = strtoull(next(), 0, 0);
 		else if (a == "--wtrace") { wtrace_a = strtoull(next(), 0, 0); wtrace_b = strtoull(next(), 0, 0); }
+		else if (a == "--fptrace") fptrace = true;
+		else if (a == "--fptrace-from") fptrace_from = strtoull(next(), 0, 0);
 		else if (a == "--trace") trace = strtoull(next(), 0, 0);
 		else if (a == "--trace-from") trace_from = strtoull(next(), 0, 0);
 		else if (a == "--watch") { watch_a = strtoull(next(), 0, 0); watch_b = strtoull(next(), 0, 0); watch_on = true; }
@@ -341,6 +372,7 @@ int main(int argc, char** argv) {
 		tick();
 		unsigned long long t = cyc - start;
 		if (memdump_file && t == memdump_at) { dump_mem(memdump_file, memdump_addr, memdump_len); memdump_file = nullptr; }
+		if (fptrace && t >= fptrace_from) fptrace_line(t);
 		if (wtrace_b && t >= wtrace_a && t <= wtrace_b) {
 			if (t == wtrace_a) dump_tlb(t);
 			wtrace_line(t);

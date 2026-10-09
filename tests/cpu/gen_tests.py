@@ -862,11 +862,11 @@ class FpGroup:
         self.body, self.data, self.ins = [], [], []
         self.label = "fpt_%s_%d" % (suite.name, len(suite.groups))
 
-    def vector(self, rm, a, b, sentinel, op_lines, sgl_load, vin):
+    def vector(self, rm, a, b, sentinel, op_lines, sgl_load, vin, status=0):
         k = len(self.ins)
         # entry: status, a, b, sentinel (FP loads have 5-bit displacements
         # in PA 1.1, so r3 -> entry and r4 -> entry + 16)
-        self.data += ["\t.word\t0x%08x, 0" % (rm << 9),
+        self.data += ["\t.word\t0x%08x, 0" % ((rm << 9) | status),
                       "\t.word\t0x%08x, 0x%08x" % (a >> 32, a & 0xFFFFFFFF),
                       "\t.word\t0x%08x, 0x%08x" % (b >> 32, b & 0xFFFFFFFF),
                       "\t.word\t0x%08x, 0x%08x" % (sentinel >> 32, sentinel & 0xFFFFFFFF)]
@@ -1012,6 +1012,85 @@ def gen_fp_common(rng, name, edge):
                          ["\t%s,dbl\t%%fr4, %%fr5, %%fr6, %%fr4, %%fr7" % op],
                          False, {"a": a, "b": b, "which": "add-result" if v % 2 else "mpy-result"})
             g.finish()
+    if not edge:
+        # ---- fr0 as a source operand reads as +0 / fixed-point 0 (ACD p.6-4,
+        # 6-9; the FCPY fr0 zeroing idiom, awk's compares against fr0). The
+        # status word is loaded with flag bits set (sticky, no enables) so a
+        # unit that reads the status instead gets a huge negative number, not
+        # a denormal that rounds away (2026-10-09: HP-UX's awk looped forever).
+        g = FpGroup(suite, "fr0-source")
+        fr0ops = [["\tfcpy,dbl\t%fr0, %fr6"],
+                  ["\tfadd,dbl\t%fr4, %fr0, %fr6"],
+                  ["\tfsub,dbl\t%fr0, %fr4, %fr6"],
+                  ["\tfmpy,dbl\t%fr4, %fr0, %fr6"],
+                  ["\tfdiv,dbl\t%fr0, %fr4, %fr6"],
+                  ["\tfcmp,dbl,<\t%fr4, %fr0", "\tftest", "\tfcpy,dbl\t%fr5, %fr6"],   # a < 0 ?
+                  ["\tfcmp,dbl,=\t%fr0, %fr4", "\tftest", "\tfcpy,dbl\t%fr5, %fr6"],   # 0 == a ?
+                  ["\tfcmp,dbl,=\t%fr0, %fr0", "\tftest", "\tfcpy,dbl\t%fr5, %fr6"],   # always
+                  ["\tfcnvxf,sgl,dbl\t%fr0L, %fr6"],                                     # fixed 0 -> 0.0
+                  ["\tfcnvff,sgl,dbl\t%fr0L, %fr6"],
+                  ["\tfcpy,sgl\t%fr0L, %fr6L"],
+                  ["\tfadd,sgl\t%fr4L, %fr0L, %fr6L"],
+                  ["\tfcmp,sgl,<\t%fr4L, %fr0L", "\tftest", "\tfcpy,dbl\t%fr5, %fr6"],
+                  ["\txmpyu\t%fr4L, %fr0L, %fr6"],
+                  ["\tfmpyadd,dbl\t%fr4, %fr0, %fr6, %fr5, %fr7"],                       # fr6 = a * 0
+                  ["\tfabs,dbl\t%fr0, %fr6"]]
+        for v in range(2 * len(fr0ops)):
+            ops = fr0ops[v % len(fr0ops)]
+            sgl = any("sgl" in l or "xmpyu" in l for l in ops) and "fcnv" not in ops[0]
+            a = rng.choice([0.0, -0.0, 1.0, -2.5, rand_normal_double(rng)]) if v % 4 == 0 else rand_normal_double(rng)
+            a = f2w(a) if sgl else d2w(a)
+            b = operand(sgl)
+            g.vector(v % 4, pack(a, sgl), pack(b, sgl), 0x5A5A5A5A5A5A5A5A, ops, sgl,
+                     {"a": a, "b": b, "op": ops[0].strip()}, status=0xF8000000)
+        g.finish()
+        # ---- cached doubleword FP accesses (2026-10-09): the groups above load
+        # their operands from the ROM, which the core treats as uncached, so
+        # the D-cache's 64-bit paths were only exercised by HP-UX. Each vector
+        # has its own 32-byte line in RAM (AREA + 0x8000) and an 8-byte offset
+        # in it: integer stores then FLDD back to back (a struct copy, then an
+        # FP use), with nops, after an FDC (a miss and fill), feeding FADD
+        # and FCMP; FSTD then FLDD; FSTD read back with LDW, also after FDC.
+        # QEMU is the reference (its cache model is nothing, the values are
+        # the same).
+        g = FpGroup(suite, "fldd-cached")
+        kinds = 8
+        for v in range(4 * kinds):
+            k, off = v % kinds, 8 * ((v // kinds) % 4)
+            a = operand(False)
+            b = a if (k == 4 and v % 2 == 0) else operand(False)
+            line = AREA + 0x8000 + 64 * v
+            st = ["\tstw\t%r10, 0(%r7)", "\tstw\t%r11, 4(%r7)"]
+            flush = ["\tsync", "\tfdc\t%r0(%r7)", "\tsync"]
+            tail_fr6 = ["\tfstds\t%fr6, 0(%r9)"]
+            tail_gr = ["\tstw\t%r10, 0(%r9)", "\tstw\t%r11, 4(%r9)"]
+            ops, tail = {
+                0: (st + ["\tfldds\t0(%r7), %fr4", "\tfcpy,dbl\t%fr4, %fr6"], tail_fr6),
+                1: (st + ["\tnop", "\tnop", "\tnop", "\tfldds\t0(%r7), %fr4", "\tfcpy,dbl\t%fr4, %fr6"], tail_fr6),
+                2: (st + flush + ["\tfldds\t0(%r7), %fr4", "\tfcpy,dbl\t%fr4, %fr6"], tail_fr6),
+                3: (st + ["\tfldds\t0(%r7), %fr4", "\tfadd,dbl\t%fr4, %fr5, %fr6"], tail_fr6),
+                4: (st + ["\tfldds\t0(%r7), %fr4", "\tfcmp,dbl,=\t%fr4, %fr5", "\tftest",
+                          "\tfcpy,dbl\t%fr5, %fr6"], tail_fr6),           # nullified when a == b
+                5: (["\tfstds\t%fr5, 0(%r7)", "\tfldds\t0(%r7), %fr4", "\tfcpy,dbl\t%fr4, %fr6"], tail_fr6),
+                6: (["\tfstds\t%fr5, 0(%r7)", "\tldw\t0(%r7), %r10", "\tldw\t4(%r7), %r11"], tail_gr),
+                7: (["\tfstds\t%fr5, 0(%r7)"] + flush + ["\tldw\t0(%r7), %r10", "\tldw\t4(%r7), %r11"], tail_gr),
+            }[k]
+            kk = len(g.ins)
+            g.data += ["\t.word\t0, 0",
+                       "\t.word\t0x%08x, 0x%08x" % (a >> 32, a & 0xFFFFFFFF),
+                       "\t.word\t0x%08x, 0x%08x" % (b >> 32, b & 0xFFFFFFFF),
+                       "\t.word\t0x5A5A5A5A, 0x5A5A5A5A"]
+            g.body += ["\tldil\tL%%%s+%d, %%r3" % (g.label, 32 * kk),
+                       "\tldo\tR%%%s+%d(%%r3), %%r3" % (g.label, 32 * kk),
+                       "\tldo\t16(%r3), %r4",
+                       "\tfldws\t0(%r3), %fr0",
+                       "\tfldds\t0(%r4), %fr5",                 # b
+                       "\tfldds\t8(%r4), %fr6",                 # the sentinel
+                       "\tldw\t8(%r3), %r10", "\tldw\t12(%r3), %r11"] + \
+                      li(7, line + off) + ["\tldi\t0, %r6"] + ops + ["\tldi\t1, %r6"] + tail + \
+                      ["\tfstws\t%fr0, 8(%r9)", "\tstw\t%r0, 12(%r9)", "\tldo\t16(%r9), %r9"]
+            g.ins.append({"a": a, "b": b, "kind": k, "off": off})
+        g.finish()
     return suite
 
 

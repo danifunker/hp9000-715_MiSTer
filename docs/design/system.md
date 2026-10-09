@@ -287,6 +287,7 @@ loads the same file through the same loader (`verilator/sim.v`).
 | 10 | 2026-10-08 | cpu-requests #7 (the I-LAB survives D-side TLB inserts; `fd7d435`) | setup +0.615 ns, hold +0.249 ns | 28,669 (68 %) | -- | -- | not yet run on a board. In romsim HP-UX gets past the 0xCEF2 livelock: at 32 MB it panics (`Data page fault` in `hdl_vfault`), at 16 MB it idles (`RESUME-20261008-hpux-kernel.md`) |
 | 11 | 2026-10-08 | the walker's PDIR read fills after a dirty victim (`665f2e8`) + the I-LAB refresh on D-form TLB ops (`45c4ad1`) | setup +0.859 ns, hold +0.164 ns | 28,709 (69 %) | 371 (67 %) | 37 | **the board gets past the `Data page fault` panic** (16 MB): `vuseg=`, `inet_clts:ok inet_cots:ok nfs_init3 ...` on the screen, then it waits in the c720 driver's 10 s post-reset delay and stalls in the MODE SELECT phase-mismatch loop (S-020) |
 | 12 | 2026-10-08 | + the SCSI target's MODE SELECT completion (S-020) | setup +0.716 ns, hold +0.250 ns | 28,769 (69 %) | -- | -- | **the board matches romsim**: HP-UX probes the I/O tree (c720, tgt, sdisk, sctl, asio0, CentIf, ps2, processor, memory), prints "System Console is on the Built-In Serial Interface", then panics `LVM: Configuration failure` -- the disk image's boot record named QEMU's disk path (`disks/README.md`, `tools/hpux/lvmbdra.py`); with it rewritten **HP-UX 10.20 boots on the MiSTer**: file systems mounted, hostname, syncer, "Configure LAN interfaces FAIL" (no LAN), the start-up sequence continues (`RESUME-20261008-hpux-login.md`) |
+| 13 | 2026-10-09 | + trap 22 with ISR/IOR for coprocessor loads/stores (`e8c2024`) | setup +0.793 ns, hold +0.207 ns | 28,661 (68 %) | 371 (67 %) | 37 | the ISR/IOR fix is right (ACD p.4-25) but was not awk's bug: HP-UX 10.20 keeps the FPU enabled for user processes (no trap 22 in a whole single-user run, `--traps`), so the board still stops at "Start Software Distributor agent daemon". The real bug, found with the new `--fptrace`: fr0 as an operand read the status (cpu.md 1.1) |
 
 ## 11. Simulation
 
@@ -305,7 +306,11 @@ loads the same file through the same loader (`verilator/sim.v`).
   recorder's events (`--evtrace`, the same records `tools/mister/trace_dump.py`
   reads from a board). `--traps` lists every interruption; `--memdump CYCLE ADDR LEN FILE`
   writes LEN bytes of the ideal RAM from physical ADDR at CYCLE (it showed
-  HP-UX's PDIR entry intact while the walker read stale data); `--wtrace A B`
+  HP-UX's PDIR entry intact while the walker read stale data); `--fptrace [--fptrace-from C]` prints the FP unit's events: every operation
+  issued at W commit with the FPSR before it, the operands the engine starts
+  from, its result and the FPSR after, every FP load's data and FP store's
+  data (user-mode PCs end in 3, the privilege level; it found the fr0 operand
+  bug, cpu.md 1.1). `--wtrace A B`
   prints the core's W and M stages, the TLB and the D-cache engine every
   cycle from A to B (and, while the walker runs, the PDIR words it read and
   the CR28 it will write) and dumps all 64 + 8 TLB entries at both ends (it reads the model's internal

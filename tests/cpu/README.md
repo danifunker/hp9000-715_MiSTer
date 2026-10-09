@@ -102,7 +102,10 @@ FPU). QEMU has no CCR, so those vectors carry their expected words in the
 JSON (`expect`; IIAOQ is normalised to 0 by the vector, IPSW is
 `PSW_INIT`) and `compare.py` checks them against that instead of QEMU's
 log (`model.QEMU_REF_BUGS` no-ccr, copr-uid).
-fp stores the double result, the status register and a pad word. fpedge
+fp stores the double result, the status register and a pad word; its
+`fr0-source` group uses fr0 as an operand (it reads as +0 / fixed-point 0,
+ACD p.6-4) with a status word full of flag bits, and `fldd-cached` keeps
+its data in RAM (cached), the other groups' in the ROM (uncached). fpedge
 stores 8 words: the status (with FPSR.T if the operation was unimplemented;
 `fstds %fr0` goes first because it is the one FP instruction that does not
 trap with T set, and it clears T), fr0R, the double result (a single

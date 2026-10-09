@@ -61,7 +61,7 @@ Budget (sec. 6.10): integer core + TLB + walker + cache control
 | IAOQ front/back | 2 x 32 (offset 0:29, PL 30:31) | -- | 0xF0000004, 0xF0000008 (PL 0) | ERS s.5.3.1 |
 | PSW | 32 | implemented bits below | **M = 1 only** (0x00010000) | ERS s.5.3.1 |
 | CR0-CR31 | see 1.3 | | | |
-| FP registers fr0-fr31 | 32 x 64 | fr0L status, fr0R..fr3R = exception registers 1-7 | 0 | ACD p.6-5, p.6-23 |
+| FP registers fr0-fr31 | 32 x 64 | fr0L status, fr0R..fr3R = exception registers 1-7. **fr0 as a source of a non-load/store instruction reads as +0 / fixed-point 0** (the FCPY fr0 zeroing idiom, compares against fr0); only loads/stores access the status. fr0 as a destination and fr1-fr3 as operands are undefined (ours: the register as it is). Found 2026-10-09: awk's `fcmp,dbl,< fr4,fr0` read the status, its loops never ended | 0 | ACD p.6-4, p.6-5, p.6-9, p.6-23 |
 | Diagnose registers | DR0, 1, 8, 24-29 | sec. 5.1 | sec. 5.1 | ERS s.8.2 |
 | TOC mask | 1 bit | set at reset, on a taken TOC and by TOC_DIS; cleared by TOC_EN | **1** (masked) | ERS s.5.3.5, s.8.3.3 |
 | TLB | 64 page + 8 block entries | all **locked out (and locked in) at reset** | sec. 2 | ERS s.6.3.3, s.6.5 |
@@ -1280,7 +1280,7 @@ the per-instruction diff format for the simulator.
 | TLB | IxTLBA/P, PxTLB, PxTLBE (all page entries, not blocks), DR8 diagnostic insert, lock-in/out, replacement order, dropped insert, block entries (ERS example), LPA/PROBE over all 128 AR x 4 PL x P, PID/WD, T/D/B/U traps, walker hash/insert/CR28 table | manual + ROM 0x41090-0x41096 | new `tlb` (needs PCX-L DIAG: no QEMU reference) |
 | Caches | diagnose access to every tag/data/parity bit, HIT/PARERR, Arb parity, code executed from diagnose-planted I-lines with no RAM, L1-over-L2, SMC with FDC+FIC, dirty eviction at +128 KB, FDCE/FICE loops, PDC at PL 0 vs 3, U-bit uncached, no I-cache update by stores | ROM 0x42090-0x4209B + manual | new `cache` |
 | Diagnose | DR0 masks (0x0150EFFC), W1C, read-only bits, DR1, DR24/25, TOC_EN/DIS, SHDW_GR/GR_SHDW, MFCPU_C/_T forms | ERS + ROM | new `diag` |
-| FP | all ops sgl/dbl x 4 rounding modes, conversions incl. int64, 32 FCMP conditions, compare queue and clip FTESTs, FMPYADD/SUB/CFXT, XMPYU, FID = 0x000D0800, every ERS s.7.3 unimplemented case (dest untouched, fr1L code, delayed trap on the next FP instruction, FSTD fr0 clears T), D-bit flush mode, CCR = 0 -> 22 | IEEE reference (SoftFloat) for numeric results; ERS s.7.3 for trap cases (QEMU traps immediately) | fp, fpedge |
+| FP | all ops sgl/dbl x 4 rounding modes, conversions incl. int64, 32 FCMP conditions, compare queue and clip FTESTs, FMPYADD/SUB/CFXT, XMPYU, FID = 0x000D0800, every ERS s.7.3 unimplemented case (dest untouched, fr1L code, delayed trap on the next FP instruction, FSTD fr0 clears T), D-bit flush mode, CCR = 0 -> 22; fr0 as a source operand of every operation class with a non-zero status word (`fr0-source`); cached doubleword loads/stores after integer stores, after FDC, read back by LDW (`fldd-cached`: the other groups' operands are in the ROM, uncached) | IEEE reference (SoftFloat) for numeric results; ERS s.7.3 for trap cases (QEMU traps immediately) | fp, fpedge |
 | CR16 | ticks per second at 64/80/100 MHz settings, match across a 2-tick step, wrap with compare 0, DR1 load | cycle arithmetic | `sys` |
 
 Integration: HP's ROM is the system test. Sim milestones in BOOT s.4.0 order:
