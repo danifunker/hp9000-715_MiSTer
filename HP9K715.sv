@@ -6,9 +6,10 @@
 //  check store in DDR3 (rtl/mister/ddr3_port.sv), the EEPROM's image on an
 //  SD-card slot (rtl/mister/eeprom_save.sv), the LASI RS-232 port on the
 //  MiSTer UART, PS/2 keyboard and mouse from hps_io, the MiSTer clock into
-//  the LASI RTC. Artist's VRAM is in DDR3 too, and the MiSTer scaler shows
-//  it as an 8-bit indexed frame buffer (MISTER_FB, MISTER_FB_PALETTE) while
-//  the Artist's video is on (OSD "Display"); otherwise the video shows the
+//  the LASI RTC. Artist's VRAM and attribute plane are in DDR3 too; Artist
+//  makes the picture itself (rtl/artist/artist_video.sv: both colour maps,
+//  the hardware cursor, 64 MHz pixels) and it is the core's video while the
+//  Artist's video is on (OSD "Display"); otherwise the video shows the
 //  RS-232 console as text (rtl/mister/serial_term.sv) with the front-panel
 //  LEDs, and the MiSTer keyboard types into it (rtl/mister/ps2_ascii.sv) as
 //  well as reaching the LASI PS/2 port.
@@ -53,8 +54,6 @@ assign BUTTONS = 0;
 //////////////////////////////////////////////////////////////////
 
 wire [1:0] ar = status[122:121];
-assign VIDEO_ARX = (!ar) ? 12'd4 : (ar - 1'd1);
-assign VIDEO_ARY = (!ar) ? 12'd3 : 12'd0;
 
 `include "build_id.v"
 localparam CONF_STR = {
@@ -243,15 +242,21 @@ wire        con_tx, con_rx_full, kbd_ascii_stb;
 wire  [7:0] con_tx_byte, kbd_ascii;
 ps2_ascii ps2_ascii (.clk(clk_sys), .rst(m_reset), .ps2_key(ps2_key), .strobe(kbd_ascii_stb), .ascii(kbd_ascii));
 
-// Artist's VRAM (DDR3 at 0x3300_0000) and its display
+// Artist's VRAM (DDR3 at 0x3300_0000), its attribute plane (0x3340_0000) and its display
 wire        vr_req, vr_we, vr_ack, vr_wvalid, vr_wready, vr_rvalid;
-wire [17:0] vr_addr;
+wire [18:0] vr_addr;
 wire  [6:0] vr_len;
 wire [63:0] vr_wdata, vr_rdata;
 wire  [7:0] vr_be;
+wire        rf_req, rf_ack, rf_rvalid;
+wire [18:0] rf_addr;
+wire  [6:0] rf_len;
+wire [63:0] rf_rdata;
 wire        gfx_on, gfx_pal_wr;
 wire [11:0] gfx_width, gfx_height;
-wire  [7:0] gfx_pal_addr;
+wire  [7:0] gfx_r, gfx_g, gfx_b;
+wire        gfx_hs, gfx_vs, gfx_de, gfx_underrun;
+wire  [8:0] gfx_pal_addr;
 wire [23:0] gfx_pal_rgb;
 
 hp715 #(.CLK_HZ(64_000_000), .HAS_ARTIST(1'b1)) hp715
@@ -279,7 +284,10 @@ hp715 #(.CLK_HZ(64_000_000), .HAS_ARTIST(1'b1)) hp715
 	.vr_req(vr_req), .vr_we(vr_we), .vr_addr(vr_addr), .vr_len(vr_len), .vr_ack(vr_ack),
 	.vr_wvalid(vr_wvalid), .vr_wdata(vr_wdata), .vr_be(vr_be), .vr_wready(vr_wready),
 	.vr_rvalid(vr_rvalid), .vr_rdata(vr_rdata),
+	.rf_req(rf_req), .rf_addr(rf_addr), .rf_len(rf_len), .rf_ack(rf_ack), .rf_rvalid(rf_rvalid), .rf_rdata(rf_rdata),
 	.gfx_on(gfx_on), .gfx_width(gfx_width), .gfx_height(gfx_height),
+	.gfx_r(gfx_r), .gfx_g(gfx_g), .gfx_b(gfx_b), .gfx_hs(gfx_hs), .gfx_vs(gfx_vs), .gfx_de(gfx_de),
+	.gfx_underrun(gfx_underrun),
 	.gfx_pal_wr(gfx_pal_wr), .gfx_pal_addr(gfx_pal_addr), .gfx_pal_rgb(gfx_pal_rgb),
 	.dbg_ctl(8'd0), .dbg_retire(), .dbg_nullified(), .dbg_iaoq_f(), .dbg_iaoq_b(), .dbg_insn(),
 	.dbg_trap(), .dbg_trap_vec(), .dbg_psw(), .dbg_halted(), .dbg_buserr(), .dbg_buserr_addr(),
@@ -306,26 +314,26 @@ sdram64 #(.CLK_HZ(64_000_000)) sdram
 	.SDRAM_nWE(SDRAM_nWE), .SDRAM_CKE(SDRAM_CKE)
 );
 
-// a copy of LUT0, the active size and video-on in DDR3 at 0x3320_0000 for
-// the board tools (tools/mister/board.sh vram renders the VRAM with it):
-// written 4096 clocks after the last palette change, and when the size or
-// video-on changes; word i = entries 2i, 2i+1 (0x00RRGGBB), word 128 =
-// {height, width, video on}
-reg  [23:0] lut_e [128], lut_o [128];
+// a copy of LUT0 and LUT1, the active size and video-on in DDR3 at
+// 0x3320_0000 for the board tools (tools/mister/board.sh vram renders the
+// VRAM with it and the attribute plane): written 4096 clocks after the last
+// palette change, and when the size or video-on changes; word i = entries
+// 2i, 2i+1 (0x00RRGGBB; 256-511 = LUT1), word 256 = {height, width, video on}
+reg  [23:0] lut_e [256], lut_o [256];
 reg  [23:0] lut_qe, lut_qo;
 reg  [12:0] lut_quiet = 0;
 reg         lut_dirty = 0, lt_req = 0, lt_rd = 0, lt_rd2 = 0;
-reg   [7:0] lt_addr;
+reg   [8:0] lt_addr;
 reg  [63:0] lt_data;
 wire        lt_ack;
 reg  [24:0] lut_geom = 0;
 always @(posedge clk_sys) begin
 	if (gfx_pal_wr) begin
-		if (gfx_pal_addr[0]) lut_o[gfx_pal_addr[7:1]] <= gfx_pal_rgb;
-		else                 lut_e[gfx_pal_addr[7:1]] <= gfx_pal_rgb;
+		if (gfx_pal_addr[0]) lut_o[gfx_pal_addr[8:1]] <= gfx_pal_rgb;
+		else                 lut_e[gfx_pal_addr[8:1]] <= gfx_pal_rgb;
 	end
-	lut_qe <= lut_e[lt_addr[6:0]];
-	lut_qo <= lut_o[lt_addr[6:0]];
+	lut_qe <= lut_e[lt_addr[7:0]];
+	lut_qo <= lut_o[lt_addr[7:0]];
 end
 always @(posedge clk_sys) begin
 	lt_rd <= 1'b0; lt_rd2 <= lt_rd;
@@ -333,16 +341,16 @@ always @(posedge clk_sys) begin
 		lut_dirty <= 1'b1; lut_quiet <= 0; lut_geom <= {gfx_height, gfx_width, gfx_on};
 	end else if (lut_dirty && !lt_req && !lt_rd && !lt_rd2) begin
 		if (lut_quiet != 13'h1FFF) lut_quiet <= lut_quiet + 1'd1;
-		else begin lut_dirty <= 1'b0; lt_addr <= 8'd0; lt_rd <= 1'b1; end
+		else begin lut_dirty <= 1'b0; lt_addr <= 9'd0; lt_rd <= 1'b1; end
 	end
 	// lt_rd: the entries of lt_addr are read this cycle; lt_rd2: the word goes out
 	if (lt_rd2) begin
 		lt_req <= 1'b1;
-		lt_data <= lt_addr[7] ? {39'd0, lut_geom} : {8'd0, lut_qo, 8'd0, lut_qe};
+		lt_data <= lt_addr[8] ? {39'd0, lut_geom} : {8'd0, lut_qo, 8'd0, lut_qe};
 	end
 	if (lt_req && lt_ack) begin
 		lt_req <= 1'b0;
-		if (lt_addr != 8'd128) begin lt_addr <= lt_addr + 1'd1; lt_rd <= 1'b1; end
+		if (lt_addr != 9'd256) begin lt_addr <= lt_addr + 1'd1; lt_rd <= 1'b1; end
 	end
 end
 
@@ -370,6 +378,7 @@ ddr3_port ddr3
 	.vr_req(vr_req), .vr_we(vr_we), .vr_addr(vr_addr), .vr_len(vr_len), .vr_ack(vr_ack),
 	.vr_wvalid(vr_wvalid), .vr_wdata(vr_wdata), .vr_be(vr_be), .vr_wready(vr_wready),
 	.vr_rvalid(vr_rvalid), .vr_rdata(vr_rdata),
+	.rf_req(rf_req), .rf_addr(rf_addr), .rf_len(rf_len), .rf_ack(rf_ack), .rf_rvalid(rf_rvalid), .rf_rdata(rf_rdata),
 	.DDRAM_BUSY(DDRAM_BUSY), .DDRAM_BURSTCNT(DDRAM_BURSTCNT), .DDRAM_ADDR(DDRAM_ADDR),
 	.DDRAM_DOUT(DDRAM_DOUT), .DDRAM_DOUT_READY(DDRAM_DOUT_READY), .DDRAM_RD(DDRAM_RD),
 	.DDRAM_DIN(DDRAM_DIN), .DDRAM_BE(DDRAM_BE), .DDRAM_WE(DDRAM_WE)
@@ -410,25 +419,16 @@ eeprom_save #(.CLK_HZ(64_000_000)) eeprom_save
 
 ///////////////////////   VIDEO   ////////////////////////////////
 
-// Artist: the scaler reads the VRAM from DDR3 itself (2048-byte lines, the
-// active width x height from the Artist's timing registers) through LUT0,
-// which Artist writes into the scaler's palette as it loads it. OSD
-// "Display": Auto = Artist while its video is on, else the serial console;
-// Graphics = always Artist; Serial console = never. Only the HDMI output
-// (the scaler) shows Artist; the analog output keeps the serial console
-// (STUBS S-024).
-wire fb_show = status[11:10] == 2'd2 ? 1'b0 : status[11:10] == 2'd1 ? 1'b1 : gfx_on;
-assign FB_EN     = fb_show && gfx_width != 12'd0 && gfx_height != 12'd0;
-assign FB_FORMAT = 5'b00011;          // 8 bpp through the palette
-assign FB_WIDTH  = gfx_width;
-assign FB_HEIGHT = gfx_height;
-assign FB_BASE   = 32'h3300_0000;
-assign FB_STRIDE = 14'd2048;
-assign FB_FORCE_BLANK = 1'b0;
-assign FB_PAL_CLK  = clk_sys;
-assign FB_PAL_ADDR = gfx_pal_addr;
-assign FB_PAL_DOUT = gfx_pal_rgb;
-assign FB_PAL_WR   = gfx_pal_wr;
+// Artist makes its own picture (rtl/artist/artist_video.sv): the active size
+// from its timing registers, one pixel a clock, through LUT0/LUT1 by the
+// attribute plane, the hardware cursor laid over it. OSD "Display": Auto =
+// Artist while its video is on, else the serial console; Graphics = always
+// Artist; Serial console = never. Both outputs (scaler and analog) carry it
+// (STUBS S-024). "Original" aspect: square pixels (the active size) for
+// Artist, 4:3 for the console.
+wire gfx_show = status[11:10] == 2'd2 ? 1'b0 : status[11:10] == 2'd1 ? 1'b1 : gfx_on;
+assign VIDEO_ARX = (!ar) ? (gfx_show ? {1'b0, gfx_width} : 13'd4) : (ar - 1'd1);
+assign VIDEO_ARY = (!ar) ? (gfx_show ? {1'b0, gfx_height} : 13'd3) : 13'd0;
 
 // The serial console: 640x480 at 21.3 MHz (one pixel every third clock,
 // 680 x 525 total, 59.7 Hz): the machine's RS-232 console as text, the
@@ -446,6 +446,8 @@ always @(posedge clk_sys) begin
 	end
 end
 wire       pwr_on = !pcr[1] && (!pcr[0] || blink[24]);
+wire [7:0] st_r, st_g, st_b;
+wire       st_hs, st_vs, st_de;
 
 serial_term serial_term
 (
@@ -455,11 +457,13 @@ serial_term serial_term
 	.pix_ce(pdiv == 2'd0), .hc(hc), .vc(vc),
 	.hs_in(hc >= 10'd656 && hc < 10'd672), .vs_in(vc >= 10'd490 && vc < 10'd492),
 	.de_in(hc < 10'd640 && vc < 10'd480),
-	.r(VGA_R), .g(VGA_G), .b(VGA_B), .hs(VGA_HS), .vs(VGA_VS), .de(VGA_DE)
+	.r(st_r), .g(st_g), .b(st_b), .hs(st_hs), .vs(st_vs), .de(st_de)
 );
 
 assign CLK_VIDEO = clk_sys;
-assign CE_PIXEL  = pdiv == 2'd0;
+assign CE_PIXEL  = gfx_show ? 1'b1 : pdiv == 2'd0;
+assign {VGA_R, VGA_G, VGA_B, VGA_HS, VGA_VS, VGA_DE} = gfx_show ? {gfx_r, gfx_g, gfx_b, gfx_hs, gfx_vs, gfx_de}
+                                                                  : {st_r, st_g, st_b, st_hs, st_vs, st_de};
 
 ///////////////////////   LEDS   /////////////////////////////////
 

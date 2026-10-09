@@ -98,7 +98,7 @@ module emu #(
 	output [11:0] gfx_width,
 	output [11:0] gfx_height,
 	output        gfx_pal_wr,
-	output [7:0]  gfx_pal_addr,
+	output [8:0]  gfx_pal_addr,
 	output [23:0] gfx_pal_rgb
 );
 
@@ -154,7 +154,11 @@ logic [31:0] gr [32];
 logic [31:0] pcr;
 
 logic        vr_req, vr_we, vr_ack, vr_wvalid, vr_wready, vr_rvalid;
-logic [17:0] vr_addr;
+logic [18:0] vr_addr;
+logic        rf_req, rf_ack, rf_rvalid;
+logic [18:0] rf_addr;
+logic [6:0]  rf_len;
+logic [63:0] rf_rdata;
 logic [6:0]  vr_len;
 logic [63:0] vr_wdata, vr_rdata;
 logic [7:0]  vr_be;
@@ -182,7 +186,9 @@ hp715 #(.CLK_HZ(64_000_000), .SIM_FAST(1'b1), .HAS_ARTIST(1'b1)) u_hp715 (
 	.vr_req(vr_req), .vr_we(vr_we), .vr_addr(vr_addr), .vr_len(vr_len), .vr_ack(vr_ack),
 	.vr_wvalid(vr_wvalid), .vr_wdata(vr_wdata), .vr_be(vr_be), .vr_wready(vr_wready),
 	.vr_rvalid(vr_rvalid), .vr_rdata(vr_rdata),
+	.rf_req(rf_req), .rf_addr(rf_addr), .rf_len(rf_len), .rf_ack(rf_ack), .rf_rvalid(rf_rvalid), .rf_rdata(rf_rdata),
 	.gfx_on(gfx_on), .gfx_width(gfx_width), .gfx_height(gfx_height),
+	.gfx_r(), .gfx_g(), .gfx_b(), .gfx_hs(), .gfx_vs(), .gfx_de(), .gfx_underrun(),
 	.gfx_pal_wr(gfx_pal_wr), .gfx_pal_addr(gfx_pal_addr), .gfx_pal_rgb(gfx_pal_rgb),
 	.dbg_ctl(sim_trace), .dbg_retire(debug_retire), .dbg_nullified(debug_nullified), .dbg_iaoq_f(debug_iaoq_f),
 	.dbg_iaoq_b(debug_iaoq_b), .dbg_insn(debug_insn), .dbg_trap(debug_trap), .dbg_trap_vec(debug_trap_vec),
@@ -260,36 +266,59 @@ end
 // cycles after the acknowledge.
 //----------------------------------------------------------------------------
 logic [63:0] vram [262144];
+logic [63:0] aram [32768];        // the attribute plane (vr_addr[18]): word {y, x[10:6]}
 logic [1:0]  v_st;                // 0 idle, 1 write burst, 2 read burst
-logic [17:0] v_addr;
+logic [18:0] v_addr;
 logic [6:0]  v_left;
 logic [3:0]  v_wait;
 wire         v_wtake = (v_st == 2'd0 && vr_req && vr_we && vr_wvalid) || (v_st == 2'd1 && vr_wvalid);
+wire  [18:0] v_wa = v_st == 2'd0 ? vr_addr : v_addr;
 assign vr_wready = v_wtake;
 assign vr_ack = (v_st == 2'd0 && vr_req && (vr_we ? vr_wvalid : 1'b1));
 always_ff @(posedge clk_sys) begin
 	vr_rvalid <= 1'b0;
-	if (v_wtake) for (int b = 0; b < 8; b++) if (vr_be[b]) vram[v_st == 2'd0 ? vr_addr : v_addr][8*b +: 8] <= vr_wdata[8*b +: 8];
+	if (v_wtake) begin
+		if (v_wa[18]) aram[v_wa[14:0]] <= vr_wdata;
+		else for (int b = 0; b < 8; b++) if (vr_be[b]) vram[v_wa[17:0]][8*b +: 8] <= vr_wdata[8*b +: 8];
+	end
 	case (v_st)
 		2'd0: if (vr_req) begin
 			if (vr_we) begin
-				if (vr_wvalid && vr_len != 7'd1) begin v_st <= 2'd1; v_addr <= vr_addr + 18'd1; v_left <= vr_len - 7'd1; end
+				if (vr_wvalid && vr_len != 7'd1) begin v_st <= 2'd1; v_addr <= vr_addr + 19'd1; v_left <= vr_len - 7'd1; end
 			end else begin
 				v_st <= 2'd2; v_addr <= vr_addr; v_left <= vr_len; v_wait <= 4'd8;
 			end
 		end
 		2'd1: if (v_wtake) begin
-			v_addr <= v_addr + 18'd1; v_left <= v_left - 7'd1;
+			v_addr <= v_addr + 19'd1; v_left <= v_left - 7'd1;
 			if (v_left == 7'd1) v_st <= 2'd0;
 		end
 		default: if (v_wait != 4'd0) v_wait <= v_wait - 4'd1;
 		else begin
-			vr_rvalid <= 1'b1; vr_rdata <= vram[v_addr];
-			v_addr <= v_addr + 18'd1; v_left <= v_left - 7'd1;
+			vr_rvalid <= 1'b1; vr_rdata <= v_addr[18] ? aram[v_addr[14:0]] : vram[v_addr[17:0]];
+			v_addr <= v_addr + 19'd1; v_left <= v_left - 7'd1;
 			if (v_left == 7'd1) v_st <= 2'd0;
 		end
 	endcase
 	if (reset) v_st <= 2'd0;
+end
+
+// the display's line fetch (Artist rf_*): its beats 8 cycles after the acknowledge
+logic        f_busy;
+logic [18:0] f_addr;
+logic [6:0]  f_left;
+logic [3:0]  f_wait;
+always_ff @(posedge clk_sys) begin
+	rf_ack <= 1'b0; rf_rvalid <= 1'b0;
+	if (!f_busy) begin
+		if (rf_req && !rf_ack) begin rf_ack <= 1'b1; f_busy <= 1'b1; f_addr <= rf_addr; f_left <= rf_len; f_wait <= 4'd8; end
+	end else if (f_wait != 4'd0) f_wait <= f_wait - 4'd1;
+	else begin
+		rf_rvalid <= 1'b1; rf_rdata <= f_addr[18] ? aram[f_addr[14:0]] : vram[f_addr[17:0]];
+		f_addr <= f_addr + 19'd1; f_left <= f_left - 7'd1;
+		if (f_left == 7'd1) f_busy <= 1'b0;
+	end
+	if (reset) f_busy <= 1'b0;
 end
 
 // check store

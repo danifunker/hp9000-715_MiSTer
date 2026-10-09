@@ -77,9 +77,10 @@ module hp715 #(
     output logic        ee_dirty,
     input  logic        ee_dirty_clr,
     // Artist's VRAM (rtl/artist/artist.sv: 2048 x 1024 x 8, 64-bit words
-    // {y, x[10:3]}, pixel x in byte lane x[2:0]) and its display outputs
+    // {y, x[10:3]}, pixel x in byte lane x[2:0]; vr_addr[18] = the attribute
+    // plane, word {y, x[10:6]}), its display's line fetch and video
     output logic        vr_req, vr_we,
-    output logic [17:0] vr_addr,
+    output logic [18:0] vr_addr,
     output logic [6:0]  vr_len,
     input  logic        vr_ack,
     output logic        vr_wvalid,
@@ -88,10 +89,19 @@ module hp715 #(
     input  logic        vr_wready,
     input  logic        vr_rvalid,
     input  logic [63:0] vr_rdata,
+    output logic        rf_req,
+    output logic [18:0] rf_addr,
+    output logic [6:0]  rf_len,
+    input  logic        rf_ack,
+    input  logic        rf_rvalid,
+    input  logic [63:0] rf_rdata,
     output logic        gfx_on,             // the Artist's video is enabled
     output logic [11:0] gfx_width, gfx_height,
-    output logic        gfx_pal_wr,         // LUT0 entry gfx_pal_addr := gfx_pal_rgb
-    output logic [7:0]  gfx_pal_addr,
+    output logic [7:0]  gfx_r, gfx_g, gfx_b,   // its picture (one pixel a clock)
+    output logic        gfx_hs, gfx_vs, gfx_de,
+    output logic        gfx_underrun,
+    output logic        gfx_pal_wr,         // LUT entry gfx_pal_addr := gfx_pal_rgb (256-511 = LUT1)
+    output logic [8:0]  gfx_pal_addr,
     output logic [23:0] gfx_pal_rgb,
     // debug
     input  logic [7:0]  dbg_ctl,            // simulator trace switches: [0] GSC accesses, [1] I-cache, [2] SCSI, [5] Artist
@@ -441,14 +451,19 @@ module hp715 #(
             .vr_req(vr_req), .vr_we(vr_we), .vr_addr(vr_addr), .vr_len(vr_len), .vr_ack(vr_ack),
             .vr_wvalid(vr_wvalid), .vr_wdata(vr_wdata), .vr_be(vr_be), .vr_wready(vr_wready),
             .vr_rvalid(vr_rvalid), .vr_rdata(vr_rdata),
+            .rf_req(rf_req), .rf_addr(rf_addr), .rf_len(rf_len), .rf_ack(rf_ack), .rf_rvalid(rf_rvalid), .rf_rdata(rf_rdata),
             .video_on(gfx_on), .hactive(gfx_width), .vactive(gfx_height),
+            .vid_r(gfx_r), .vid_g(gfx_g), .vid_b(gfx_b), .vid_hs(gfx_hs), .vid_vs(gfx_vs), .vid_de(gfx_de),
+            .vid_underrun(gfx_underrun),
             .pal_wr(gfx_pal_wr), .pal_addr(gfx_pal_addr), .pal_rgb(gfx_pal_rgb), .busy());
     end else begin : g_no_artist
         assign a_ack = 1'b0; assign a_err = 1'b0; assign a_rdata = 32'd0;
-        assign vr_req = 1'b0; assign vr_we = 1'b0; assign vr_addr = 18'd0; assign vr_len = 7'd0;
+        assign vr_req = 1'b0; assign vr_we = 1'b0; assign vr_addr = 19'd0; assign vr_len = 7'd0;
         assign vr_wvalid = 1'b0; assign vr_wdata = 64'd0; assign vr_be = 8'd0;
+        assign rf_req = 1'b0; assign rf_addr = 19'd0; assign rf_len = 7'd0;
         assign gfx_on = 1'b0; assign gfx_width = 12'd0; assign gfx_height = 12'd0;
-        assign gfx_pal_wr = 1'b0; assign gfx_pal_addr = 8'd0; assign gfx_pal_rgb = 24'd0;
+        assign {gfx_r, gfx_g, gfx_b, gfx_hs, gfx_vs, gfx_de, gfx_underrun} = '0;
+        assign gfx_pal_wr = 1'b0; assign gfx_pal_addr = 9'd0; assign gfx_pal_rgb = 24'd0;
     end endgenerate
 
     always_comb begin

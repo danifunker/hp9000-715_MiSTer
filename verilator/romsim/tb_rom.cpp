@@ -124,10 +124,10 @@ static void dump_mem(const char* file, unsigned long long addr, unsigned long lo
 	fclose(f);
 	fprintf(stderr, "romsim: dumped %llu bytes at %08llx to %s\n", len, addr, file);
 }
-// --fbshot: Artist's screen (the VRAM array in sim.v through LUT0, copied here
-// from its writes),
+// --fbshot: Artist's screen (the VRAM array in sim.v through LUT0 or LUT1 by
+// the attribute plane's bit, the LUTs copied here from their writes; no cursor),
 // the active area (1280 x 1024 until the ROM programs a mode), as a PPM
-static unsigned lut0[256];
+static unsigned lut0[512];
 static void fbshot(const char* file) {
 	unsigned w = top->gfx_width, h = top->gfx_height;
 	if (w == 0 || w > 2048 || h == 0 || h > 1024) { w = 1280; h = 1024; }
@@ -137,7 +137,8 @@ static void fbshot(const char* file) {
 	for (unsigned y = 0; y < h; y++)
 		for (unsigned x = 0; x < w; x++) {
 			unsigned long long q = top->rootp->emu__DOT__vram[y * 256 + x / 8];
-			unsigned rgb = lut0[(q >> (8 * (x & 7))) & 0xFF];
+			unsigned a = (top->rootp->emu__DOT__aram[y * 32 + x / 64] >> (x & 63)) & 1;
+			unsigned rgb = lut0[a << 8 | ((q >> (8 * (x & 7))) & 0xFF)];
 			fputc(rgb >> 16, f); fputc((rgb >> 8) & 0xFF, f); fputc(rgb & 0xFF, f);
 		}
 	fclose(f);

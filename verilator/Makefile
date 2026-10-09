@@ -36,7 +36,7 @@ V_OPT = --x-assign fast --x-initial fast --noassert --unroll-count 256
 # CPU_RTL is defined below with the CPU benches.
 MACHINE_RTL = $(RTL)/mioc_ecc.sv $(RTL)/mioc.sv $(RTL)/hp_xbus.sv $(RTL)/lasi/lasi_uart.sv \
 	$(RTL)/lasi/lasi_ps2.sv $(RTL)/lasi/ps2_dev.sv $(RTL)/lasi/lasi.sv $(RTL)/wax_stub.sv \
-	$(RTL)/scsi/ncr53c710.sv $(RTL)/scsi/scsi_targets.sv $(RTL)/artist/artist.sv \
+	$(RTL)/scsi/ncr53c710.sv $(RTL)/scsi/scsi_targets.sv $(RTL)/artist/artist.sv $(RTL)/artist/artist_video.sv \
 	$(RTL)/rom_loader.sv $(RTL)/hp715.sv
 V_SRC = $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v
 
@@ -145,7 +145,7 @@ tb_ldst: obj_dir_tb/mem_vectors.txt
 # semantics, with a VRAM model of random latency (tb/tb_artist.cpp)
 tb_artist:
 	$(TB_V) +define+SIMULATION=1 -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC --top-module artist -o tb_artist \
-		$(RTL)/artist/artist.sv tb/tb_artist.cpp
+		$(RTL)/artist/artist.sv $(RTL)/artist/artist_video.sv tb/tb_artist.cpp
 	./obj_dir_tb/tb_artist
 
 .PHONY: tb_artist

@@ -17,9 +17,11 @@
 #                             forever) -- also appended to $LOG
 #   board.sh type TEXT        type into the console (\r for Return)
 #   board.sh shot OUT.png     a MiSTer screenshot of the video output (the
-#                             core's own video: not Artist's frame buffer)
-#   board.sh vram OUT.png     Artist's screen: the VRAM and the LUT0 copy read
-#                             from DDR3, rendered (tools/mister/vram.py)
+#                             core's video: Artist's picture or the console)
+#   board.sh vram OUT.png     Artist's screen: the VRAM, the LUT0/LUT1 copy and
+#                             the attribute plane read from DDR3, rendered
+#                             (tools/mister/vram.py; no cursor)
+#   (the real HDMI output: tools/mister/obs_shot.py, through the user's OBS)
 #   board.sh key TEXT         type on a virtual keyboard (tools/mister/kbd.py:
 #                             \r \t \b \e escapes, {up} {f1} {ctrl-c} ...) --
 #                             the core's PS/2 keyboard, for graphics consoles
@@ -111,8 +113,8 @@ vram)
     rsh "python3 -c \"
 import os, mmap, sys
 fd = os.open('/dev/mem', os.O_RDONLY | os.O_SYNC)
-m = mmap.mmap(fd, 0x201000, mmap.MAP_SHARED, mmap.PROT_READ, offset=0x33000000)
-sys.stdout.buffer.write(m[:0x200000] + m[0x200000:0x200408])\"" > "$raw"
+m = mmap.mmap(fd, 0x440000, mmap.MAP_SHARED, mmap.PROT_READ, offset=0x33000000)
+sys.stdout.buffer.write(m[:0x200000] + m[0x200000:0x200808] + m[0x400000:0x440000])\"" > "$raw"
     python3 "$(dirname "$0")/vram.py" "$raw" "$out"
     ;;
 key|mouse)

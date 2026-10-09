@@ -135,50 +135,66 @@ A fill moves DSTXY's y down by the fill's height while 0x100080 holds
 0x7D (QEMU's rule from HP-UX's X server; the NGLE manual says HCRX and the
 PCI EG always do).
 
-## 4. Colour map and display
+## 4. Colour maps, attribute plane and display
 
 Writes through BA buffer 15 (CPU: `FB + 4i` in mode 0x3BA0F000; BINC: Linux's
 0xBBE0F000) store 0x00RRGGBB into a 512-entry staging line at x; a write to
 0x300118 with bit 31 copies `ctl[9:0]` entries (0 = 512) from staging x =
-BINC source (0x100480) bits 12:2 to LUT entries from `ctl[25:16]` on (08 3.1). LUT0
-(entries 0..255) goes out on `pal_*` as it is written: on the board into the
-scaler's palette (`FB_PAL_*`), in the simulator into romsim's copy. LUT1 is
-not kept.
+BINC source (0x100480) bits 12:2 to LUT entries from `ctl[25:16]` on (08 3.1):
+entries 0-255 are LUT0, 256-511 LUT1. Both are kept by the display
+(`artist_video`) and go out on `pal_*` (9-bit address) for the board tools'
+copy (`HP9K715.sv`, DDR3 0x3320_0000) and romsim's `--fbshot`.
 
-The LUT blt's type field (ctl[15:14], NGLE manual 5): 0 = the colour map
-(LUT0 entries 0-255 go to the display; LUT1 is not kept), 2 = the cursor
-colours (four entries; 3 colours image pixels, 2 mask-only ones), 1 and 3
-are dropped.
+The LUT blt's type field (ctl[15:14], NGLE manual 5): 0 = the colour maps,
+2 = the cursor colours (four entries; 3 colours image pixels, 2 mask-only
+ones), 1 and 3 are dropped. Bit 30 (wait for vertical blank) is ignored:
+the copy is done at once.
 
-### 4.1 The hardware cursor
+**Attribute plane** (buffer 13; review 09 4.2): one bit a pixel, LUT0 or
+LUT1, in DDR3 beside the VRAM (`vr_addr[18]` = 1: doubleword {y, x[10:6]},
+pixel x in bit x[5:0]; 0x3340_0000 on the board). Written only by
+rectangle fills with CONTROL_PLANE != 0 and DST buffer 13 -- X's
+`nglePolyPaintAttr` (0x01000102 = LUT1, 0x102 = LUT0), Linux's
+`SETUP_ATTR_ACCESS` (0x102 everywhere): the pixels' bit := CONTROL_PLANE bit
+24 (`K_ATTR`: 64 pixels a word, edge words read first). Cleared to LUT0
+after every reset (DDR3 holds junk at power-up; the ROM loads both LUTs
+alike and never paints it). Moves, CPU reads and writes of buffer 13 are
+not done (S-023).
 
-A 64 x 64 sprite: the image in buffer 6, the mask in buffer 7, written
-through the window or BINC in an Otc32 mode, 32 pixels per word (x 0 or
-32 of a row; pixel x in bit 63-x of the row). Enabled by CURSOR_CTRL
-(0x300104) bit 7 while the video is on; the position as HP-UX's X server
-computes it (review 09 3.4): x = 4 * POS[31:19] + POS[17:16] + 16 - 4 *
-(0x300200[23:16] + 0x300200[15:8] + 2), the first screen row shown =
-vactive - 1 - POS[15:0], and CTRL[5:0] sprite rows cut off at the top
-(the pointer above the screen's top edge). Mask 0 = transparent.
+### 4.1 The display (`rtl/artist/artist_video.sv`)
 
-There is no overlay stage after the MiSTer scaler, so the sprite is drawn
-into the VRAM. `K_CURSOR` reads the 64 x 64 area's words (up to 9 a row)
-into a save-under RAM (1024 x 64, row {r, k}) and writes the sprite pixels
-(mask set: image ? the LUT0 entry nearest cursor colour 3 : nearest
-colour 2; found by a pipelined 256-clock search after each LUT load); `K_RESTORE`
-writes the saved words back. The engine runs `K_RESTORE` before any GSC
-access to the engine or the window (so neither the CPU nor a drawing
-operation ever sees or overwrites the sprite) and when the sprite moves,
-changes or is switched off, and `K_CURSOR` once nothing has touched the
-engine for 16,000 clocks (0.25 ms). It is clipped to the active area.
+Artist makes the picture, as the 715's RAMDAC does, and it is the core's
+video (`HP9K715.sv` VGA_*, CE_PIXEL = 1 on clk_sys; the OSD "Display"
+picks it or the serial console): one pixel a clock at 64 MHz, the active
+size from the timing registers (`hactive` = 4 * ((MISC_VIDEO[3:0] << 8 |
+0x300200[31:24]) + 1), `vactive` = (MISC_VIDEO[11:8] << 8 |
+0x300208[31:24]) + 1, at most 2048 x 1024, taken at a frame's start), fixed
+blanking of 16 + 32 + 48 clocks and 3 + 4 + 9 lines: 1280 x 1024 at 44.7 Hz,
+1024 x 768 at 72.9 Hz. The MiSTer scaler converts that to the HDMI mode
+(the ini section `[HP9K715]` video_mode=8, vscale_mode=1 shows 1024 lines
+1:1 on 1080p). `video_on` = MISC_VIDEO bits 27 and 25 (black while clear).
 
-Video registers are storage that reads back exactly (MISC_VIDEO, 08 3.3);
-`gfx_width` = 4 * ((MISC_VIDEO[3:0] << 8 | 0x300200[31:24]) + 1), `gfx_height`
-= (MISC_VIDEO[11:8] << 8 | 0x300208[31:24]) + 1, `gfx_on` = MISC_VIDEO bits
-27 and 25. `HP9K715.sv`: FB_EN while the OSD "Display" says Auto and
-`gfx_on`, or Graphics; FB_FORMAT 8 bpp palette, FB_BASE 0x3300_0000,
-FB_STRIDE 2048. The analog output keeps the serial console (S-024).
+While line n is shown, line n + 1's VRAM words (hactive / 8) and attribute
+words (hactive / 64) are fetched into the other half of two line buffers
+(`rf_*`: bursts of up to 64, one at a time, a separate client of the DDR3
+port, above the engine's VRAM bursts); a line not complete when its turn
+comes sets the sticky `vid_underrun`. Pixel pipeline: line-buffer reads ->
+the pixel byte and its attribute bit address the 512-entry LUT -> the
+cursor's bit overrides it -> outputs (3 clocks).
 
+**The hardware cursor**: a 64 x 64 sprite, the image in buffer 6, the mask
+in buffer 7, written through the window or BINC in an Otc32 mode, 32 pixels
+per word (x 0 or 32 of a row; pixel x in bit 63-x of the row). Enabled by
+CURSOR_CTRL (0x300104) bit 7 while the video is on; the position as HP-UX's
+X server computes it (review 09 3.4): x = 4 * POS[31:19] + POS[17:16] + 16
+- 4 * (0x300200[23:16] + 0x300200[15:8] + 2), the first screen row shown =
+vactive - 1 - POS[15:0], showing sprite row CTRL[5:0] (the rows cut off at
+the top). Mask 0 = transparent, else image ? cursor colour 3 : colour 2
+(RGB straight from the LUT blt type 2). The display reads the sprite row a
+line ahead (`c_row` -> `c_img`/`c_msk`, Artist's bitmap RAMs); nothing of
+it is ever in the VRAM.
+
+Video registers are storage that reads back exactly (MISC_VIDEO, 08 3.3).
 The self_test signature 0x30023C returns the constant for the current width
 (S-023); 0x300238's busy bits read 0.
 
@@ -194,7 +210,18 @@ The self_test signature 0x30023C returns the constant for the current width
   wide), transparent bitmaps, both CPU read kinds, both LUT-load styles,
   `sth` glyph rows, the font engine, vectors (whole, clipped -- each must
   draw the tail of the whole line --, dashed segments, a double dash, a
-  dashed polyline, points), J-plane moves, the cursor.
+  dashed polyline, points), J-plane moves, the attribute plane (cleared
+  after reset from junk, LUT1 and LUT0 paints incl. a 1-pixel-wide one).
+  The display is served by its own fetch model (random latency and gaps)
+  and checked a whole frame at a time from its video outputs against
+  LUT[attribute][pixel] with the cursor laid over: without a cursor, at
+  100,200, over a fill drawn under it (the VRAM never sees the cursor), off
+  the left edge, clipped right and below, 10 rows cut off at the top,
+  switched off; no underruns.
 * romsim (`verilator/romsim`): `--arttrace` prints every operation,
   `--fbshot CYCLE FILE` / `--fbshot-end FILE` write the screen (active area
-  through LUT0) as a PPM.
+  through LUT0/LUT1 by the attribute plane, no cursor) as a PPM; sim.v
+  serves the display's fetch port from its VRAM and attribute arrays.
+* Board: `tools/mister/board.sh vram` renders DDR3's VRAM, LUT copy and
+  attribute plane; `tools/mister/obs_shot.py` takes the real HDMI output
+  through the user's OBS (obs-websocket v5, 192.168.99.82:4455).

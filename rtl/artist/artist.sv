@@ -27,9 +27,15 @@
 // it runs, and a GSC access that must not overtake it (engine registers,
 // the window, the LUT load) waits for it (08 2.7).
 //
-// The colour map: CPU or BINC writes to buffer 15 go to a 512-entry staging
-// line; a write to 0x300118 copies entries into the LUT, whose first 256
-// entries (LUT0) are the display palette (pal_* out). LUT1 is not kept.
+// The colour maps: CPU or BINC writes to buffer 15 go to a 512-entry staging
+// line; a write to 0x300118 copies entries into LUT0 (0-255) and LUT1
+// (256-511), kept by the display (artist_video.sv; also on pal_* for the
+// board tools). The attribute plane (buffer 13) is one bit a pixel, LUT0 or
+// LUT1, written by fills with CONTROL_PLANE set (bit 24 = LUT1; review 09
+// 4.2) and cleared at reset; it lives beside the VRAM (vr_addr[18] = 1: word
+// {y, x[10:6]}, pixel x in bit x[5:0]). The display (artist_video) makes the
+// picture from both, a line ahead (rf_* port), with the hardware cursor
+// laid over it, and drives the video outputs.
 module artist (
     input  logic        clk,
     input  logic        rst_n,          // machine reset
@@ -44,7 +50,7 @@ module artist (
     output logic [31:0] rdata,
     // VRAM
     output logic        vr_req, vr_we,
-    output logic [17:0] vr_addr,
+    output logic [18:0] vr_addr,        // [18]: the attribute plane
     output logic [6:0]  vr_len,         // 1..64
     input  logic        vr_ack,
     output logic        vr_wvalid,
@@ -53,11 +59,21 @@ module artist (
     input  logic        vr_wready,
     input  logic        vr_rvalid,
     input  logic [63:0] vr_rdata,
+    // the display's line fetch (artist_video.sv)
+    output logic        rf_req,
+    output logic [18:0] rf_addr,
+    output logic [6:0]  rf_len,
+    input  logic        rf_ack,
+    input  logic        rf_rvalid,
+    input  logic [63:0] rf_rdata,
     // display
     output logic        video_on,       // MISC_VIDEO bits 27 and 25
     output logic [11:0] hactive, vactive,
-    output logic        pal_wr,         // LUT0 entry pal_addr := pal_rgb (0xRRGGBB)
-    output logic [7:0]  pal_addr,
+    output logic [7:0]  vid_r, vid_g, vid_b,
+    output logic        vid_hs, vid_vs, vid_de,
+    output logic        vid_underrun,
+    output logic        pal_wr,         // LUT entry pal_addr := pal_rgb (0xRRGGBB; 256-511 = LUT1)
+    output logic [8:0]  pal_addr,
     output logic [23:0] pal_rgb,
     output logic        busy
 );
@@ -169,7 +185,7 @@ module artist (
     endfunction
 
     // ------------------------------------------------------------ the engine
-    typedef enum logic [2:0] { K_SOLID, K_BITS, K_BYTES, K_MOVE, K_CURSOR, K_RESTORE } kind_e;
+    typedef enum logic [2:0] { K_SOLID, K_BITS, K_BYTES, K_MOVE, K_ATTR } kind_e;
     typedef enum logic [3:0] { E_IDLE, E_LAUNCH, E_ROW, E_RDS, E_RDD, E_WR, E_NEXT, E_RDG, E_GET, E_LUT, E_LSET, E_LINE } est_e;
     est_e        e_st;
     kind_e       e_kind;
@@ -195,6 +211,7 @@ module artist (
     logic        e_line;
     logic [31:0] r80c;                    // the count register (bits 31:16): 0x10080C, 0x100CCC, 0x100ECC
     logic        pat_mode;                // a dashed vector is open: 0x100CCC draws its next dash
+    logic        a_clr;                   // the attribute plane is to be cleared (after a reset)
     // an operation's operands, captured by G_DEC for E_LAUNCH
     logic        lq_put, lq_fill, lq_move, lq_font, lq_line, lq_incl, lq_lto, lq_dash, lq_cont;
     logic [31:0] lq_d, lq_dxy, lq_wh, lq_sxy, lq_xfer, lq_end;
@@ -218,13 +235,14 @@ module artist (
     logic [2:0]  r_sh;                    // source byte offset within a word pair
     logic        r_sneg;                  // the source starts further left in its word than the destination
     // VRAM reads
-    logic [17:0] rd_base;
+    logic [18:0] rd_base;
     logic [8:0]  rd_n, rd_req, rd_got;
     logic [63:0] rw [5];                  // a CPU read's words
     // the write pipeline: line-buffer read (step wi) -> compute -> FIFO -> bursts
     logic [8:0]  wi;                      // step 0 primes the source pair, step k+1 makes word k
     logic        p1_v, p1_prime;
     logic [12:0] p1_d;                    // (the word's first pixel) - x0, two's complement
+    logic [63:0] p1_amask;                // K_ATTR: the word's pixels inside the span
     logic [63:0] prev;
     logic [71:0] fifo [8];
     logic [2:0]  f_rp, f_wp;
@@ -235,110 +253,49 @@ module artist (
     assign busy = e_busy;
 
     // ------------------------------------------------- the hardware cursor
-    // (08 3.6; the NGLE manual 6; QEMU artist_get_cursor_pos): a 64 x 64
-    // sprite, image in buffer 6, mask in buffer 7 (32 pixels per Otc32 write,
-    // pixel x in bit 63-x of a row), colours from LUT blt type 2 (entry 3 for
-    // image pixels, 2 for mask-only ones) mapped to the nearest LUT0 entry.
-    // The MiSTer scaler reads the VRAM itself, so the sprite is drawn into
-    // the VRAM: the words under it are kept in a save-under buffer, it is
-    // taken out again (K_RESTORE) before any GSC access to the engine or the
-    // window can see or overwrite it, and drawn (K_CURSOR) once nothing has
-    // touched the engine for CUR_IDLE clocks (STUBS S-023).
-    localparam logic [15:0] CUR_IDLE = 16'd16000;      // 0.25 ms at 64 MHz
+    // (08 3.6; the NGLE manual 6; review 09 3): a 64 x 64 sprite, image in
+    // buffer 6, mask in buffer 7 (32 pixels per Otc32 write, pixel x in bit
+    // 63-x of a row), colours from LUT blt type 2 (entry 3 for image pixels,
+    // 2 for mask-only ones), laid over the picture by the display
+    // (artist_video), which reads a row a line ahead (c_row -> c_img/c_msk)
     logic        cb_we, cb_msk, cb_half;
     logic [5:0]  cb_row;
     logic [31:0] cb_data;
     logic [31:0] cimg_hi [64], cimg_lo [64], cmsk_hi [64], cmsk_lo [64];
-    logic [63:0] c_img, c_msk;                 // the row being drawn (e_cr)
-    logic [71:0] sr_img, sr_msk;               // the same, aligned to the current word's lanes (bit 71 = lane 0)
-    logic [63:0] su_ram [1024];                // save-under: drawn row r, word k at {r, k}
-    logic [63:0] su_q;
-    logic        su_we;
-    logic [9:0]  su_wa, su_ra;
-    logic [63:0] su_wd;
-    logic        c_shown, c_dirty;
-    logic signed [15:0] c_sx, c_sy;            // where it is drawn (x, first row shown)
-    logic [5:0]  c_syoff;                      // ... and the sprite row shown there
-    logic [5:0]  e_cr;                         // the cursor row of the current VRAM row
-    logic [5:0]  e_cxoff;                      // the cursor column of the span's first pixel
-    logic [15:0] c_idle;
-    logic [7:0]  c_fgi, c_bgi;                 // LUT0 entries nearest the cursor colours
+    logic [5:0]  c_row;
+    logic [63:0] c_img, c_msk;
     always_ff @(posedge clk) begin
         if (cb_we && !cb_msk && !cb_half) cimg_hi[cb_row] <= cb_data;
         if (cb_we && !cb_msk &&  cb_half) cimg_lo[cb_row] <= cb_data;
         if (cb_we &&  cb_msk && !cb_half) cmsk_hi[cb_row] <= cb_data;
         if (cb_we &&  cb_msk &&  cb_half) cmsk_lo[cb_row] <= cb_data;
-        c_img <= {cimg_hi[e_cr], cimg_lo[e_cr]};
-        c_msk <= {cmsk_hi[e_cr], cmsk_lo[e_cr]};
+        c_img <= {cimg_hi[c_row], cimg_lo[c_row]};
+        c_msk <= {cmsk_hi[c_row], cmsk_lo[c_row]};
     end
-    always_ff @(posedge clk) begin
-        if (su_we) su_ram[su_wa] <= su_wd;
-        su_q <= su_ram[su_ra];
-    end
-    assign su_ra = {e_cr, 4'(wi - 9'd1)};
 
-    // its position: the X11R6.6 formula QEMU uses (x from the porches in
-    // 0x300200, 4-pixel video interleave, pipeline delay 4; y counted up
-    // from the bottom), less CURSOR_CTRL's offsets
+    // its position (review 09 3.4): x = 4*POS[31:19] + POS[17:16] + 16 - 4*hbp
+    // (hbp from the porches in 0x300200), the first row shown = vactive - 1 -
+    // POS[15:0], showing sprite row CTRL[5:0] (the rows cut off at the top)
     wire [15:0] c_hbp = {8'd0, reg19[23:16]} + {8'd0, reg19[15:8]} + 16'd2;
-    // (registered in two steps for timing: the position, then the clipped rectangle)
-    logic signed [15:0] c_x, c_y;                                          // sprite x, the first row shown
-    logic [5:0]  c_yoff;                                                   // sprite rows cut off at the top
+    logic signed [15:0] c_x, c_y;
+    logic [5:0]  c_yoff;
     logic        c_want;
-    // the rectangle to draw at c_x/c_y (g_*), from the position in gp_*
-    logic signed [15:0] gp_x, gp_y;
-    logic [5:0]  gp_yoff;
-    logic [11:0] g_x0, g_x1;
-    logic [10:0] g_y0, g_rows;
-    logic [5:0]  g_cr, g_cxoff;
-    // the rectangle drawn now (the restore uses exactly it)
-    logic [11:0] cs_x0, cs_x1;
-    logic [10:0] cs_y0, cs_rows;
-    logic [5:0]  cs_cr, cs_cxoff;
     always_ff @(posedge clk) begin
-        logic signed [15:0] x0, x1, y0, y1, oy;
         c_x <= $signed({1'b0, cur_pos[31:19], 2'b00}) + 16'sd16 - $signed({c_hbp[13:0], 2'b00})
                + $signed({14'd0, cur_pos[17:16]});
         c_y <= $signed({4'd0, vactive}) - 16'sd1 - $signed(cur_pos[15:0]);
         c_yoff <= cur_ctl[5:0];
         c_want <= cur_ctl[7] && video_on;
-        // oy: the screen row of sprite row 0 (rows above the first row shown are cut off)
-        oy = c_y - $signed({10'd0, c_yoff});
-        x0 = c_x < 0 ? 16'sd0 : c_x;
-        y0 = c_y < 0 ? 16'sd0 : c_y;
-        x1 = c_x + 16'sd64; y1 = oy + 16'sd64;
-        if (x1 > $signed({4'd0, hactive})) x1 = $signed({4'd0, hactive});
-        if (x1 > 16'sd2048) x1 = 16'sd2048;
-        if (y1 > $signed({4'd0, vactive})) y1 = $signed({4'd0, vactive});
-        if (y1 > 16'sd1024) y1 = 16'sd1024;
-        gp_x <= c_x; gp_y <= c_y; gp_yoff <= c_yoff;
-        g_x0 <= 12'(x0); g_x1 <= 12'(x1); g_y0 <= 11'(y0);
-        g_rows <= x1 > x0 && y1 > y0 ? 11'(y1 - y0) : 11'd0;
-        g_cr <= 6'(y0 - oy); g_cxoff <= 6'(x0 - c_x);
     end
-    wire        c_moved = gp_x != c_sx || gp_y != c_sy || gp_yoff != c_syoff;
 
-    // the nearest LUT0 entries to the cursor colours, searched after every
-    // LUT or cursor-colour load (256 clocks)
-    logic [23:0] lutsh [256];
-    logic [23:0] lutsh_q;
-    logic [8:0]  ns_i;
-    logic [7:0]  ns_qi;
-    logic        ns_run, ns_qv, ns_pend;
-    logic [9:0]  ns_dfg, ns_dbg, ns_df, ns_db;
-    logic [7:0]  ns_fgi, ns_bgi, ns_qi2;
-    logic        ns_qv2;
-    always_ff @(posedge clk) begin
-        if (pal_wr) lutsh[pal_addr] <= pal_rgb;
-        lutsh_q <= lutsh[ns_i[7:0]];
-    end
-    function automatic logic [9:0] cdist(input logic [23:0] a, input logic [23:0] b);
-        logic [7:0] dr, dg, db;
-        dr = a[23:16] > b[23:16] ? a[23:16] - b[23:16] : b[23:16] - a[23:16];
-        dg = a[15:8] > b[15:8] ? a[15:8] - b[15:8] : b[15:8] - a[15:8];
-        db = a[7:0] > b[7:0] ? a[7:0] - b[7:0] : b[7:0] - a[7:0];
-        return {2'b00, dr} + {2'b00, dg} + {2'b00, db};
-    endfunction
+    // ------------------------------------------------------------ the display
+    artist_video u_video (
+        .clk(clk), .rst(rst), .hactive(hactive), .vactive(vactive), .video_on(video_on),
+        .lut_wr(pal_wr), .lut_addr(pal_addr), .lut_rgb(pal_rgb),
+        .c_on(c_want), .c_x(c_x), .c_y(c_y), .c_yoff(c_yoff), .c_fg(cur_col[3]), .c_bg(cur_col[2]),
+        .c_row(c_row), .c_img(c_img), .c_msk(c_msk),
+        .rf_req(rf_req), .rf_addr(rf_addr), .rf_len(rf_len), .rf_ack(rf_ack), .rf_rvalid(rf_rvalid), .rf_rdata(rf_rdata),
+        .r(vid_r), .g(vid_g), .b(vid_b), .hs(vid_hs), .vs(vid_vs), .de(vid_de), .underrun(vid_underrun));
 
     assign vr_wvalid = f_n != 4'd0;
     assign vr_wdata  = fifo[f_rp][63:0];
@@ -396,14 +353,12 @@ module artist (
             if (!bit_ && e_transp) en = 1'b0;
             d = db_q[8 * j +: 8];
             c_word[8 * j +: 8] = e_rmw ? ((d & ~e_pm) | (rop8(e_rop, v, d) & e_pm)) : rop8(e_rop, v, 8'd0);
-            // the cursor's own kinds write exact indices: no raster op or plane mask
-            if (e_kind == K_CURSOR) begin
-                // mask 0 = transparent, else image ? foreground (colour 3) : background (2)
-                c_word[8 * j +: 8] = sr_img[71 - j] ? c_fgi : c_bgi;
-                if (!sr_msk[71 - j]) en = 1'b0;
-            end
-            if (e_kind == K_RESTORE) c_word[8 * j +: 8] = su_q[8 * j +: 8];
             c_be[j] = en;
+        end
+        // the attribute plane: 64 pixels a word, the span's bits := the LUT bit
+        if (e_kind == K_ATTR) begin
+            c_word = (db_q & ~p1_amask) | ({64{e_color[0]}} & p1_amask);
+            c_be = 8'hFF;
         end
     end
 
@@ -470,20 +425,20 @@ module artist (
 
     always_ff @(posedge clk) begin
         // operations G_DEC launches, set up after the engine's case below
-        logic        lp_put, lp_fill, lp_move, lp_hide, lp_show, lp_font, lp_line, lp_incl, lp_lto, lp_dash, lp_cont;
+        logic        lp_put, lp_fill, lp_move, lp_font, lp_line, lp_incl, lp_lto, lp_dash, lp_cont;
         logic [31:0] lp_d, lp_dxy, lp_wh, lp_sxy, lp_xfer, lp_end;
         logic [15:0] lp_n;
         logic [4:0]  lp_frow;
         logic [21:0] lp_xy;
         logic [3:0]  lp_be;
-        lp_put = 1'b0; lp_fill = 1'b0; lp_move = 1'b0; lp_hide = 1'b0; lp_show = 1'b0;
+        lp_put = 1'b0; lp_fill = 1'b0; lp_move = 1'b0;
         lp_font = 1'b0; lp_line = 1'b0; lp_incl = 1'b0; lp_frow = 5'd0; lp_end = 32'd0; lp_xfer = xfer;
         lp_lto = 1'b0; lp_dash = 1'b0; lp_cont = 1'b0; lp_n = 16'd0;
         lp_d = g_wdata; lp_be = g_be; lp_xy = 22'd0;
         lp_dxy = dstxy; lp_wh = lenxy; lp_sxy = srcxy;
 
         ack <= 1'b0; err <= 1'b0;
-        st_we <= 1'b0; stg_we <= 1'b0; lb_we <= 1'b0; pal_wr <= 1'b0; su_we <= 1'b0; cb_we <= 1'b0;
+        st_we <= 1'b0; stg_we <= 1'b0; lb_we <= 1'b0; pal_wr <= 1'b0; cb_we <= 1'b0;
         if (srst_cnt != 4'd0) srst_cnt <= srst_cnt - 4'd1;
         srst <= srst_cnt > 4'd1;
 
@@ -504,9 +459,8 @@ module artist (
             misc_video <= 32'h0000_0301; r238 <= 32'd0; r23c <= 32'd0; pll <= 32'd0; misc_ctrl <= 32'd0;
             r300004 <= 24'd0; be_en <= 1'b1; srst_cnt <= 4'd0; srst <= 1'b0;
             vr_req <= 1'b0; f_n <= 4'd0; f_rp <= 3'd0; f_wp <= 3'd0; p1_v <= 1'b0;
-            c_shown <= 1'b0; c_dirty <= 1'b0; c_idle <= 16'd0;
+            a_clr <= 1'b1;
             cur_col[0] <= 24'd0; cur_col[1] <= 24'd0; cur_col[2] <= 24'hFFFFFF; cur_col[3] <= 24'h000000;
-            ns_pend <= 1'b1; ns_run <= 1'b0; ns_qv <= 1'b0; c_fgi <= 8'd0; c_bgi <= 8'd1;
         end else begin
             // ============================================== GSC transactions
             case (g_st)
@@ -517,9 +471,8 @@ module artist (
             G_DEC: begin
                 if (!(g_fb || g_reg2 || g_reg3)) begin
                     ack <= 1'b1; err <= 1'b1; rdata <= 32'd0; g_st <= G_IDLE;
-                end else if (g_engine && (e_busy || c_shown)) begin
-                    // wait for the running operation; take the cursor out of the VRAM first
-                    if (!e_busy) lp_hide = 1'b1;
+                end else if (g_engine && e_busy) begin
+                    // wait for the running operation
                 end else if (g_fb && g_we) begin
                     lp_put = 1'b1; lp_xy = fb_xy(dst_ba, g_off);
                     ack <= 1'b1; g_st <= G_IDLE;
@@ -697,18 +650,22 @@ module artist (
                     logic [11:0] xl, sxl;
                     xl  = e_xend - 12'd1;
                     sxl = e_sx + (e_xend - e_x0) - 12'd1;
-                    r_w0 <= e_x0[10:3];
-                    r_nw <= 9'(xl[10:3] - e_x0[10:3]) + 9'd1;
+                    r_w0 <= e_kind == K_ATTR ? {3'd0, e_x0[10:6]} : e_x0[10:3];
+                    r_nw <= e_kind == K_ATTR ? 9'(xl[10:6] - e_x0[10:6]) + 9'd1 : 9'(xl[10:3] - e_x0[10:3]) + 9'd1;
                     r_sh <= 3'(e_sx[2:0] - e_x0[2:0]);
                     r_sneg <= e_sx[2:0] < e_x0[2:0];
                     rd_req <= 9'd0; rd_got <= 9'd0;
                     wi <= 9'd0; wr_req <= 9'd0; wr_sent <= 9'd0; p1_v <= 1'b0;
                     if (e_kind == K_MOVE) begin
-                        rd_base <= {e_sy[9:0], e_sx[10:3]};
+                        rd_base <= {1'b0, e_sy[9:0], e_sx[10:3]};
                         rd_n <= 9'(sxl[10:3] - e_sx[10:3]) + 9'd1;
                         e_st <= E_RDS;
+                    end else if (e_rmw && e_kind == K_ATTR) begin
+                        rd_base <= {4'b1000, e_y[9:0], e_x0[10:6]};
+                        rd_n <= 9'(xl[10:6] - e_x0[10:6]) + 9'd1;
+                        e_st <= E_RDD;
                     end else if (e_rmw) begin
-                        rd_base <= {e_y[9:0], e_x0[10:3]};
+                        rd_base <= {1'b0, e_y[9:0], e_x0[10:3]};
                         rd_n <= 9'(xl[10:3] - e_x0[10:3]) + 9'd1;
                         e_st <= E_RDD;
                     end else e_st <= E_WR;
@@ -720,14 +677,12 @@ module artist (
                 got = rd_got;
                 if (!vr_req && rd_got == rd_req && rd_req < rd_n) begin
                     vr_req <= 1'b1; vr_we <= 1'b0;
-                    vr_addr <= rd_base + 18'(rd_req);
+                    vr_addr <= rd_base + 19'(rd_req);
                     vr_len <= (rd_n - rd_req) > 9'd64 ? 7'd64 : 7'(rd_n - rd_req);
                 end
                 if (vr_req && vr_ack) begin vr_req <= 1'b0; rd_req <= rd_req + 9'(vr_len); end
                 if (vr_rvalid) begin
                     lb_we <= e_st != E_RDG; lb_sel <= e_st == E_RDD; lb_wa <= rd_got[7:0]; lb_wd <= vr_rdata;
-                    // drawing the cursor: the words under it go to the save-under buffer
-                    if (e_st == E_RDD && e_kind == K_CURSOR) begin su_we <= 1'b1; su_wa <= {e_cr, rd_got[3:0]}; su_wd <= vr_rdata; end
                     if (e_st == E_RDG && rd_got < 9'd5) rw[rd_got[2:0]] <= vr_rdata;
                     got = rd_got + 9'd1;
                     rd_got <= got;
@@ -735,7 +690,7 @@ module artist (
                 if (got == rd_n && rd_req == rd_n) begin
                     if (e_st == E_RDG) e_st <= E_GET;
                     else if (e_st == E_RDS && e_rmw) begin
-                        rd_base <= {e_y[9:0], e_x0[10:3]};
+                        rd_base <= {1'b0, e_y[9:0], e_x0[10:3]};
                         rd_n <= r_nw; rd_req <= 9'd0; rd_got <= 9'd0;
                         e_st <= E_RDD;
                     end else e_st <= E_WR;
@@ -790,14 +745,18 @@ module artist (
                 push = 1'b0; pop = 1'b0; sent = wr_sent;
                 // issue step wi's line-buffer reads while the FIFO has room
                 p1_v <= 1'b0;
-                // the cursor's row bits, aligned to word 0's lanes (the span starts at lane x0[2:0])
-                if (wi == 9'd0) begin
-                    sr_img <= {c_img << e_cxoff, 8'd0} >> e_x0[2:0];
-                    sr_msk <= {c_msk << e_cxoff, 8'd0} >> e_x0[2:0];
-                end
                 if (wi <= r_nw && ({1'b0, f_n} + {4'd0, p1_v}) < 5'd6) begin
+                    logic [7:0]  k;
+                    logic [11:0] xl;
+                    logic [5:0]  lo, hi;
                     p1_v <= 1'b1; p1_prime <= wi == 9'd0;
                     p1_d <= 13'({2'b00, r_w0, 3'd0} + {wi - 9'd1, 3'd0}) - 13'(e_x0);
+                    // K_ATTR: word k's bits from x0 (first word) to xend - 1 (last word)
+                    k = r_w0 + 8'(wi - 9'd1);
+                    xl = e_xend - 12'd1;
+                    lo = k[4:0] == e_x0[10:6] ? e_x0[5:0] : 6'd0;
+                    hi = k[4:0] == xl[10:6] ? xl[5:0] : 6'd63;
+                    p1_amask <= (64'hFFFF_FFFF_FFFF_FFFF << lo) & (64'hFFFF_FFFF_FFFF_FFFF >> (6'd63 - hi));
                     wi <= wi + 9'd1;
                 end
                 // stage 1: the word, into the FIFO
@@ -805,13 +764,13 @@ module artist (
                     prev <= sb_q;
                     if (!p1_prime) begin
                         fifo[f_wp] <= {c_be, c_word}; f_wp <= f_wp + 3'd1; push = 1'b1;
-                        sr_img <= sr_img << 8; sr_msk <= sr_msk << 8;
                     end
                 end
                 // bursts of up to 64 beats
                 if (!vr_req && wr_sent == wr_req && wr_req < r_nw && f_n != 4'd0) begin
                     vr_req <= 1'b1; vr_we <= 1'b1;
-                    vr_addr <= {e_y[9:0], 8'(r_w0 + wr_req[7:0])};
+                    vr_addr <= e_kind == K_ATTR ? {4'b1000, e_y[9:0], 5'(r_w0[4:0] + wr_req[4:0])}
+                                                : {1'b0, e_y[9:0], 8'(r_w0 + wr_req[7:0])};
                     vr_len <= (r_nw - wr_req) > 9'd64 ? 7'd64 : 7'(r_nw - wr_req);
                 end
                 if (vr_req && vr_ack) begin vr_req <= 1'b0; wr_req <= wr_req + 9'(vr_len); end
@@ -822,7 +781,6 @@ module artist (
             E_NEXT: begin
                 e_rows <= e_rows - 11'd1;
                 if (e_font) e_pat <= e_pat2;
-                e_cr <= e_cr + 6'd1;
                 e_y  <= e_mirror ? e_mirror_y : e_up ? e_y - 11'd1 : e_y + 11'd1;
                 e_sy <= e_up ? e_sy - 11'd1 : e_sy + 11'd1;
                 e_st <= E_ROW;
@@ -831,58 +789,23 @@ module artist (
             E_LUT: begin
                 p1_v <= e_lut_i < e_lut_n;
                 p1_d <= 13'(e_lut_off + e_lut_i);
-                if (p1_v && e_lut_type == 2'd0 && p1_d < 13'd256) begin pal_wr <= 1'b1; pal_addr <= p1_d[7:0]; pal_rgb <= stg_q; end
+                if (p1_v && e_lut_type == 2'd0 && p1_d < 13'd512) begin pal_wr <= 1'b1; pal_addr <= p1_d[8:0]; pal_rgb <= stg_q; end
                 if (p1_v && e_lut_type == 2'd2 && p1_d < 13'd4) cur_col[p1_d[1:0]] <= stg_q;
-                if (p1_v) ns_pend <= 1'b1;
                 if (e_lut_i < e_lut_n) e_lut_i <= e_lut_i + 10'd1;
                 else if (!p1_v) e_st <= E_IDLE;
             end
             default: ;
             endcase
 
-            // ============================================== the cursor, when nothing else runs
-            if (e_busy || (g_st != G_IDLE && g_engine)) c_idle <= 16'd0;
-            else if (c_idle != CUR_IDLE) c_idle <= c_idle + 16'd1;
-            if (g_st == G_IDLE && !req && !e_busy) begin
-                if (c_shown && (c_dirty || !c_want || c_moved)) lp_hide = 1'b1;
-                else if (!c_shown && c_want && c_idle == CUR_IDLE && !ns_pend && !ns_run) lp_show = 1'b1;
-            end
-            // the nearest LUT0 entries to the cursor colours (entry 3: image, 2: mask only)
-            // three steps: the entry (lutsh_q), its distances (ns_df/ns_db), the comparison
-            ns_qv <= 1'b0; ns_qv2 <= ns_qv; ns_qi2 <= ns_qi;
-            ns_df <= cdist(lutsh_q, cur_col[3]); ns_db <= cdist(lutsh_q, cur_col[2]);
-            if (!ns_run && ns_pend && !e_busy) begin
-                ns_run <= 1'b1; ns_pend <= 1'b0; ns_i <= 9'd0;
-                ns_dfg <= 10'h3FF; ns_dbg <= 10'h3FF;
-            end else if (ns_run) begin
-                if (ns_i != 9'd256) ns_i <= ns_i + 9'd1;
-                ns_qv <= ns_i != 9'd256; ns_qi <= ns_i[7:0];
-                if (ns_qv2) begin
-                    if (ns_df < ns_dfg) begin ns_dfg <= ns_df; ns_fgi <= ns_qi2; end
-                    if (ns_db < ns_dbg) begin ns_dbg <= ns_db; ns_bgi <= ns_qi2; end
-                end else if (ns_i == 9'd256 && !ns_qv) begin
-                    ns_run <= 1'b0; c_fgi <= ns_fgi; c_bgi <= ns_bgi; c_dirty <= 1'b1;
-                end
-            end
-            if (lp_hide || lp_show) begin
-                // the rectangle: on a restore the one drawn, else the one at the position now
-                e_up <= 1'b0; e_mirror <= 1'b0; e_expand <= 1'b0; e_transp <= 1'b0; e_maskena <= 1'b0;
+            // ============================================== the attribute plane's clear after a reset
+            // (DDR3 holds anything at power-up): a fill of all 2048 x 1024 with LUT0
+            if (a_clr && !e_busy && g_st == G_IDLE && !req) begin
+                a_clr <= 1'b0;
+                e_kind <= K_ATTR; e_color <= 8'd0; e_rmw <= 1'b0; e_up <= 1'b0; e_mirror <= 1'b0;
                 e_font <= 1'b0; e_line <= 1'b0;
-                e_x0 <= lp_hide ? cs_x0 : g_x0; e_xend <= lp_hide ? cs_x1 : g_x1;
-                e_y <= lp_hide ? cs_y0 : g_y0; e_rows <= lp_hide ? cs_rows : g_rows;
-                e_cr <= lp_hide ? cs_cr : g_cr; e_cxoff <= lp_hide ? cs_cxoff : g_cxoff;
+                e_x0 <= 12'd0; e_xend <= 12'd2048; e_y <= 11'd0; e_rows <= 11'd1024;
                 e_sx <= 12'd0; e_sy <= 11'd0;
                 e_st <= E_ROW;
-                if (lp_hide) begin
-                    e_kind <= K_RESTORE; e_rmw <= 1'b0; c_shown <= 1'b0;
-                end else begin
-                    e_kind <= K_CURSOR; e_rmw <= 1'b1; c_shown <= 1'b1; c_dirty <= 1'b0;
-                    c_sx <= gp_x; c_sy <= gp_y; c_syoff <= gp_yoff;
-                    cs_x0 <= g_x0; cs_x1 <= g_x1; cs_y0 <= g_y0; cs_rows <= g_rows; cs_cr <= g_cr; cs_cxoff <= g_cxoff;
-                end
-`ifdef SIMULATION
-                if (dbg_trace) $display("artist: cursor %s at %0d,%0d", lp_hide ? "out" : "in ", lp_hide ? c_sx : gp_x, lp_hide ? c_sy : gp_y);
-`endif
             end
 
             // ============================================== operations G_DEC decided on: capture
@@ -913,7 +836,7 @@ module artist (
                 if ((ba_buf(dst_ba) == 4'd6 || ba_buf(dst_ba) == 4'd7) && lq_xy[21:11] < 11'd64 && lq_xy[10:6] == 5'd0) begin
                     // the cursor bitmaps: 32 pixels of a row (x 0 or 32), 1 = set
                     cb_we <= 1'b1; cb_msk <= ba_buf(dst_ba) == 4'd7; cb_half <= lq_xy[5]; cb_row <= lq_xy[16:11];
-                    cb_data <= lq_d; c_dirty <= 1'b1;
+                    cb_data <= lq_d;
                 end else if (ba_buf(dst_ba) == 4'd15) begin
                     // colour-map staging: one entry per word
                     stg_we <= 1'b1; stg_wa <= lq_xy[8:0]; stg_wd <= lq_d[23:0];
@@ -981,6 +904,26 @@ module artist (
                 if (dbg_trace) $display("artist: %s %0d,%0d -> %0d,%0d %0dx%0d ibo %08x pm %02x fg %02x bg %02x ba %08x/%08x",
                                     lq_fill ? "fill" : "move", lq_sxy[31:16], lq_sxy[15:0], lq_dxy[31:16], lq_dxy[15:0],
                                     w, h, ibo, pmask[7:0], fg[7:0], bg[7:0], src_ba, dst_ba);
+`endif
+            end
+            if (e_st == E_LAUNCH && lq_fill && ctl_plane != 32'd0 && ba_buf(dst_ba) == 4'd13 &&
+                lq_dxy[31:16] < 16'd2048 && lq_dxy[15:0] < 16'd1024 && lq_wh[31:16] != 16'd0 && lq_wh[15:0] != 16'd0) begin
+                // a fill of the attribute plane (X's nglePolyPaintAttr, Linux's SETUP_ATTR_ACCESS):
+                // the pixels' LUT bit := CONTROL_PLANE bit 24 (0x01000102 LUT1, 0x102 LUT0; review 09 4.2)
+                logic [16:0] w, h;
+                logic [11:0] xe;
+                w = {1'b0, lq_wh[31:16]}; h = {1'b0, lq_wh[15:0]};
+                if (w > 17'd2048 - {1'b0, lq_dxy[31:16]}) w = 17'd2048 - {1'b0, lq_dxy[31:16]};
+                if (h > 17'd1024 - {1'b0, lq_dxy[15:0]}) h = 17'd1024 - {1'b0, lq_dxy[15:0]};
+                xe = lq_dxy[27:16] + w[11:0];
+                e_kind <= K_ATTR; e_color <= {7'd0, ctl_plane[24]};
+                e_x0 <= lq_dxy[27:16]; e_xend <= xe; e_y <= lq_dxy[10:0]; e_rows <= h[10:0];
+                // whole words need no read first
+                e_rmw <= lq_dxy[21:16] != 6'd0 || xe[5:0] != 6'd0;
+                if (r100080 == 32'h7D || r100080 == 32'h08) dstxy <= {lq_dxy[31:16], lq_dxy[15:0] + lq_wh[15:0]};
+                e_st <= E_ROW;
+`ifdef SIMULATION
+                if (dbg_trace) $display("artist: attr %0d,%0d %0dx%0d := LUT%0d", lq_dxy[31:16], lq_dxy[15:0], w, h, ctl_plane[24]);
 `endif
             end
             if (e_st == E_LAUNCH && lq_font && ctl_plane == 32'd0 && ba_image(dst_ba) && lq_dxy[31:16] < 16'd2048) begin

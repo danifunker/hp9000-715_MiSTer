@@ -21,7 +21,10 @@ static int fails = 0;
 
 // ------------------------------------------------------------- VRAM model
 static std::vector<uint8_t> vram(2048 * 1024), ref(2048 * 1024);
-static uint32_t lut0[256];
+// the attribute plane (vr_addr[18]): word {y, x[10:6]}, pixel x in bit x[5:0]
+static std::vector<uint64_t> aram(32768);
+static std::vector<uint8_t> aref(2048 * 1024);
+static uint32_t lut[512];
 static unsigned rnd_state = 1;
 static unsigned rnd() { rnd_state = rnd_state * 1103515245u + 12345u; return (rnd_state >> 16) & 0x7FFF; }
 
@@ -32,7 +35,10 @@ struct Mem {
 	bool we = false;
 } mem;
 
-static uint64_t vword(unsigned a) { uint64_t w = 0; for (int j = 0; j < 8; j++) w |= (uint64_t)vram[a * 8 + j] << (8 * j); return w; }
+static uint64_t vword(unsigned a) {
+	if (a >> 18 & 1) return aram[a & 32767];
+	uint64_t w = 0; for (int j = 0; j < 8; j++) w |= (uint64_t)vram[(a & 262143) * 8 + j] << (8 * j); return w;
+}
 
 // inputs for the next rising edge, from the outputs after the last one
 static void mem_step() {
@@ -45,7 +51,9 @@ static void mem_step() {
 			mem.wait = -1;
 			mem.addr = t->vr_addr; mem.left = t->vr_len; mem.idx = 0; mem.we = t->vr_we;
 			if (mem.left == 0 || mem.left > 64) { printf("FAIL: burst length %u\n", mem.left); fails++; }
-			if (mem.addr + mem.left > 262144 || ((mem.addr & 255) + mem.left) > 256) {
+			bool attr = mem.addr >> 18 & 1;
+			if ((attr && ((mem.addr & 0x7FFF) >= 32768 || (mem.addr & 31) + mem.left > 32 || (mem.addr & 0x38000))) ||
+			    (!attr && (mem.addr + mem.left > 262144 || ((mem.addr & 255) + mem.left) > 256))) {
 				printf("FAIL: burst crosses a row: addr %05x len %u\n", mem.addr, mem.left); fails++;
 			}
 			t->vr_ack = 1;
@@ -70,20 +78,61 @@ static void mem_step() {
 static void mem_commit(bool wready, bool rvalid, uint64_t wdata, unsigned wbe) {
 	if (wready) {
 		unsigned a = mem.addr + mem.idx;
-		for (int j = 0; j < 8; j++) if (wbe >> j & 1) vram[a * 8 + j] = (wdata >> (8 * j)) & 0xFF;
+		if (a >> 18 & 1) {
+			if (wbe != 0xFF) { printf("FAIL: attribute write with byte enables %02x\n", wbe); fails++; }
+			aram[a & 32767] = wdata;
+		} else
+			for (int j = 0; j < 8; j++) if (wbe >> j & 1) vram[a * 8 + j] = (wdata >> (8 * j)) & 0xFF;
 		mem.idx++;
 		if (mem.idx == mem.left) mem.st = 0;
 	}
 	if (rvalid) { mem.idx++; if (mem.idx == mem.left) mem.st = 0; }
 }
 
+// the display's line fetch (rf_*): its own port, random latency and gaps
+struct RF { int st = 0; unsigned addr = 0, left = 0, idx = 0; int wait = -1; } rf;
+static void rf_step() {
+	t->rf_ack = 0; t->rf_rvalid = 0;
+	if (rf.st == 0) {
+		if (t->rf_req) {
+			if (rf.wait < 0) rf.wait = rnd() % 8;
+			if (rf.wait-- > 0) return;
+			rf.wait = -1; rf.addr = t->rf_addr; rf.left = t->rf_len; rf.idx = 0;
+			if (rf.left == 0 || rf.left > 64) { printf("FAIL: fetch length %u\n", rf.left); fails++; }
+			t->rf_ack = 1; rf.st = 1; rf.wait = 4 + rnd() % 20;
+		}
+	} else {
+		if (rf.wait > 0) { rf.wait--; return; }
+		if (rnd() % 9 == 0) return;
+		t->rf_rvalid = 1; t->rf_rdata = vword(rf.addr + rf.idx);
+	}
+}
+static void rf_commit(bool rvalid) { if (rvalid && ++rf.idx == rf.left) { rf.st = 0; rf.wait = -1; } }
+
+// a frame from the video outputs: rows of DE pixels after the end of a vertical sync
+static std::vector<uint32_t> frame;
+static int cap_st = 0, cap_x = 0, cap_y = 0, cap_w = 0;
+static bool prev_vs = false, prev_de = false;
+static void capture() {
+	bool vs = t->vid_vs, de = t->vid_de;
+	if (cap_st == 1 && prev_vs && !vs) { cap_st = 2; cap_y = 0; cap_x = 0; frame.clear(); }
+	else if (cap_st == 2) {
+		if (de) { frame.push_back(t->vid_r << 16 | t->vid_g << 8 | t->vid_b); cap_x++; }
+		if (prev_de && !de) { if (cap_y == 0) cap_w = cap_x; cap_y++; cap_x = 0; }
+		if (vs) cap_st = 3;
+	}
+	prev_vs = vs; prev_de = de;
+}
+
 static void tick() {
-	mem_step();
-	bool wready = t->vr_wready, rvalid = t->vr_rvalid;
+	mem_step(); rf_step();
+	bool wready = t->vr_wready, rvalid = t->vr_rvalid, frv = t->rf_rvalid;
 	uint64_t wdata = t->vr_wdata; unsigned wbe = t->vr_be;
 	t->clk = 1; t->eval();
 	mem_commit(wready, rvalid, wdata, wbe);
-	if (t->pal_wr) lut0[t->pal_addr] = t->pal_rgb;
+	rf_commit(frv);
+	if (t->pal_wr) lut[t->pal_addr] = t->pal_rgb;
+	capture();
 	t->clk = 0; t->eval();
 	cyc++;
 }
@@ -158,6 +207,12 @@ static void ref_put1(int x, int y, uint32_t d, unsigned be) {
 }
 static void ref_fill(uint32_t dxy, uint32_t wh) {
 	int x = dxy >> 16, y = dxy & 0xFFFF, w = wh >> 16, h = wh & 0xFFFF;
+	if (R.cp && ((R.dst_ba >> 12) & 15) == 13 && x < 2048 && y < 1024) {
+		// the attribute plane: each pixel's LUT := CONTROL_PLANE bit 24
+		for (int r = 0; r < h && y + r < 1024; r++)
+			for (int i = 0; i < w && x + i < 2048; i++) aref[(y + r) * 2048 + x + i] = R.cp >> 24 & 1;
+		return;
+	}
 	if (R.cp || !image(R.dst_ba) || x >= 2048 || y >= 1024) return;
 	bool transp = (R.ibo >> 28 & 1) || (R.ibo >> 1 & 1);
 	for (int r = 0; r < h && y + r < 1024; r++)
@@ -309,11 +364,17 @@ static uint32_t rd(uint32_t a) { gsc(false, a, 0); return last_rd; }
 
 static void check(const char* what) {
 	int bad = 0;
-	for (int i = 0; i < 2048 * 1024; i++)
+	for (int i = 0; i < 2048 * 1024; i++) {
 		if (vram[i] != ref[i]) {
 			if (bad < 8) printf("  %s: pixel %d,%d is %02x, expected %02x\n", what, i % 2048, i / 2048, vram[i], ref[i]);
 			bad++;
 		}
+		int a = aram[i / 64] >> (i % 64) & 1;
+		if (a != aref[i]) {
+			if (bad < 8) printf("  %s: attribute of %d,%d is %d, expected %d\n", what, i % 2048, i / 2048, a, aref[i]);
+			bad++;
+		}
+	}
 	if (bad) { printf("FAIL: %s: %d pixels differ\n", what, bad); fails++; }
 	else printf("ok   %s\n", what);
 }
@@ -326,6 +387,8 @@ int main(int argc, char** argv) {
 	Verilated::commandArgs(argc, argv);
 	t = new Vartist;
 	for (int i = 0; i < 2048 * 1024; i++) vram[i] = ref[i] = rnd() & 0xFF;     // DDR3 powers up with junk
+	for (int i = 0; i < 32768; i++) aram[i] = (uint64_t)rnd() << 49 ^ (uint64_t)rnd() << 30 ^ (uint64_t)rnd() << 15 ^ rnd();
+	// (Artist clears the attribute plane after a reset: aref stays all LUT0)
 	t->rst_n = 0; t->chip_rst = 0; t->req = 0; t->dbg_trace = argc > 1;
 	for (int i = 0; i < 4; i++) tick();
 	t->rst_n = 1; tick();
@@ -555,8 +618,8 @@ int main(int argc, char** argv) {
 	wr(0x100480, 0); wr(0x300118, 0x80000100); wr(0x300118, 0x81000100);
 	{
 		int bad = 0;
-		for (int i = 0; i < 256; i++) if (lut0[i] != ((i * 0x10101 ^ 0x5A3C96) & 0xFFFFFF)) bad++;
-		if (bad) { printf("FAIL: LUT0: %d entries wrong\n", bad); fails++; } else printf("ok   LUT0 loaded\n");
+		for (int i = 0; i < 512; i++) if (lut[i] != ((i % 256 * 0x10101 ^ 0x5A3C96) & 0xFFFFFF)) bad++;
+		if (bad) { printf("FAIL: LUT0/LUT1: %d entries wrong\n", bad); fails++; } else printf("ok   LUT0 and LUT1 loaded\n");
 	}
 	// Linux's way: BINC writes to entries 0x100+i, loaded from source x 0x100
 	wr(0x118000, 0xBBE0F000);
@@ -565,7 +628,7 @@ int main(int argc, char** argv) {
 	wr(0x100480, 0x400); wr(0x300118, 0x80000100);
 	{
 		int bad = 0;
-		for (int i = 0; i < 256; i++) if (lut0[i] != (uint32_t)(0xFF0000 - i)) bad++;
+		for (int i = 0; i < 256; i++) if (lut[i] != (uint32_t)(0xFF0000 - i)) bad++;
 		if (bad) { printf("FAIL: LUT0 via BINC: %d entries wrong\n", bad); fails++; } else printf("ok   LUT0 loaded via BINC\n");
 	}
 	// cursor colours (LUT blt type 2) must not touch LUT0
@@ -574,29 +637,35 @@ int main(int argc, char** argv) {
 	wr(0x100480, 0); wr(0x300118, 0x80008004);
 	{
 		int bad = 0;
-		for (int i = 0; i < 256; i++) if (lut0[i] != (uint32_t)(0xFF0000 - i)) bad++;
+		for (int i = 0; i < 256; i++) if (lut[i] != (uint32_t)(0xFF0000 - i)) bad++;
 		if (bad) { printf("FAIL: a cursor-colour LUT blt changed LUT0 (%d entries)\n", bad); fails++; } else printf("ok   cursor-colour LUT blt leaves LUT0\n");
 	}
 	expect("busy clear", rd(0xF8300000), 0);
 	check("VRAM before the cursor");
 
-	// ---- the hardware cursor (artist.sv: drawn into the VRAM with a save-under)
+	// ---- the display (artist_video.sv): LUT0/LUT1 by the attribute plane, the cursor laid over
 	{
-		// a 1280x1024 mode: reg19 porches give hbp = 0x2F + 0x2F + 2 = 96
+		// a 1280x1024 mode, video on; reg19's porches give hbp = 0x2F + 0x2F + 2 = 96
 		gsc(true, 0xF8300200, 0x3F2F2F0F); gsc(true, 0xF8300208, 0xFF3C0202); gsc(true, 0xF8300218, 0xEBC00341);
-		// a colour map with distinct entries, cursor colours entry 2 (mask) and 3 (image)
+		// distinct LUT0 and LUT1
 		wr(0x118000, 0x3BA0F000); wr(0x118018, 0xFF); wr(0x11801C, 0x300);
-		for (int i = 0; i < 256; i++) fbw(i << 2, (i * 0x050301 + 0x102030) & 0xFFFFFF);
-		wr(0x100480, 0); wr(0x300118, 0x80000100);
+		for (int i = 0; i < 512; i++) fbw(i << 2, i < 256 ? (i * 0x050301 + 0x102030) & 0xFFFFFF : (i * 0x0A0B07 ^ 0x80FF00) & 0xFFFFFF);
+		wr(0x100480, 0); wr(0x300118, 0x80000200);
+		// windows with their colour map in LUT1 (X's nglePolyPaintAttr), one 1 pixel wide, one ragged
+		wr(0x118004, 0x2EA0D000); wr(0x11801C, 0x23000302); wr(0x100820, 0xFFFFFFFF);
+		wr(0x11800C, 0x01000102);
+		wr(0x100800, (100 << 16) | 100); wr(0x100A04, (300 << 16) | 200);
+		wr(0x100800, (701 << 16) | 50); wr(0x100A04, (1 << 16) | 500);
+		wr(0x100800, (813 << 16) | 607); wr(0x100A04, (67 << 16) | 3);
+		wr(0x11800C, 0x00000102);
+		wr(0x100800, (150 << 16) | 150); wr(0x100A04, (64 << 16) | 64);      // LUT0 again inside the first
+		wr(0x11800C, 0);
+		check("attribute plane after the paints");
+		// the cursor: colours, image = a diagonal band, mask = image plus a border
 		uint32_t cfg = 0xE0F0D0, cbg = 0x203040;
+		wr(0x118000, 0x3BA0F000);
 		fbw(0, 0); fbw(4, 0); fbw(8, cbg); fbw(12, cfg);
 		wr(0x100480, 0); wr(0x300118, 0x80008004);
-		auto nearest = [&](uint32_t c) { int best = 0, bd = 1 << 30;
-			for (int i = 0; i < 256; i++) { uint32_t e = lut0[i]; int d = abs((int)(e >> 16) - (int)(c >> 16)) +
-				abs((int)((e >> 8) & 255) - (int)((c >> 8) & 255)) + abs((int)(e & 255) - (int)(c & 255));
-				if (d < bd) { bd = d; best = i; } } return best; };
-		int fgi = nearest(cfg), bgi = nearest(cbg);
-		// bitmaps: image = a diagonal band, mask = image plus a border
 		static uint64_t img[64], msk[64];
 		for (int r = 0; r < 64; r++) {
 			img[r] = 0; msk[r] = 0;
@@ -618,48 +687,45 @@ int main(int argc, char** argv) {
 		auto pos = [&](int x, int y) {      // CURSOR_POS for the sprite at (x, y >= 0), as X computes it (09 3.4)
 			int v = x + 384 - 16; return (uint32_t)((v >> 2) << 19 | (v & 3) << 16 | (1023 - y));
 		};
-		auto expect_cursor = [&](const char* what, int cx, int cy, bool on = true) {
+		auto grab = [&]() {                 // the next whole frame from the video outputs
+			cap_st = 1;
+			for (int n = 0; n < 4000000 && cap_st != 3; n++) tick();
+			if (cap_st != 3) { printf("FAIL: no frame\n"); fails++; }
+		};
+		// cx, cy: the sprite's row 0 / column 0; rows above `top` are not shown
+		auto expect_frame = [&](const char* what, bool on, int cx, int cy, int top) {
+			grab(); grab();                 // the first may have started before the last change
 			int bad = 0;
-			for (int i = 0; i < 2048 * 1024; i++) {
-				int x = i % 2048, y = i / 2048, c = x - cx, r = y - cy;
-				uint8_t want = ref[i];
-				if (on && c >= 0 && c < 64 && r >= 0 && r < 64 && x < 1280 && y < 1024) {
-					bool im = img[r] >> (63 - c) & 1, mk = msk[r] >> (63 - c) & 1;
-					if (mk) want = im ? fgi : bgi;
+			if (cap_w != 1280 || cap_y != 1024) { printf("FAIL: %s: frame %dx%d\n", what, cap_w, cap_y); fails++; return; }
+			for (int y = 0; y < 1024; y++)
+				for (int x = 0; x < 1280; x++) {
+					int i = y * 2048 + x, c = x - cx, r = y - cy;
+					uint32_t want = lut[aref[i] << 8 | ref[i]];
+					if (on && c >= 0 && c < 64 && r >= 0 && r < 64 && y >= top && (msk[r] >> (63 - c) & 1))
+						want = img[r] >> (63 - c) & 1 ? cfg : cbg;
+					uint32_t got = frame[y * 1280 + x];
+					if (got != want) { if (bad < 6) printf("  %s: %d,%d is %06x, expected %06x\n", what, x, y, got, want); bad++; }
 				}
-				if (vram[i] != want) { if (bad < 6) printf("  %s: %d,%d is %02x, expected %02x\n", what, x, y, vram[i], want); bad++; }
-			}
 			if (bad) { printf("FAIL: %s: %d pixels\n", what, bad); fails++; } else printf("ok   %s\n", what);
 		};
+		expect_frame("picture through LUT0/LUT1, no cursor", false, 0, 0, 0);
 		gsc(true, 0xF8300100, pos(100, 200)); gsc(true, 0xF8300104, 0x80);
-		for (int i = 0; i < 40000; i++) tick();
-		expect_cursor("cursor drawn at 100,200", 100, 200);
-		// a fill elsewhere takes it out first; right after it the VRAM is the plain image
+		expect_frame("cursor at 100,200", true, 100, 200, 0);
+		// drawing under it: the cursor stays, the VRAM never sees it
 		wr(0x11801C, 0x00000302); wr(0x118010, 0x44); wr(0x118000, 0x2EA02000);
-		wr(0x100800, (500 << 16) | 600); wr(0x100A04, (30 << 16) | 10);
-		expect_cursor("cursor out while drawing", 0, 0, false);
-		for (int i = 0; i < 40000; i++) tick();
-		expect_cursor("cursor back after the drawing", 100, 200);
-		// a CPU read under it sees the image, not the cursor
-		wr(0x118000, 0x13A02000);
-		{
-			uint32_t want = 0; int x = 120, y = 220;
-			for (int i = 0; i < 4; i++) want |= ref[y * 2048 + x + i] << (24 - 8 * i);
-			expect("CPU read under the cursor", rd(FB + (y << 13 | x << 2)), want);
-		}
-		for (int i = 0; i < 40000; i++) tick();
-		// moved, partly off the left edge
+		wr(0x100800, (110 << 16) | 210); wr(0x100A04, (30 << 16) | 10);
+		check("VRAM under the cursor after a fill");
+		expect_frame("cursor over the fill", true, 100, 200, 0);
 		gsc(true, 0xF8300100, pos(-20, 900));
-		for (int i = 0; i < 40000; i++) tick();
-		expect_cursor("cursor moved to -20,900", -20, 900);
+		expect_frame("cursor at -20,900", true, -20, 900, 0);
+		gsc(true, 0xF8300100, pos(1250, 1000));
+		expect_frame("cursor at 1250,1000 (clipped right and below)", true, 1250, 1000, 0);
 		// above the top edge: X writes y' = 0 and the cut-off rows in CURSOR_CTRL[5:0]
 		gsc(true, 0xF8300100, pos(300, 0)); gsc(true, 0xF8300104, 0x80 | 10);
-		for (int i = 0; i < 40000; i++) tick();
-		expect_cursor("cursor at 300,-10 (10 rows cut off)", 300, -10);
-		gsc(true, 0xF8300104, 0x80);
+		expect_frame("cursor at 300,-10 (10 rows cut off)", true, 300, -10, 0);
 		gsc(true, 0xF8300104, 0x00);
-		for (int i = 0; i < 40000; i++) tick();
-		expect_cursor("cursor off", 0, 0, false);
+		expect_frame("cursor off", false, 0, 0, 0);
+		expect("display underruns", t->vid_underrun, 0);
 	}
 	check("final VRAM");
 
