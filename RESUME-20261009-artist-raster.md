@@ -63,19 +63,16 @@ not in the user's ini (memory `core-handles-video-not-ini`).
 
 ## Open (priority order)
 
-1. **Window-move stubs**: after the user dragged the hpterm (build 22), 4-pixel
-   pieces of its old left frame border stayed every 16th row (VRAM x 212-215,
-   y 752, 768, ... 816; light pink + salmon = the focused frame's colours).
-   Unmapping an xclock repaints cleanly. Likely suspects: the screen-to-screen
-   copy X does for a move (`nglePolyBlt`, 0x100B04 with boxes ordered for
-   overlap, review 09 5.2) or the exposure repaint of a narrow strip. To
-   capture it: `kbd.py` needs a mouse drag (button held while moving), then
-   `trace_dump.py clear`, drag, dump at once -- the 64K ring is flooded by line
-   fills within a fraction of a second, so an event-type filter in
-   `rtl/mister/trace_ddr3.sv` (an OSD or register mask: keep types 8/9 only)
-   would make it far easier. Decoder used this session: the Python snippet in
-   the session notes (register names per word address; a `be=ff` record is an
-   FP doubleword store = two words, which the MIOC splits correctly).
+1. **Window-move stubs -- fixed in build 25** (`ca45ace`, to check on the
+   board): X repaints a vacated backdrop strip as one 16-row band (BINC upload)
+   replicated by block moves, the first of them 4 pixels wide; a move with a
+   one-word source read that word from the line buffer in the same cycle as
+   its last write and copied the previous row's word, so the stale row was
+   replicated every 16 rows. `board.sh drag 5 -55` with the pointer on the
+   hpterm's title bar reproduces it (recorder dump decoded in the session
+   scratchpad `ring_regs_drag.txt`). Build 24 (Display Auto fix) was never
+   loaded. If build 25 checks out, ask the user about releasing it (the
+   README's known-limitations line mentions the stubs).
 2. **Colours in the OBS capture** look more saturated than the LUT (greys
    exact) through both the old frame-buffer path and the new raster; the user
    says the monitor looks right -- the capture chain, not the core. Do not chase
