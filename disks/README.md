@@ -57,6 +57,33 @@ sed 's/^10.0.2.15/127.0.0.1/' /etc/hosts.qemu > /etc/hosts
 sync; reboot
 ```
 
+**root's password** (2026-10-09). The image's root password is tenox's and is
+not published (the tarball holds only `hpux.img` and `run.sh`). On the
+MiSTer's copy it was set to `password` from a single-user boot, with the
+original file kept:
+
+```sh
+cp -p /etc/passwd /etc/passwd.tenox
+passwd root
+sync; reboot
+```
+
+**The LVM table names QEMU's device file** (2026-10-09). `/etc/lvmtab` lists
+the root disk as `/dev/dsk/c0t6d0` (the B160L's SCSI bus was instance 0); on
+the 715 the built-in SCSI is `ext_bus` instance 2 (`/etc/ioconfig` keeps the
+B160L's numbers), so the disk is `/dev/dsk/c2t6d0` and `vgdisplay`/`lvlnboot`
+warn "couldn't query physical volume". The kernel does not care (it activates
+vg00 from the BDRA), the LVM commands do. Rebuild the table once, as root:
+
+```sh
+mv /etc/lvmtab /etc/lvmtab.qemu
+vgscan -v          # writes /etc/lvmtab: /dev/vg00, /dev/dsk/c2t6d0
+lvlnboot -v vg00   # Boot/Root/Swap/Dump on /dev/dsk/c2t6d0 (2/0/1.6.0)
+```
+
+Done on the MiSTer's copy; with both, root logs in multi-user and LVM is
+clean (system.md 10, build 14).
+
 The root volume runs to the last block, so the image cannot be trimmed: on
 the MiSTer it needs 4 GiB on an **exFAT** SD card (FAT32's limit is 4 GiB - 1
 byte). Use `--snapshot` in romsim to keep the image pristine (writes stay in
