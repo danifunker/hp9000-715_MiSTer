@@ -39,7 +39,7 @@ the console's 960, colours off), so **Artist now makes its own picture**
 raster at 64 MHz with LUT0/LUT1 by a 1-bit attribute plane and the cursor
 laid over, no more cursor in the VRAM); MiSTer.ini has `[HP9K715]`
 video_mode=8, vscale_mode=1. The real HDMI output can be seen through the
-user's OBS (`tools/mister/obs_shot.py`). **Build 23 is released** (graphics
+user's OBS (`tools/mister/obs_shot.py`). **Build 25 is the released alpha** (graphics
 console by default; core-side integer scaling, OSD "Scale"). Next:
 `RESUME-20261009-artist-raster.md`.
 

@@ -6,7 +6,7 @@ PA-7100LC CPU, the LASI I/O chip (SCSI, Ethernet, serial, parallel, PS/2,
 audio) and the built-in 8-plane Artist graphics, with the aim of running
 HP's own boot ROM and HP-UX.
 
-**Status (build 23, 2026-10-09):** HP's boot ROM passes its self-tests, boots
+**Status (build 25, 2026-10-09, alpha):** HP's boot ROM passes its self-tests, boots
 from SCSI, and **HP-UX 10.20 boots to the CDE desktop on the MiSTer** with the
 built-in Artist graphics at 1280x1024: the boot console, the X login and CDE
 (windows, menus, proportional and terminal fonts, xclock, oclock, private
@@ -21,7 +21,7 @@ The files in [`release/`](release/):
 
 | file | goes to | what |
 |---|---|---|
-| `HP9K715.rbf` | `/media/fat/_Unstable/` (or `_Computer/`) | the core, Quartus build 23: 64 MHz |
+| `HP9K715.rbf` | `/media/fat/_Unstable/` (or `_Computer/`) | the core, Quartus build 25: 64 MHz |
 | `boot0.rom` | `/media/fat/games/HP9K715/` | HP's PDC 1.6 boot ROM for the 715/64, 258,728 bytes ([`roms/README.md`](roms/README.md): HP firmware patch PF_C7X50016, image IMAGE1A's payload). Loaded by the framework at core start; the loader patches one word ([`docs/STUBS.md`](docs/STUBS.md) S-011) |
 | `hp715.eep` | `/media/fat/games/HP9K715/` | the EEPROM image (8 KB, `tools/eeprom/mkrelease.sh`): manufacturing and chassis codes off, **console on the graphics** (monitor type 1, 1280x1024), PS/2 keyboard, primary path scsi.6, autoboot and autosearch on. Mount it in the OSD's EEPROM slot (slot 1); it is written back. For the RS-232 console instead: `CONSOLE=rs232 tools/eeprom/mkrelease.sh`, or `path console rs232` at `BOOT_ADMIN>` |
 
@@ -40,8 +40,10 @@ becomes unreadable, so give the core a 1080-line (or larger) mode in
     video_mode=8
 
 The OSD's "Scale" (default V-Integer) then shows the 1024 lines 1:1; "Aspect
-ratio: Original" keeps the pixels square. OSD "Display": Auto shows Artist
-while the machine has its video on and the RS-232 console otherwise.
+ratio: Original" keeps the pixels square. OSD "Display": Auto shows the
+RS-232 console until the machine first turns Artist's video on, then Artist
+(black while X's screen saver blanks it); Graphics and Serial console force
+one or the other.
 
 For tenox's HP-UX 10.20 image, [`disks/README.md`](disks/README.md) has the
 details:
@@ -64,9 +66,12 @@ stock Main_MiSTer HP-UX's clock is off by your zone offset (STUBS S-022).
 
 Known limitations of this build: no LAN, audio or floppy (HP-UX lists them
 UNCLAIMED); the analog VGA output carries Artist's picture at 64 MHz pixels
-(1280x1024 at 44.7 Hz, which most CRTs will not take); moving a window has
-once left 4-pixel stubs of its old frame every 16th row (under
-investigation); the full list is in [`docs/STUBS.md`](docs/STUBS.md).
+(1280x1024 at 44.7 Hz, which most CRTs will not take); the CPU issues one
+instruction a clock (the real PA-7100LC can pair two), so it is somewhat
+slower than a 715/64; only HP-UX 10.20 has been tried so far. The full list
+is in [`docs/STUBS.md`](docs/STUBS.md). The core needs no Main_MiSTer
+changes, except that HP-UX's clock is off by your time-zone offset with a
+stock Main (above).
 
 ## Planned
 

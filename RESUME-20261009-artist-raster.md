@@ -26,7 +26,7 @@ not in the user's ini (memory `core-handles-video-not-ini`).
 
 ## Where things stand
 
-* **Build 23 is released** (`release/HP9K715.rbf`, `release/hp715.eep` =
+* **Build 25 is released as the alpha** (pushed; build 23 before it) (`release/HP9K715.rbf`, `release/hp715.eep` =
   the graphics-console EEPROM; root README = the release notes). Every clock
   meets timing (core +0.288 ns, HDMI +0.330 ns), 32,844 ALMs (78 %), 394 M10K.
 * **On the board** (MiSTer .92, build 23, 32 MB, EEPROM slot = `hp715_gfx2.eep`,
@@ -63,8 +63,8 @@ not in the user's ini (memory `core-handles-video-not-ini`).
 
 ## Open (priority order)
 
-1. **Window-move stubs -- fixed in build 25** (`ca45ace`, to check on the
-   board): X repaints a vacated backdrop strip as one 16-row band (BINC upload)
+1. **Window-move stubs -- fixed in build 25** (`ca45ace`, checked on the
+   board; build 25 is the released alpha): X repaints a vacated backdrop strip as one 16-row band (BINC upload)
    replicated by block moves, the first of them 4 pixels wide; a move with a
    one-word source read that word from the line buffer in the same cycle as
    its last write and copied the previous row's word, so the stale row was
