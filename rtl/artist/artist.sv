@@ -170,7 +170,7 @@ module artist (
 
     // ------------------------------------------------------------ the engine
     typedef enum logic [2:0] { K_SOLID, K_BITS, K_BYTES, K_MOVE, K_CURSOR, K_RESTORE } kind_e;
-    typedef enum logic [3:0] { E_IDLE, E_ROW, E_RDS, E_RDD, E_WR, E_NEXT, E_RDG, E_GET, E_LUT } est_e;
+    typedef enum logic [3:0] { E_IDLE, E_LAUNCH, E_ROW, E_RDS, E_RDD, E_WR, E_NEXT, E_RDG, E_GET, E_LUT, E_LINE } est_e;
     est_e        e_st;
     kind_e       e_kind;
     logic [11:0] e_x0, e_xend, e_sx;      // span [x0, xend), source x
@@ -183,6 +183,22 @@ module artist (
     logic [7:0]  e_fg, e_bg, e_pm, e_color;
     logic [3:0]  e_rop;
     logic        e_transp, e_maskena, e_expand, e_rmw, e_get32;
+    logic [4:0]  e_srcj;                  // an Otc32 source's bit plane (BA J field; 0 = OR of the plane mask)
+    logic        e_font;                  // a font-engine write: the second row takes e_pat2
+    logic [31:0] e_pat2;
+    logic [4:0]  f_row;                   // the font engine's row counter (0x100AA0 / 0x1008A0)
+    // lines (0x100E44 inclusive, 0x100E04 exclusive): Bresenham from DSTXY, one pixel per span
+    logic        e_line;
+    // an operation's operands, captured by G_DEC for E_LAUNCH
+    logic        lq_put, lq_fill, lq_move, lq_font, lq_line, lq_incl;
+    logic [31:0] lq_d, lq_dxy, lq_wh, lq_sxy, lq_xfer, lq_end;
+    logic [4:0]  lq_frow;
+    logic [21:0] lq_xy;
+    logic [3:0]  lq_be;
+    logic [11:0] l_x, l_y;
+    logic signed [13:0] l_err, l_dxa, l_dya;
+    logic        l_sx, l_sy;              // 1 = decreasing
+    logic [11:0] l_n;                     // pixels left
     logic [9:0]  e_lut_n, e_lut_i, e_lut_off;
     logic [1:0]  e_lut_type;              // 0 colour map, 2 cursor colours (NGLE manual 5), 1/3 dropped
     // per row
@@ -223,13 +239,15 @@ module artist (
     logic [31:0] cb_data;
     logic [31:0] cimg_hi [64], cimg_lo [64], cmsk_hi [64], cmsk_lo [64];
     logic [63:0] c_img, c_msk;                 // the row being drawn (e_cr)
+    logic [71:0] sr_img, sr_msk;               // the same, aligned to the current word's lanes (bit 71 = lane 0)
     logic [63:0] su_ram [1024];                // save-under: drawn row r, word k at {r, k}
     logic [63:0] su_q;
     logic        su_we;
     logic [9:0]  su_wa, su_ra;
     logic [63:0] su_wd;
     logic        c_shown, c_dirty;
-    logic signed [15:0] c_sx, c_sy;            // where it is drawn
+    logic signed [15:0] c_sx, c_sy;            // where it is drawn (x, first row shown)
+    logic [5:0]  c_syoff;                      // ... and the sprite row shown there
     logic [5:0]  e_cr;                         // the cursor row of the current VRAM row
     logic [5:0]  e_cxoff;                      // the cursor column of the span's first pixel
     logic [15:0] c_idle;
@@ -252,11 +270,42 @@ module artist (
     // 0x300200, 4-pixel video interleave, pipeline delay 4; y counted up
     // from the bottom), less CURSOR_CTRL's offsets
     wire [15:0] c_hbp = {8'd0, reg19[23:16]} + {8'd0, reg19[15:8]} + 16'd2;
-    wire signed [15:0] c_x = $signed({1'b0, cur_pos[31:19], 2'b00}) + 16'sd23 - $signed({c_hbp[13:0], 2'b00})
-                             + $signed({14'd0, cur_pos[17:16]}) - $signed({12'd0, cur_ctl[7:4]});
-    wire signed [15:0] c_y = $signed({4'd0, vactive}) - $signed(cur_pos[15:0]) - $signed({12'd0, cur_ctl[3:0]});
-    wire        c_want = cur_ctl[7] && cur_pos != 32'd0 && video_on;
-    wire        c_moved = c_x != c_sx || c_y != c_sy;
+    // (registered in two steps for timing: the position, then the clipped rectangle)
+    logic signed [15:0] c_x, c_y;                                          // sprite x, the first row shown
+    logic [5:0]  c_yoff;                                                   // sprite rows cut off at the top
+    logic        c_want;
+    // the rectangle to draw at c_x/c_y (g_*), from the position in gp_*
+    logic signed [15:0] gp_x, gp_y;
+    logic [5:0]  gp_yoff;
+    logic [11:0] g_x0, g_x1;
+    logic [10:0] g_y0, g_rows;
+    logic [5:0]  g_cr, g_cxoff;
+    // the rectangle drawn now (the restore uses exactly it)
+    logic [11:0] cs_x0, cs_x1;
+    logic [10:0] cs_y0, cs_rows;
+    logic [5:0]  cs_cr, cs_cxoff;
+    always_ff @(posedge clk) begin
+        logic signed [15:0] x0, x1, y0, y1, oy;
+        c_x <= $signed({1'b0, cur_pos[31:19], 2'b00}) + 16'sd16 - $signed({c_hbp[13:0], 2'b00})
+               + $signed({14'd0, cur_pos[17:16]});
+        c_y <= $signed({4'd0, vactive}) - 16'sd1 - $signed(cur_pos[15:0]);
+        c_yoff <= cur_ctl[5:0];
+        c_want <= cur_ctl[7] && video_on;
+        // oy: the screen row of sprite row 0 (rows above the first row shown are cut off)
+        oy = c_y - $signed({10'd0, c_yoff});
+        x0 = c_x < 0 ? 16'sd0 : c_x;
+        y0 = c_y < 0 ? 16'sd0 : c_y;
+        x1 = c_x + 16'sd64; y1 = oy + 16'sd64;
+        if (x1 > $signed({4'd0, hactive})) x1 = $signed({4'd0, hactive});
+        if (x1 > 16'sd2048) x1 = 16'sd2048;
+        if (y1 > $signed({4'd0, vactive})) y1 = $signed({4'd0, vactive});
+        if (y1 > 16'sd1024) y1 = 16'sd1024;
+        gp_x <= c_x; gp_y <= c_y; gp_yoff <= c_yoff;
+        g_x0 <= 12'(x0); g_x1 <= 12'(x1); g_y0 <= 11'(y0);
+        g_rows <= x1 > x0 && y1 > y0 ? 11'(y1 - y0) : 11'd0;
+        g_cr <= 6'(y0 - oy); g_cxoff <= 6'(x0 - c_x);
+    end
+    wire        c_moved = gp_x != c_sx || gp_y != c_sy || gp_yoff != c_syoff;
 
     // the nearest LUT0 entries to the cursor colours, searched after every
     // LUT or cursor-colour load (256 clocks)
@@ -265,8 +314,9 @@ module artist (
     logic [8:0]  ns_i;
     logic [7:0]  ns_qi;
     logic        ns_run, ns_qv, ns_pend;
-    logic [9:0]  ns_dfg, ns_dbg;
-    logic [7:0]  ns_fgi, ns_bgi;
+    logic [9:0]  ns_dfg, ns_dbg, ns_df, ns_db;
+    logic [7:0]  ns_fgi, ns_bgi, ns_qi2;
+    logic        ns_qv2;
     always_ff @(posedge clk) begin
         if (pal_wr) lutsh[pal_addr] <= pal_rgb;
         lutsh_q <= lutsh[ns_i[7:0]];
@@ -302,16 +352,21 @@ module artist (
             logic signed [13:0] i;
             logic [7:0] v, d;
             logic       en, bit_;
-            logic [5:0] col;
             i = $signed({p1_d[12], p1_d}) + 14'(j);       // the pixel's index in the span
             en = i >= 0 && i < span;
             v = e_color; bit_ = 1'b1;
-            col = 6'(i[5:0] + e_cxoff);                    // the cursor column (K_CURSOR)
             case (e_kind)
                 K_BITS: begin
                     bit_ = e_pat[5'd31 - i[4:0]];
                     v = bit_ ? e_fg : e_bg;
                     if (e_maskena && !e_mask[5'd31 - i[4:0]]) en = 1'b0;
+                    // a sub-word store carries 8 pixels per byte lane (09 2.5: X's sth glyph rows)
+                    if (!e_be[2'd3 - i[4:3]]) en = 1'b0;
+                end
+                K_SOLID: begin
+                    // fills: TRANSFER_DATA bit 31-((x - x0) mod 32) picks FG or BG (09 5.1)
+                    bit_ = e_pat[5'd31 - i[4:0]];
+                    v = bit_ ? e_fg : e_bg;
                 end
                 K_BYTES: begin
                     v = e_pat[5'd31 - {i[1:0], 3'd0} -: 8];
@@ -320,7 +375,10 @@ module artist (
                 end
                 K_MOVE: begin
                     v = pair[8 * (j + r_sh) +: 8];
-                    if (e_expand) begin bit_ = |(v & e_pm); v = bit_ ? e_fg : e_bg; end
+                    if (e_expand) begin
+                        bit_ = e_srcj != 5'd0 ? v[e_srcj[2:0]] : |(v & e_pm);
+                        v = bit_ ? e_fg : e_bg;
+                    end
                 end
                 default: ;
             endcase
@@ -329,8 +387,9 @@ module artist (
             c_word[8 * j +: 8] = e_rmw ? ((d & ~e_pm) | (rop8(e_rop, v, d) & e_pm)) : rop8(e_rop, v, 8'd0);
             // the cursor's own kinds write exact indices: no raster op or plane mask
             if (e_kind == K_CURSOR) begin
-                c_word[8 * j +: 8] = c_img[6'd63 - col] ? c_fgi : c_bgi;
-                if (!(c_img[6'd63 - col] || c_msk[6'd63 - col])) en = 1'b0;
+                // mask 0 = transparent, else image ? foreground (colour 3) : background (2)
+                c_word[8 * j +: 8] = sr_img[71 - j] ? c_fgi : c_bgi;
+                if (!sr_msk[71 - j]) en = 1'b0;
             end
             if (e_kind == K_RESTORE) c_word[8 * j +: 8] = su_q[8 * j +: 8];
             c_be[j] = en;
@@ -345,7 +404,8 @@ module artist (
         q = 256'(p >> (8 * e_x0[2:0]));
         get_data = 32'd0;
         if (e_get32)
-            for (int i = 0; i < 32; i++) get_data[31 - i] = |(q[8 * i +: 8] & e_pm);
+            for (int i = 0; i < 32; i++)
+                get_data[31 - i] = e_srcj != 5'd0 ? q[8 * i + e_srcj[2:0]] : |(q[8 * i +: 8] & e_pm);
         else
             get_data = {q[7:0], q[15:8], q[23:16], q[31:24]};
     end
@@ -399,11 +459,13 @@ module artist (
 
     always_ff @(posedge clk) begin
         // operations G_DEC launches, set up after the engine's case below
-        logic        lp_put, lp_fill, lp_move, lp_hide, lp_show;
-        logic [31:0] lp_d, lp_dxy, lp_wh, lp_sxy;
+        logic        lp_put, lp_fill, lp_move, lp_hide, lp_show, lp_font, lp_line, lp_incl;
+        logic [31:0] lp_d, lp_dxy, lp_wh, lp_sxy, lp_xfer, lp_end;
+        logic [4:0]  lp_frow;
         logic [21:0] lp_xy;
         logic [3:0]  lp_be;
         lp_put = 1'b0; lp_fill = 1'b0; lp_move = 1'b0; lp_hide = 1'b0; lp_show = 1'b0;
+        lp_font = 1'b0; lp_line = 1'b0; lp_incl = 1'b0; lp_frow = 5'd0; lp_end = 32'd0; lp_xfer = xfer;
         lp_d = g_wdata; lp_be = g_be; lp_xy = 22'd0;
         lp_dxy = dstxy; lp_wh = lenxy; lp_sxy = srcxy;
 
@@ -457,6 +519,7 @@ module artist (
                         // read the words under pixels x..x+3 (x..x+31 for a bitmap)
                         logic [11:0] x1;
                         e_get32 <= ba_otc(src_ba) == 4'd5;
+                        e_srcj <= src_ba[20:16];
                         e_pm <= pmask[7:0];
                         e_x0 <= {1'b0, g_src_xy[10:0]};
                         x1 = {1'b0, g_src_xy[10:0]} + (ba_otc(src_ba) == 4'd5 ? 12'd31 : 12'd3);
@@ -505,6 +568,23 @@ module artist (
                         24'h100820: xfer <= bmerge(xfer, g_wdata, g_be);
                         24'h100A00: begin lp_dxy = bmerge(dstxy, g_wdata, g_be); dstxy <= lp_dxy; lp_fill = 1'b1; end
                         24'h100A04: begin lp_wh = bmerge(lenxy, g_wdata, g_be); lenxy <= lp_wh; lp_fill = 1'b1; end
+                        24'h100A20: begin xfer <= bmerge(xfer, g_wdata, g_be); lp_xfer = bmerge(xfer, g_wdata, g_be); lp_fill = 1'b1; end
+                        24'h100AA0, 24'h1008A0: begin
+                            // the font engine (09 2.3): two 16-pixel rows a word at DST,
+                            // rows >= LEN h dropped, then DST x += LEN w; AA0 restarts the rows
+                            logic [4:0] n;
+                            n = g_offw == 24'h100AA0 ? 5'd0 : f_row;
+                            lp_font = 1'b1; lp_frow = n;
+                            f_row <= n + 5'd2;
+                            if ({11'd0, n} + 16'd2 >= lenxy[15:0])
+                                dstxy[31:16] <= dstxy[31:16] + lenxy[31:16];
+                        end
+                        24'h100E44, 24'h100E04: begin
+                            // a line from DST to this point (E44 with, E04 without the end pixel)
+                            lp_line = 1'b1; lp_end = bmerge(32'd0, g_wdata, g_be);
+                            lp_incl = g_offw == 24'h100E44;
+                            dstxy <= bmerge(32'd0, g_wdata, g_be);
+                        end
                         24'h100B00: begin lp_dxy = bmerge(dstxy, g_wdata, g_be); dstxy <= lp_dxy; lp_move = 1'b1; end
                         24'h100B04: begin lp_wh = bmerge(lenxy, g_wdata, g_be); lenxy <= lp_wh; lp_move = 1'b1; end
                         24'h118000: begin dst_ba <= bmerge(dst_ba, g_wdata, g_be); src_ba <= bmerge(src_ba, g_wdata, g_be); end
@@ -576,7 +656,7 @@ module artist (
             // ============================================== the engine
             case (e_st)
             E_ROW: begin
-                if (e_rows == 11'd0) e_st <= E_IDLE;
+                if (e_rows == 11'd0) e_st <= e_line ? E_LINE : E_IDLE;
                 else begin
                     logic [11:0] xl, sxl;
                     xl  = e_xend - 12'd1;
@@ -626,6 +706,24 @@ module artist (
                 end
             end
             E_GET: e_st <= E_IDLE;              // get_data is ready; G_GET answers
+            E_LAUNCH: e_st <= E_IDLE;           // the launch blocks below choose the next state
+            // a line's next pixel: a one-pixel span, then step
+            E_LINE: begin
+                if (l_n == 12'd0) begin e_line <= 1'b0; e_st <= E_IDLE; end
+                else begin
+                    logic signed [14:0] e2;
+                    logic signed [13:0] err;
+                    e_x0 <= l_x; e_xend <= l_x + 12'd1; e_y <= l_y[10:0];
+                    e_rows <= l_x < 12'd2048 && l_y < 12'd1024 ? 11'd1 : 11'd0;
+                    e_st <= E_ROW;
+                    l_n <= l_n - 12'd1;
+                    e2 = {l_err, 1'b0};
+                    err = l_err;
+                    if (e2 > -$signed({1'b0, l_dya})) begin err = err - l_dya; l_x <= l_sx ? l_x - 12'd1 : l_x + 12'd1; end
+                    if (e2 < $signed({1'b0, l_dxa})) begin err = err + l_dxa; l_y <= l_sy ? l_y - 12'd1 : l_y + 12'd1; end
+                    l_err <= err;
+                end
+            end
             // compute and write back the destination words
             E_WR: begin
                 logic       push, pop;
@@ -633,6 +731,11 @@ module artist (
                 push = 1'b0; pop = 1'b0; sent = wr_sent;
                 // issue step wi's line-buffer reads while the FIFO has room
                 p1_v <= 1'b0;
+                // the cursor's row bits, aligned to word 0's lanes (the span starts at lane x0[2:0])
+                if (wi == 9'd0) begin
+                    sr_img <= {c_img << e_cxoff, 8'd0} >> e_x0[2:0];
+                    sr_msk <= {c_msk << e_cxoff, 8'd0} >> e_x0[2:0];
+                end
                 if (wi <= r_nw && ({1'b0, f_n} + {4'd0, p1_v}) < 5'd6) begin
                     p1_v <= 1'b1; p1_prime <= wi == 9'd0;
                     p1_d <= 13'({2'b00, r_w0, 3'd0} + {wi - 9'd1, 3'd0}) - 13'(e_x0);
@@ -643,6 +746,7 @@ module artist (
                     prev <= sb_q;
                     if (!p1_prime) begin
                         fifo[f_wp] <= {c_be, c_word}; f_wp <= f_wp + 3'd1; push = 1'b1;
+                        sr_img <= sr_img << 8; sr_msk <= sr_msk << 8;
                     end
                 end
                 // bursts of up to 64 beats
@@ -658,6 +762,7 @@ module artist (
             end
             E_NEXT: begin
                 e_rows <= e_rows - 11'd1;
+                if (e_font) e_pat <= e_pat2;
                 e_cr <= e_cr + 6'd1;
                 e_y  <= e_mirror ? e_mirror_y : e_up ? e_y - 11'd1 : e_y + 11'd1;
                 e_sy <= e_up ? e_sy - 11'd1 : e_sy + 11'd1;
@@ -684,51 +789,56 @@ module artist (
                 else if (!c_shown && c_want && c_idle == CUR_IDLE && !ns_pend && !ns_run) lp_show = 1'b1;
             end
             // the nearest LUT0 entries to the cursor colours (entry 3: image, 2: mask only)
-            ns_qv <= 1'b0;
+            // three steps: the entry (lutsh_q), its distances (ns_df/ns_db), the comparison
+            ns_qv <= 1'b0; ns_qv2 <= ns_qv; ns_qi2 <= ns_qi;
+            ns_df <= cdist(lutsh_q, cur_col[3]); ns_db <= cdist(lutsh_q, cur_col[2]);
             if (!ns_run && ns_pend && !e_busy) begin
                 ns_run <= 1'b1; ns_pend <= 1'b0; ns_i <= 9'd0;
                 ns_dfg <= 10'h3FF; ns_dbg <= 10'h3FF;
             end else if (ns_run) begin
-                // lutsh_q is entry ns_i - 1
                 if (ns_i != 9'd256) ns_i <= ns_i + 9'd1;
                 ns_qv <= ns_i != 9'd256; ns_qi <= ns_i[7:0];
-                if (ns_qv) begin
-                    if (cdist(lutsh_q, cur_col[3]) < ns_dfg) begin ns_dfg <= cdist(lutsh_q, cur_col[3]); ns_fgi <= ns_qi; end
-                    if (cdist(lutsh_q, cur_col[2]) < ns_dbg) begin ns_dbg <= cdist(lutsh_q, cur_col[2]); ns_bgi <= ns_qi; end
-                end else if (ns_i == 9'd256) begin
+                if (ns_qv2) begin
+                    if (ns_df < ns_dfg) begin ns_dfg <= ns_df; ns_fgi <= ns_qi2; end
+                    if (ns_db < ns_dbg) begin ns_dbg <= ns_db; ns_bgi <= ns_qi2; end
+                end else if (ns_i == 9'd256 && !ns_qv) begin
                     ns_run <= 1'b0; c_fgi <= ns_fgi; c_bgi <= ns_bgi; c_dirty <= 1'b1;
                 end
             end
             if (lp_hide || lp_show) begin
-                // the drawn rectangle, clipped to the screen and the VRAM
-                logic signed [15:0] x0, x1, y0, y1, ox, oy;
-                ox = lp_hide ? c_sx : c_x; oy = lp_hide ? c_sy : c_y;
-                x0 = ox < 0 ? 16'sd0 : ox; y0 = oy < 0 ? 16'sd0 : oy;
-                x1 = ox + 16'sd64; y1 = oy + 16'sd64;
-                if (x1 > $signed({4'd0, hactive})) x1 = $signed({4'd0, hactive});
-                if (x1 > 16'sd2048) x1 = 16'sd2048;
-                if (y1 > $signed({4'd0, vactive})) y1 = $signed({4'd0, vactive});
-                if (y1 > 16'sd1024) y1 = 16'sd1024;
+                // the rectangle: on a restore the one drawn, else the one at the position now
                 e_up <= 1'b0; e_mirror <= 1'b0; e_expand <= 1'b0; e_transp <= 1'b0; e_maskena <= 1'b0;
-                e_x0 <= 12'(x0); e_xend <= 12'(x1); e_y <= 11'(y0);
-                e_rows <= x1 > x0 && y1 > y0 ? 11'(y1 - y0) : 11'd0;
-                e_cr <= 6'(y0 - oy); e_cxoff <= 6'(x0 - ox);
+                e_font <= 1'b0; e_line <= 1'b0;
+                e_x0 <= lp_hide ? cs_x0 : g_x0; e_xend <= lp_hide ? cs_x1 : g_x1;
+                e_y <= lp_hide ? cs_y0 : g_y0; e_rows <= lp_hide ? cs_rows : g_rows;
+                e_cr <= lp_hide ? cs_cr : g_cr; e_cxoff <= lp_hide ? cs_cxoff : g_cxoff;
                 e_sx <= 12'd0; e_sy <= 11'd0;
                 e_st <= E_ROW;
                 if (lp_hide) begin
                     e_kind <= K_RESTORE; e_rmw <= 1'b0; c_shown <= 1'b0;
                 end else begin
                     e_kind <= K_CURSOR; e_rmw <= 1'b1; c_shown <= 1'b1; c_dirty <= 1'b0;
-                    c_sx <= c_x; c_sy <= c_y;
+                    c_sx <= gp_x; c_sy <= gp_y; c_syoff <= gp_yoff;
+                    cs_x0 <= g_x0; cs_x1 <= g_x1; cs_y0 <= g_y0; cs_rows <= g_rows; cs_cr <= g_cr; cs_cxoff <= g_cxoff;
                 end
 `ifdef SIMULATION
-                if (dbg_trace) $display("artist: cursor %s at %0d,%0d", lp_hide ? "out" : "in ", ox, oy);
+                if (dbg_trace) $display("artist: cursor %s at %0d,%0d", lp_hide ? "out" : "in ", lp_hide ? c_sx : gp_x, lp_hide ? c_sy : gp_y);
 `endif
             end
 
-            // ============================================== launches (the engine is idle)
-            if (lp_put || lp_fill || lp_move) begin
+            // ============================================== operations G_DEC decided on: capture
+            // their operands now, set them up next cycle (E_LAUNCH; split for timing)
+            if (lp_put || lp_fill || lp_move || lp_font || lp_line) begin
+                lq_put <= lp_put; lq_fill <= lp_fill; lq_move <= lp_move; lq_font <= lp_font; lq_line <= lp_line;
+                lq_incl <= lp_incl; lq_d <= lp_d; lq_dxy <= lp_dxy; lq_wh <= lp_wh; lq_sxy <= lp_sxy;
+                lq_xfer <= lp_xfer; lq_end <= lp_end; lq_frow <= lp_frow; lq_xy <= lp_xy; lq_be <= lp_be;
+                e_st <= E_LAUNCH;
+            end
+            // ============================================== launches (E_LAUNCH)
+            if (e_st == E_LAUNCH) begin
                 e_fg <= fg[7:0]; e_bg <= bg[7:0]; e_pm <= pmask[7:0]; e_rop <= ibo[11:8];
+                e_fg <= fg[7:0]; e_bg <= bg[7:0]; e_pm <= pmask[7:0]; e_rop <= ibo[11:8];
+                e_srcj <= src_ba[20:16]; e_font <= 1'b0; e_line <= 1'b0; e_be <= 4'hF;
                 e_transp <= ibo[28] || ibo[1];
                 e_maskena <= ibo[29];
                 e_mask <= binc_mask;
@@ -737,33 +847,33 @@ module artist (
                 e_color <= ibo[1] ? fg[7:0] : bg[7:0];
                 e_sx <= 12'd0; e_sy <= 11'd0;
             end
-            if (lp_put) begin
-                // a window or BINC write through DST_BM_ACCESS at pixel lp_xy
+            if (e_st == E_LAUNCH && lq_put) begin
+                // a window or BINC write through DST_BM_ACCESS at pixel lq_xy
                 logic [11:0] n;
-                if ((ba_buf(dst_ba) == 4'd6 || ba_buf(dst_ba) == 4'd7) && lp_xy[21:11] < 11'd64 && lp_xy[10:6] == 5'd0) begin
+                if ((ba_buf(dst_ba) == 4'd6 || ba_buf(dst_ba) == 4'd7) && lq_xy[21:11] < 11'd64 && lq_xy[10:6] == 5'd0) begin
                     // the cursor bitmaps: 32 pixels of a row (x 0 or 32), 1 = set
-                    cb_we <= 1'b1; cb_msk <= ba_buf(dst_ba) == 4'd7; cb_half <= lp_xy[5]; cb_row <= lp_xy[16:11];
-                    cb_data <= lp_d; c_dirty <= 1'b1;
+                    cb_we <= 1'b1; cb_msk <= ba_buf(dst_ba) == 4'd7; cb_half <= lq_xy[5]; cb_row <= lq_xy[16:11];
+                    cb_data <= lq_d; c_dirty <= 1'b1;
                 end else if (ba_buf(dst_ba) == 4'd15) begin
                     // colour-map staging: one entry per word
-                    stg_we <= 1'b1; stg_wa <= lp_xy[8:0]; stg_wd <= lp_d[23:0];
+                    stg_we <= 1'b1; stg_wa <= lq_xy[8:0]; stg_wd <= lq_d[23:0];
 `ifdef SIMULATION
-                    if (dbg_trace) $display("artist: stage %0d = %06x", lp_xy[10:0], lp_d[23:0]);
+                    if (dbg_trace) $display("artist: stage %0d = %06x", lq_xy[10:0], lq_d[23:0]);
 `endif
-                end else if (ba_image(dst_ba) && lp_xy[21:11] < 11'd1024) begin
+                end else if (ba_image(dst_ba) && lq_xy[21:11] < 11'd1024) begin
                     n = ba_otc(dst_ba) == 4'd5 ? 12'd32 : 12'd4;
-                    if ({1'b0, lp_xy[10:0]} + n > 12'd2048) n = 12'd2048 - {1'b0, lp_xy[10:0]};
-                    e_x0 <= {1'b0, lp_xy[10:0]};
-                    e_xend <= {1'b0, lp_xy[10:0]} + n;
-                    e_y <= lp_xy[21:11]; e_rows <= 11'd1;
-                    e_pat <= lp_d; e_be <= lp_be;
+                    if ({1'b0, lq_xy[10:0]} + n > 12'd2048) n = 12'd2048 - {1'b0, lq_xy[10:0]};
+                    e_x0 <= {1'b0, lq_xy[10:0]};
+                    e_xend <= {1'b0, lq_xy[10:0]} + n;
+                    e_y <= lq_xy[21:11]; e_rows <= 11'd1;
+                    e_pat <= lq_d; e_be <= lq_be;
                     // the STI's private state (STUBS S-023, artist.md 1): a store
                     // in its access mode to x 1536..1679 of row 384 or 776 goes
                     // to both rows, so the copy a mode change moves to is valid
-                    if (dst_ba == 32'h1360_2000 && lp_xy[10:0] >= 11'd1536 && lp_xy[10:0] < 11'd1680 &&
-                        (lp_xy[21:11] == 11'd384 || lp_xy[21:11] == 11'd776)) begin
+                    if (dst_ba == 32'h1360_2000 && lq_xy[10:0] >= 11'd1536 && lq_xy[10:0] < 11'd1680 &&
+                        (lq_xy[21:11] == 11'd384 || lq_xy[21:11] == 11'd776)) begin
                         e_mirror <= 1'b1; e_rows <= 11'd2;
-                        e_mirror_y <= lp_xy[21:11] == 11'd384 ? 11'd776 : 11'd384;
+                        e_mirror_y <= lq_xy[21:11] == 11'd384 ? 11'd776 : 11'd384;
                     end
                     if (ba_otc(dst_ba) == 4'd5) begin
                         e_kind <= K_BITS;
@@ -772,45 +882,79 @@ module artist (
                     e_st <= E_ROW;
 `ifdef SIMULATION
                     if (dbg_trace) $display("artist: put  %0d,%0d ba %08x d %08x be %x ibo %08x pm %02x fg %02x bg %02x mask %08x",
-                                        lp_xy[10:0], lp_xy[21:11], dst_ba, lp_d, lp_be, ibo, pmask[7:0], fg[7:0], bg[7:0], binc_mask);
+                                        lq_xy[10:0], lq_xy[21:11], dst_ba, lq_d, lq_be, ibo, pmask[7:0], fg[7:0], bg[7:0], binc_mask);
 `endif
                 end
             end
-            if ((lp_fill || lp_move) && ctl_plane == 32'd0 && ba_image(dst_ba) &&
-                lp_dxy[31:16] < 16'd2048 && lp_dxy[15:0] < 16'd1024 && lp_wh[31:16] != 16'd0 && lp_wh[15:0] != 16'd0 &&
-                (lp_fill || (lp_sxy[31:16] < 16'd2048 && lp_sxy[15:0] < 16'd1024))) begin
-                // rectangle fill / block move at lp_dxy (x<<16 | y), size lp_wh (w<<16 | h), clipped to the VRAM
+            if (e_st == E_LAUNCH && (lq_fill || lq_move) && ctl_plane == 32'd0 && ba_image(dst_ba) &&
+                lq_dxy[31:16] < 16'd2048 && lq_dxy[15:0] < 16'd1024 && lq_wh[31:16] != 16'd0 && lq_wh[15:0] != 16'd0 &&
+                (lq_fill || (lq_sxy[31:16] < 16'd2048 && lq_sxy[15:0] < 16'd1024))) begin
+                // rectangle fill / block move at lq_dxy (x<<16 | y), size lq_wh (w<<16 | h), clipped to the VRAM
                 logic [16:0] w, h;
-                w = {1'b0, lp_wh[31:16]}; h = {1'b0, lp_wh[15:0]};
-                if (w > 17'd2048 - {1'b0, lp_dxy[31:16]}) w = 17'd2048 - {1'b0, lp_dxy[31:16]};
-                if (h > 17'd1024 - {1'b0, lp_dxy[15:0]}) h = 17'd1024 - {1'b0, lp_dxy[15:0]};
-                if (lp_move) begin
-                    if (w > 17'd2048 - {1'b0, lp_sxy[31:16]}) w = 17'd2048 - {1'b0, lp_sxy[31:16]};
-                    if (h > 17'd1024 - {1'b0, lp_sxy[15:0]}) h = 17'd1024 - {1'b0, lp_sxy[15:0]};
+                w = {1'b0, lq_wh[31:16]}; h = {1'b0, lq_wh[15:0]};
+                if (w > 17'd2048 - {1'b0, lq_dxy[31:16]}) w = 17'd2048 - {1'b0, lq_dxy[31:16]};
+                if (h > 17'd1024 - {1'b0, lq_dxy[15:0]}) h = 17'd1024 - {1'b0, lq_dxy[15:0]};
+                if (lq_move) begin
+                    if (w > 17'd2048 - {1'b0, lq_sxy[31:16]}) w = 17'd2048 - {1'b0, lq_sxy[31:16]};
+                    if (h > 17'd1024 - {1'b0, lq_sxy[15:0]}) h = 17'd1024 - {1'b0, lq_sxy[15:0]};
                 end
-                e_x0 <= lp_dxy[27:16]; e_xend <= lp_dxy[27:16] + w[11:0];
+                e_x0 <= lq_dxy[27:16]; e_xend <= lq_dxy[27:16] + w[11:0];
                 e_rows <= h[10:0];
-                e_y <= lp_dxy[10:0];
-                if (lp_fill) begin
-                    e_kind <= K_SOLID;
-                    // with 0x100080 = 0x7D a fill moves DST down by its height (QEMU's
-                    // reading of HP-UX's X server; the NGLE manual says fills always do)
-                    if (r100080 == 32'h7D) dstxy <= {lp_dxy[31:16], lp_dxy[15:0] + lp_wh[15:0]};
+                e_y <= lq_dxy[10:0];
+                if (lq_fill) begin
+                    e_kind <= K_SOLID; e_pat <= lq_xfer;
+                    // with 0x100080 = 0x7D (polygon spans) or 0x08 (pattern rows) a fill
+                    // moves DST down by its height (09 5.1; QEMU knew 0x7D)
+                    if (r100080 == 32'h7D || r100080 == 32'h08) dstxy <= {lq_dxy[31:16], lq_dxy[15:0] + lq_wh[15:0]};
                 end
                 else begin
                     e_kind <= K_MOVE;
                     e_expand <= ba_ots(dst_ba) == 3'd6;
-                    e_sx <= lp_sxy[27:16];
+                    e_sx <= lq_sxy[27:16];
                     // overlapping rows: copy bottom-up when moving down
-                    e_up <= lp_dxy[15:0] > lp_sxy[15:0];
-                    e_y  <= lp_dxy[15:0] > lp_sxy[15:0] ? 11'(lp_dxy[15:0] + h[15:0] - 16'd1) : lp_dxy[10:0];
-                    e_sy <= lp_dxy[15:0] > lp_sxy[15:0] ? 11'(lp_sxy[15:0] + h[15:0] - 16'd1) : lp_sxy[10:0];
+                    e_up <= lq_dxy[15:0] > lq_sxy[15:0];
+                    e_y  <= lq_dxy[15:0] > lq_sxy[15:0] ? 11'(lq_dxy[15:0] + h[15:0] - 16'd1) : lq_dxy[10:0];
+                    e_sy <= lq_dxy[15:0] > lq_sxy[15:0] ? 11'(lq_sxy[15:0] + h[15:0] - 16'd1) : lq_sxy[10:0];
                 end
                 e_st <= E_ROW;
 `ifdef SIMULATION
                 if (dbg_trace) $display("artist: %s %0d,%0d -> %0d,%0d %0dx%0d ibo %08x pm %02x fg %02x bg %02x ba %08x/%08x",
-                                    lp_fill ? "fill" : "move", lp_sxy[31:16], lp_sxy[15:0], lp_dxy[31:16], lp_dxy[15:0],
+                                    lq_fill ? "fill" : "move", lq_sxy[31:16], lq_sxy[15:0], lq_dxy[31:16], lq_dxy[15:0],
                                     w, h, ibo, pmask[7:0], fg[7:0], bg[7:0], src_ba, dst_ba);
+`endif
+            end
+            if (e_st == E_LAUNCH && lq_font && ctl_plane == 32'd0 && ba_image(dst_ba) && lq_dxy[31:16] < 16'd2048) begin
+                // two 16-pixel glyph rows at DST + row counter (rows >= LEN h dropped)
+                logic [15:0] y;
+                logic [11:0] n;
+                y = lq_dxy[15:0] + {11'd0, lq_frow};
+                n = 12'd16;
+                if ({1'b0, lq_dxy[26:16]} + n > 12'd2048) n = 12'd2048 - {1'b0, lq_dxy[26:16]};
+                e_kind <= K_BITS; e_font <= 1'b1; e_maskena <= 1'b0; e_be <= 4'b1100;
+                e_pat <= {lq_d[31:16], 16'd0}; e_pat2 <= {lq_d[15:0], 16'd0};
+                e_x0 <= {1'b0, lq_dxy[26:16]}; e_xend <= {1'b0, lq_dxy[26:16]} + n;
+                e_y <= y[10:0];
+                e_rows <= y >= 16'd1024 ? 11'd0 :
+                          {11'd0, lq_frow} + 16'd1 < lq_wh[15:0] && y < 16'd1023 ? 11'd2 :
+                          {11'd0, lq_frow} < lq_wh[15:0] ? 11'd1 : 11'd0;
+                e_st <= E_ROW;
+            end
+            if (e_st == E_LAUNCH && lq_line) begin
+                // Bresenham from DST to lq_end, one pixel at a time (E_LINE)
+                logic [11:0] x0, y0, x1, y1;
+                logic [11:0] dxa, dya;
+                x0 = lq_dxy[27:16]; y0 = lq_dxy[11:0]; x1 = lq_end[27:16]; y1 = lq_end[11:0];
+                dxa = x1 >= x0 ? x1 - x0 : x0 - x1;
+                dya = y1 >= y0 ? y1 - y0 : y0 - y1;
+                e_kind <= K_SOLID; e_pat <= xfer; e_line <= 1'b1;
+                l_x <= x0; l_y <= y0; l_sx <= x1 < x0; l_sy <= y1 < y0;
+                l_dxa <= {2'b00, dxa}; l_dya <= {2'b00, dya};
+                l_err <= $signed({2'b00, dxa}) - $signed({2'b00, dya});
+                l_n <= (dxa > dya ? dxa : dya) + {11'd0, lq_incl};
+                e_rows <= 11'd0;
+                e_st <= ctl_plane == 32'd0 && ba_image(dst_ba) ? E_LINE : E_IDLE;
+`ifdef SIMULATION
+                if (dbg_trace) $display("artist: line %0d,%0d -> %0d,%0d %s", x0, y0, x1, y1, lq_incl ? "incl" : "excl");
 `endif
             end
         end

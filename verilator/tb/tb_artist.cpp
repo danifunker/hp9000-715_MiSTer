@@ -105,7 +105,7 @@ static void wait_idle() { for (int n = 0; n < 4000000 && t->busy; n++) tick(); }
 // ------------------------------------------------------------- reference model
 struct Regs {
 	uint32_t dst_ba = 0, src_ba = 0, fg = 0, bg = 0, pm = 0, ibo = 0, mask = 0, cp = 0;
-	uint32_t dstxy = 0, lenxy = 0, srcxy = 0, binc_dst = 0, binc_src = 0, r80 = 0;
+	uint32_t dstxy = 0, lenxy = 0, srcxy = 0, binc_dst = 0, binc_src = 0, r80 = 0, xfer = 0; int frow = 0;
 } R;
 static uint32_t curcol[4];
 static uint32_t stg[512];
@@ -134,6 +134,7 @@ static void ref_put(int x, int y, uint32_t d, unsigned be) {
 }
 static void ref_put1(int x, int y, uint32_t d, unsigned be) {
 	uint32_t ba = R.dst_ba;
+	if ((((ba >> 12) & 15) == 6 || ((ba >> 12) & 15) == 7)) return;     // cursor bitmaps: not in the image
 	if (((ba >> 12) & 15) == 15) { stg[x & 511] = d & 0xFFFFFF; return; }
 	if (!image(ba) || y >= 1024) return;
 	bool transp = (R.ibo >> 28 & 1) || (R.ibo >> 1 & 1), maskena = R.ibo >> 29 & 1;
@@ -141,6 +142,7 @@ static void ref_put1(int x, int y, uint32_t d, unsigned be) {
 		bool ind = ((ba >> 24) & 7) == 6;
 		for (int i = 0; i < 32 && x + i < 2048; i++) {
 			int b = d >> (31 - i) & 1;
+			if (!(be >> (3 - i / 8) & 1)) continue;          // 8 pixels per byte lane
 			if (maskena && !(R.mask >> (31 - i) & 1)) continue;
 			if (!b && transp) continue;
 			ref_px(x + i, y, b ? (ind ? R.fg : 1) : (ind ? R.bg : 0));
@@ -156,9 +158,13 @@ static void ref_put1(int x, int y, uint32_t d, unsigned be) {
 static void ref_fill(uint32_t dxy, uint32_t wh) {
 	int x = dxy >> 16, y = dxy & 0xFFFF, w = wh >> 16, h = wh & 0xFFFF;
 	if (R.cp || !image(R.dst_ba) || x >= 2048 || y >= 1024) return;
-	uint8_t c = (R.ibo & 2) ? R.fg : R.bg;
+	bool transp = (R.ibo >> 28 & 1) || (R.ibo >> 1 & 1);
 	for (int r = 0; r < h && y + r < 1024; r++)
-		for (int i = 0; i < w && x + i < 2048; i++) ref_px(x + i, y + r, c);
+		for (int i = 0; i < w && x + i < 2048; i++) {
+			int b = R.xfer >> (31 - i % 32) & 1;        // TRANSFER_DATA picks FG/BG
+			if (!b && transp) continue;
+			ref_px(x + i, y + r, b ? R.fg : R.bg);
+		}
 }
 static void ref_move(uint32_t sxy, uint32_t dxy, uint32_t wh) {
 	int sx = sxy >> 16, sy = sxy & 0xFFFF, x = dxy >> 16, y = dxy & 0xFFFF, w = wh >> 16, h = wh & 0xFFFF;
@@ -167,10 +173,11 @@ static void ref_move(uint32_t sxy, uint32_t dxy, uint32_t wh) {
 	std::vector<uint8_t> src(w * h);
 	for (int r = 0; r < h; r++) for (int i = 0; i < w; i++) src[r * w + i] = ref[(sy + r) * 2048 + sx + i];
 	bool expand = ((R.dst_ba >> 24) & 7) == 6, transp = (R.ibo >> 28 & 1) || (R.ibo >> 1 & 1);
+	int j = (R.src_ba >> 16) & 31;
 	for (int r = 0; r < h; r++)
 		for (int i = 0; i < w; i++) {
 			uint8_t v = src[r * w + i];
-			if (expand) { int b = (v & R.pm) != 0; if (!b && transp) continue; v = b ? R.fg : R.bg; }
+			if (expand) { int b = j ? (v >> (j & 7) & 1) : (v & R.pm) != 0; if (!b && transp) continue; v = b ? R.fg : R.bg; }
 			ref_px(x + i, y + r, v);
 		}
 }
@@ -194,8 +201,40 @@ static void wr(uint32_t off, uint32_t d) {
 	case 0x100800: R.dstxy = d; break;
 	case 0x100804: R.lenxy = d; break;
 	case 0x100808: R.srcxy = d; break;
-	case 0x100A04: R.lenxy = d; ref_fill(R.dstxy, R.lenxy); if (R.r80 == 0x7D) R.dstxy += R.lenxy & 0xFFFF; break;
-	case 0x100A00: R.dstxy = d; ref_fill(R.dstxy, R.lenxy); if (R.r80 == 0x7D) R.dstxy += R.lenxy & 0xFFFF; break;
+	case 0x100820: R.xfer = d; break;
+	case 0x100A04: R.lenxy = d; ref_fill(R.dstxy, R.lenxy); if (R.r80 == 0x7D || R.r80 == 8) R.dstxy += R.lenxy & 0xFFFF; break;
+	case 0x100A00: R.dstxy = d; ref_fill(R.dstxy, R.lenxy); if (R.r80 == 0x7D || R.r80 == 8) R.dstxy += R.lenxy & 0xFFFF; break;
+	case 0x100A20: R.xfer = d; ref_fill(R.dstxy, R.lenxy); if (R.r80 == 0x7D || R.r80 == 8) R.dstxy += R.lenxy & 0xFFFF; break;
+	case 0x100AA0: case 0x1008A0: {
+		int n = off == 0x100AA0 ? 0 : R.frow, h = R.lenxy & 0xFFFF, x = R.dstxy >> 16, y = R.dstxy & 0xFFFF;
+		bool transp = (R.ibo >> 28 & 1) || (R.ibo >> 1 & 1);
+		for (int k = 0; k < 2; k++) {
+			if (n + k >= h || y + n + k >= 1024) continue;
+			uint32_t row = k ? d & 0xFFFF : d >> 16;
+			for (int i = 0; i < 16 && x + i < 2048; i++) {
+				int b = row >> (15 - i) & 1;
+				if (!b && transp) continue;
+				ref_px(x + i, y + n + k, b ? R.fg : R.bg);
+			}
+		}
+		R.frow = n + 2;
+		if (n + 2 >= h) R.dstxy += (R.lenxy >> 16) << 16;
+		break;
+	}
+	case 0x100E44: case 0x100E04: {
+		int x0 = R.dstxy >> 16, y0 = R.dstxy & 0xFFFF, x1 = d >> 16, y1 = d & 0xFFFF;
+		int dxa = abs(x1 - x0), dya = abs(y1 - y0), sx = x1 < x0 ? -1 : 1, sy = y1 < y0 ? -1 : 1;
+		int err = dxa - dya, n = std::max(dxa, dya) + (off == 0x100E44), x = x0, y = y0;
+		for (; n > 0; n--) {
+			int b = R.xfer >> 31 & 1;
+			if (b || !((R.ibo >> 28 & 1) || (R.ibo >> 1 & 1))) ref_px(x, y, b ? R.fg : R.bg);
+			int e2 = 2 * err;
+			if (e2 > -dya) { err -= dya; x += sx; }
+			if (e2 < dxa) { err += dxa; y += sy; }
+		}
+		R.dstxy = d;
+		break;
+	}
 	case 0x100B00: R.dstxy = d; ref_move(R.srcxy, R.dstxy, R.lenxy); break;
 	case 0x100B04: R.lenxy = d; ref_move(R.srcxy, R.dstxy, R.lenxy); break;
 	case 0x1005C0: case 0x100600: case 0x100620: case 0x100640: case 0x100660:
@@ -294,7 +333,7 @@ int main(int argc, char** argv) {
 	wr(0x118000, 0x2EA02000); wr(0x11801C, 0x03000300); wr(0x118010, 0); wr(0x118014, 0); wr(0x118018, 0xFF);
 	wr(0x100800, 0); wr(0x100A04, (1280 << 16) | 1024);
 	check("clear 1280x1024");
-	wr(0x11801C, 0x20000302); wr(0x118010, 5); wr(0x118018, 7);
+	wr(0x100820, 0xFFFFFFFF); wr(0x11801C, 0x20000302); wr(0x118010, 5); wr(0x118018, 7);
 	wr(0x100800, (3 << 16) | 5); wr(0x100A04, (77 << 16) | 9);
 	check("fill FG through plane mask 7");
 	wr(0x11801C, 0x20000600 | 2); wr(0x118010, 0xC3); wr(0x118018, 0xFF);
@@ -367,6 +406,43 @@ int main(int argc, char** argv) {
 	wr(0x100800, (900 << 16) | 700); wr(0x100A04, (40 << 16) | 3); wr(0x100A04, (20 << 16) | 2); wr(0x100A04, (60 << 16) | 4);
 	wr(0x100080, 0);
 	check("stacked fills (0x100080 = 0x7D)");
+
+	// ---- fills from TRANSFER_DATA: an opaque stipple, a transparent one, 0x100A20 pattern rows
+	wr(0x118000, 0x2EA02000); wr(0x118018, 0xFF); wr(0x118010, 0x61); wr(0x118014, 0x16);
+	wr(0x11801C, 0x23000300); wr(0x100820, 0xF0F0A5C3); wr(0x100800, (1000 << 16) | 10); wr(0x100A04, (70 << 16) | 4);
+	wr(0x11801C, 0x23000302); wr(0x100820, 0x0F0F3C3C); wr(0x100800, (1003 << 16) | 20); wr(0x100A04, (45 << 16) | 3);
+	wr(0x100080, 0x08); wr(0x11801C, 0x23000300); wr(0x100800, (1100 << 16) | 30); wr(0x100804, (40 << 16) | 1);
+	for (int r = 0; r < 6; r++) wr(0x100A20, 0x80402010u >> r | 0x01020408u << r);
+	wr(0x100080, 0);
+	check("fills from TRANSFER_DATA, 0x100A20 rows");
+	// ---- glyph rows by halfword stores (X's sth to 0x100620: byte enables 1100)
+	wr(0x11801C, 0x13000302); wr(0x118010, 0x2B);
+	wr(0x1004A0, 0x30000000 | 40 << 13 | 1203 << 2);
+	for (int r = 0; r < 10; r++) {
+		uint32_t h = (0xA55A + r * 0x1357) & 0xFFFF;
+		int x, y; fb_xy(R.dst_ba, R.binc_dst & 0xFFFFFF, x, y); ref_put(x, y, h << 16 | h, 0xC); R.binc_dst += 0x2000;
+		gsc(true, REG + 0x100620, h << 16 | h, 0xC); wait_idle();
+	}
+	check("halfword glyph rows (16 pixels each)");
+	// ---- the font engine: 0x100AA0 / 0x1008A0, two rows a word, DST x += LEN w after h rows
+	wr(0x11801C, 0x23000302); wr(0x118010, 0x3C); wr(0x1005A0, 0x00FFFF00);
+	wr(0x100800, (1300 << 16) | 40); wr(0x100804, (9 << 16) | 7);
+	for (int g = 0; g < 3; g++) {
+		wr(0x100AA0, 0x7E008100 + g); wr(0x1008A0, 0x81008100 ^ g << 9); wr(0x1008A0, 0xFF00C3C3); wr(0x1008A0, 0x3C00DEAD);
+	}
+	check("font engine: three glyphs");
+	// ---- lines: x-major, y-major, backwards, exclusive end, a polyline
+	wr(0x118018, 0xFF); wr(0x100820, 0xFFFFFFFF); wr(0x11801C, 0x23000302); wr(0x118010, 0x5D);
+	wr(0x100800, (1400 << 16) | 50); wr(0x100E44, (1460 << 16) | 71);
+	wr(0x100800, (1420 << 16) | 50); wr(0x100E44, (1431 << 16) | 99);
+	wr(0x100800, (1499 << 16) | 99); wr(0x100E04, (1470 << 16) | 60);
+	wr(0x100800, (1500 << 16) | 50); wr(0x100E04, (1530 << 16) | 50); wr(0x100E04, (1530 << 16) | 80); wr(0x100E44, (1500 << 16) | 80);
+	check("lines");
+	// ---- a recolouring move from bit plane 2 (SRC BA J = 2)
+	wr(0x11801C, 0x23000300); wr(0x118018, 0xFF); wr(0x118010, 0x77); wr(0x118014, 0x11);
+	wr(0x118008, 0x28A22000); wr(0x118004, 0x2EA02000);
+	wr(0x100808, (96 << 16) | 100); wr(0x100804, (40 << 16) | 8); wr(0x100B00, (1600 << 16) | 120);
+	check("recolouring move from plane 2");
 
 	// ---- CPU reads: 4 pixels at an odd x in long mode, a bitmap read across 5 words
 	wr(0x118000, 0x13A02000);
@@ -448,8 +524,8 @@ int main(int argc, char** argv) {
 			}
 		}
 		wr(0x118000, 0x13602000);
-		auto pos = [&](int x, int y) {      // CURSOR_POS for (x, y) with CURSOR_CTRL = 0x80
-			int v = x + 384 - 23 + 8; return (uint32_t)((v >> 2) << 19 | (v & 3) << 16 | (1024 - y));
+		auto pos = [&](int x, int y) {      // CURSOR_POS for the sprite at (x, y >= 0), as X computes it (09 3.4)
+			int v = x + 384 - 16; return (uint32_t)((v >> 2) << 19 | (v & 3) << 16 | (1023 - y));
 		};
 		auto expect_cursor = [&](const char* what, int cx, int cy, bool on = true) {
 			int bad = 0;
@@ -458,7 +534,7 @@ int main(int argc, char** argv) {
 				uint8_t want = ref[i];
 				if (on && c >= 0 && c < 64 && r >= 0 && r < 64 && x < 1280 && y < 1024) {
 					bool im = img[r] >> (63 - c) & 1, mk = msk[r] >> (63 - c) & 1;
-					if (im) want = fgi; else if (mk) want = bgi;
+					if (mk) want = im ? fgi : bgi;
 				}
 				if (vram[i] != want) { if (bad < 6) printf("  %s: %d,%d is %02x, expected %02x\n", what, x, y, vram[i], want); bad++; }
 			}
@@ -485,6 +561,11 @@ int main(int argc, char** argv) {
 		gsc(true, 0xF8300100, pos(-20, 900));
 		for (int i = 0; i < 40000; i++) tick();
 		expect_cursor("cursor moved to -20,900", -20, 900);
+		// above the top edge: X writes y' = 0 and the cut-off rows in CURSOR_CTRL[5:0]
+		gsc(true, 0xF8300100, pos(300, 0)); gsc(true, 0xF8300104, 0x80 | 10);
+		for (int i = 0; i < 40000; i++) tick();
+		expect_cursor("cursor at 300,-10 (10 rows cut off)", 300, -10);
+		gsc(true, 0xF8300104, 0x80);
 		gsc(true, 0xF8300104, 0x00);
 		for (int i = 0; i < 40000; i++) tick();
 		expect_cursor("cursor off", 0, 0, false);
