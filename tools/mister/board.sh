@@ -64,8 +64,10 @@ load)
 console)
     secs="${1:-0}"
     t=""; [ "$secs" != 0 ] && t="timeout $secs"
+    # no tr in the pipe: into a pipe it block-buffers, so lines showed up only
+    # when the capture ended (2026-10-09); the loop strips the CR itself
     rsh "stty -F /dev/ttyS1 9600 cs8 -parenb -cstopb raw -echo -crtscts clocal; $t cat /dev/ttyS1" \
-        | tr -d '\r' | while IFS= read -r line; do printf '[%s] %s\n' "$(date +%H:%M:%S)" "$line"; done \
+        | while IFS= read -r line; do line=${line%$'\r'}; printf '[%s] %s\n' "$(date +%H:%M:%S)" "$line"; done \
         | tee -a "$LOG" || true
     ;;
 type)
