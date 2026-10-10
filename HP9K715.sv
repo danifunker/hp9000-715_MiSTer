@@ -273,7 +273,7 @@ hp715 #(.CLK_HZ(64_000_000), .HAS_ARTIST(1'b1)) hp715
 	.clk(clk_sys), .reset(m_reset), .pclk(clk_pix), .prst(prst_pix),
 	.cfg_model(cfg_model), .cfg_ram_lg(cfg_ram_lg), .sim_cr16_mul(4'd0),
 	.soft_pwr_n(softoff_cnt == 0), .toc_button(status[6]),
-	.led_latch(leds), .led_strobe(led_strobe), .lasi_pcr(pcr), .audio_l(audio_l), .audio_r(audio_r),
+	.led_latch(leds), .led_strobe(led_strobe), .lasi_pcr(pcr), .audio_l(audio_l), .audio_r(audio_r), .cd_change(img_mounted[3]),
 	.ram_req(ram_req), .ram_we(ram_we), .ram_line(ram_line), .ram_addr(ram_addr), .ram_be(ram_be),
 	.ram_wdata(ram_wdata), .ram_ack(ram_ack), .ram_wready(ram_wready), .ram_rvalid(ram_rvalid),
 	.ram_rbeat(ram_rbeat), .ram_rdata(ram_rdata),

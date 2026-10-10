@@ -1,6 +1,7 @@
 // A PS/2 keyboard or mouse as the LASI port sees it, byte by byte (STUBS
 // S-014): answers the host's commands the way the ROM, HP-UX and Linux
-// expect (R06b 1: FA acks, AB 83 / 00 identification, AA after reset,
+// expect -- a command first drops whatever is still queued, so its answer
+// is the next byte the host sees (R06b 1: FA acks, AB 83 / 00 identification, AA after reset,
 // resend on FE, the parameter byte of ED/F0/F3/F8-FD... commands, the set
 // number after F0 00) and, while
 // scanning is enabled, sends the keys and mouse movements from hps_io.
@@ -133,13 +134,26 @@ module ps2_dev #(
                 else mouse_t <= ps2_mouse[24];
             end
             room = 5'd16 - q_n;
-            if (en != 2'd0 && room >= 5'd3) begin
+            if (tx_valid) begin
+                // a command from the host: like a real keyboard or mouse,
+                // the device drops what it has not sent yet and answers at
+                // once (keys typed while HP-UX's X server set the keyboard
+                // up came before its acknowledgements, and X gave up)
                 q[q_wr] <= e0;
                 if (en >= 2'd2) q[q_wr + 4'd1] <= e1;
                 if (en == 2'd3) q[q_wr + 4'd2] <= e2;
+                q_rd <= q_wr;
                 q_wr <= q_wr + {2'd0, en};
+                q_n <= {3'd0, en};
+            end else begin
+                if (en != 2'd0 && room >= 5'd3) begin
+                    q[q_wr] <= e0;
+                    if (en >= 2'd2) q[q_wr + 4'd1] <= e1;
+                    if (en == 2'd3) q[q_wr + 4'd2] <= e2;
+                    q_wr <= q_wr + {2'd0, en};
+                end
+                q_n <= q_n + ((en != 2'd0 && room >= 5'd3) ? {3'd0, en} : 5'd0) - (pop ? 5'd1 : 5'd0);
             end
-            q_n <= q_n + ((en != 2'd0 && room >= 5'd3) ? {3'd0, en} : 5'd0) - (pop ? 5'd1 : 5'd0);
 
             // commands and their parameter bytes
             if (tx_valid) begin

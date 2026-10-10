@@ -22,7 +22,8 @@ module hp715 #(
     output logic [7:0]  led_latch,          // the eight status LEDs (active low)
     output logic        led_strobe,
     output logic [31:0] lasi_pcr,           // bit 0 FLASH_LED, bit 1 PWR_ON_L
-    output logic signed [15:0] audio_l, audio_r,   // Harmony's codec output
+    output logic signed [15:0] audio_l, audio_r,   // Harmony's codec output and the CD's audio, mixed
+    input  logic        cd_change,          // the CD-ROM's image was (re)mounted
     // system RAM
     output logic        ram_req, ram_we, ram_line,
     output logic [27:0] ram_addr,
@@ -208,7 +209,8 @@ module hp715 #(
     logic [31:0] scd_addr;
     logic [7:0]  scd_be;
     logic [63:0] scd_wdata;
-    // Harmony's registers (LASI page 4)
+    // Harmony's registers (LASI page 4); its output and the CD's audio
+    logic signed [15:0] h_l, h_r, c_l, c_r;
     logic        a_req, a_rst, a_irq;
     logic [31:0] a_rdata_h;
     logic        ad_req, ad_we, ad_ack;
@@ -297,7 +299,17 @@ module hp715 #(
         .irq(a_irq),
         .dma_req(ad_req), .dma_we(ad_we), .dma_addr(ad_addr), .dma_be(ad_be), .dma_wdata(ad_wdata),
         .dma_ack(ad_ack), .dma_err(dma_err), .dma_rdata(dma_rdata),
-        .out_l(audio_l), .out_r(audio_r), .out_new());
+        .out_l(h_l), .out_r(h_r), .out_new());
+
+    // the codec's output and the CD's audio (on a 715 the drive's audio goes
+    // to the codec's input; here it is added to the output), saturated
+    always_ff @(posedge clk) begin
+        logic signed [16:0] l, r;
+        l = {h_l[15], h_l} + {c_l[15], c_l};
+        r = {h_r[15], h_r} + {c_r[15], c_r};
+        audio_l <= l[16] != l[15] ? {l[16], {15{~l[16]}}} : l[15:0];
+        audio_r <= r[16] != r[15] ? {r[16], {15{~r[16]}}} : r[15:0];
+    end
 
     // ------------------------------------------------------------ LASI's DMA masters
     // one doubleword at a time on the MIOC's dma_* port: Harmony first (a
@@ -414,7 +426,7 @@ module hp715 #(
         .img_present(img_present), .img_blocks(img_blocks),
         .sd_lba(sd_lba), .sd_blk_cnt(sd_blk_cnt), .sd_rd(sd_rd), .sd_wr(sd_wr), .sd_ack(sd_ack),
         .sd_buff_addr(sd_buff_addr), .sd_buff_dout(sd_buff_dout), .sd_buff_din(sd_buff_din),
-        .sd_buff_wr(sd_buff_wr), .activity(scsi_activity));
+        .sd_buff_wr(sd_buff_wr), .cd_change(cd_change), .cd_l(c_l), .cd_r(c_r), .activity(scsi_activity));
 
     wax_stub u_wax (
         .clk(clk), .rst_n(rst_n), .req(gsc_req && gsc_dev == 2'd2), .we(gsc_we), .addr(gsc_addr),

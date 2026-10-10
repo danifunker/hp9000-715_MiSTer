@@ -36,7 +36,7 @@ V_OPT = --x-assign fast --x-initial fast --noassert --unroll-count 256
 # CPU_RTL is defined below with the CPU benches.
 MACHINE_RTL = $(RTL)/mioc_ecc.sv $(RTL)/mioc.sv $(RTL)/hp_xbus.sv $(RTL)/lasi/lasi_uart.sv \
 	$(RTL)/lasi/lasi_ps2.sv $(RTL)/lasi/ps2_dev.sv $(RTL)/lasi/harmony.sv $(RTL)/lasi/lasi.sv $(RTL)/wax_stub.sv \
-	$(RTL)/scsi/ncr53c710.sv $(RTL)/scsi/scsi_targets.sv $(RTL)/artist/artist.sv $(RTL)/artist/artist_video.sv \
+	$(RTL)/scsi/ncr53c710.sv $(RTL)/scsi/cd_audio.sv $(RTL)/scsi/scsi_targets.sv $(RTL)/artist/artist.sv $(RTL)/artist/artist_video.sv \
 	$(RTL)/rom_loader.sv $(RTL)/hp715.sv
 V_SRC = $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v
 
@@ -158,6 +158,24 @@ tb_harmony:
 	./obj_dir_tb/tb_harmony
 
 .PHONY: tb_harmony
+
+# the PS/2 keyboard model (rtl/lasi/ps2_dev.sv): command answers before
+# queued keys, identification, set 3, reset (tb/tb_ps2dev.cpp)
+tb_ps2dev:
+	$(TB_V) -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC --top-module ps2_dev -o tb_ps2dev \
+		$(RTL)/lasi/ps2_dev.sv tb/tb_ps2dev.cpp
+	./obj_dir_tb/tb_ps2dev
+
+.PHONY: tb_ps2dev
+
+# the CD-ROM's audio (rtl/scsi/scsi_targets.sv + cd_audio.sv) against a disc
+# served the way Main_MiSTer's support/hp9k does (tb/tb_cdaudio.cpp)
+tb_cdaudio:
+	$(TB_V) -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC --top-module scsi_targets -o tb_cdaudio \
+		$(RTL)/scsi/cd_audio.sv $(RTL)/scsi/scsi_targets.sv tb/tb_cdaudio.cpp
+	./obj_dir_tb/tb_cdaudio
+
+.PHONY: tb_cdaudio
 
 # ---------------------------------------------------------------------------
 # CPU test ROMs on the RTL core (verilator/cputest): `make cputest SUITE=alu1`
