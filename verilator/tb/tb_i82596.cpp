@@ -265,7 +265,7 @@ int main(int argc, char** argv) {
 	expect("RXR took all four", mbx[RXR], 4);
 	expect("RFD0 status", r16(0x4000), 0xA000);
 	expect("RFD0 RBD", rp(0x4008), 0x5000);
-	expect("RFD0 count", r16(0x400C), 0xC000);
+	expect("RFD0 count (the frame went on into RBDs: no EOF)", r16(0x400C), 0x4000);
 	expect("RBD0 count", r16(0x5000), 0xC000 | 104);
 	expect("frame 1", memcmp(&mem[0x10000], f1.data(), 104), 0);
 	expect("RFD1 (broadcast) status", r16(0x4020), 0xA000);
@@ -309,6 +309,32 @@ int main(int argc, char** argv) {
 	expect("TX frame 1", tx_slot(txw0) == t1, 1);
 	expect("TX frame 2", tx_slot(txw0 + 1) == t2, 1);
 	expect("SCB status CX CNA, CU idle", r16(SCB) & 0xFF00, 0xA000);
+
+	// RFDs with their own data area (64 bytes) and the RBD list in the first RFD only:
+	// a small frame fits the first RFD, the next (large) one must still find the RBDs
+	for (int i = 0; i < 4; i++) {
+		uint32_t r = 0x7000 + 0x60 * i;
+		memset(&mem[r], 0, 0x60);
+		w16(r + 2, i == 3 ? 0x8008 : 0x0008); wp(r + 4, 0x7000 + 0x60 * ((i + 1) % 4));
+		wp(r + 8, i == 0 ? 0x7400 : 0xFFFFFFFF); w16(r + 14, 64);
+	}
+	for (int i = 0; i < 4; i++) {
+		uint32_t b = 0x7400 + 32 * i;
+		w16(b, 0); wp(b + 4, 0x7400 + 32 * ((i + 1) % 4)); wp(b + 8, 0x30000 + 0x800 * i); w16(b + 12, 1536);
+	}
+	wp(SCB + 8, 0x7000);
+	scb_cmd(0x0010); scb_cmd(r16(SCB) & 0xF000);
+	std::vector<uint8_t> small = frame(MYMAC, 60, 11), big = frame(MYMAC, 300, 12);
+	post_rx(small); post_rx(big);
+	run(40000);
+	expect("RFD area: small frame", r16(0x7000), 0xA000);
+	expect("RFD area: small frame count (EOF, F, 60)", r16(0x700C), 0xC000 | 60);
+	expect("RFD area: large frame", r16(0x7060), 0xA000);
+	expect("RFD area: large frame's RBD", rp(0x7068), 0x7400);
+	expect("RFD area: 64 bytes in the RFD", r16(0x706C), 0x4000 | 64);
+	expect("RFD area: the rest in RBD 0", r16(0x7400), 0xC000 | (300 - 64));
+	expect("RFD area: frame", memcmp(&mem[0x7070], big.data(), 64) || memcmp(&mem[0x30000], big.data() + 64, 300 - 64), 0);
+	scb_cmd(0x0040); scb_cmd(r16(SCB) & 0xF000);
 
 	// source address insertion (configure byte 3 bit 3 = 0, HP-UX's lan2): the frame in memory is
 	// destination + type + data, on the wire destination + station address + type + data

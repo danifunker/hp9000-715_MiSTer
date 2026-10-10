@@ -22,7 +22,7 @@
 // (passed), each completed C|OK. The receive unit fills RFDs {+0 status, +2
 // command, +4 link, +8 RBD, +12 count, +14 size, +16 data}, in the flexible
 // mode continuing into RBDs {+0 count, +4 next, +8 buffer, +12 size}: the
-// RBD list starts at the first RFD's pointer when the RU starts, the RBD a
+// RBD list is read from the first RFD's pointer when the RU starts, the RBD a
 // frame used is written into its RFD and the next free one into the next RFD.
 //
 // The wire is Main_MiSTer's Ethernet bridge (support/hp9k with
@@ -76,7 +76,7 @@ module i82596 (
     typedef enum logic [6:0] {
         S_BOOT, S_IDLE, S_MEM0, S_MEM, S_NB, S_PORT,
         S_INIT1, S_INIT2, S_INIT3,
-        S_CA1, S_CA2, S_CA3, S_CA4, S_CA5, S_CA6, S_CA7, S_CARST, S_STAT, S_STAT2,
+        S_CA1, S_CA2, S_CA3, S_CA4, S_CA5, S_CA5B, S_CA6, S_CA7, S_CARST, S_STAT, S_STAT2,
         S_CB1, S_CB2, S_IA, S_CONF, S_CBF, S_CBF2,
         S_TX1, S_TX2, S_TX3, S_TX4, S_TX5, S_TX6, S_TXSEND,
         S_TXO1, S_TXO2, S_TXO3, S_TXO4, S_TXO5,
@@ -306,7 +306,11 @@ module i82596 (
                     3'd4: begin if (rus == RU_READY) ev[0] <= 1'b1; rus <= RU_IDLE; st <= S_CA6; end
                     default: st <= S_CA6;
                 endcase
-                S_CA5: begin rfd <= f32; rus <= RU_READY; rb_v <= 1'b0; st <= S_CA6; end
+                // RU start: the RFA, and at once the first RFD's RBD pointer -- the free list
+                // (HP-UX's lan2 fills it in the first RFD only, and its RFDs have their own data
+                // area, so the first frame that needs an RBD may land in a later RFD)
+                S_CA5: begin rfd <= f32; rd(f32, 5'd8, S_CA5B); end
+                S_CA5B: begin rb_cur <= f32; rb_v <= 1'b1; rus <= RU_READY; st <= S_CA6; end
                 S_CA6: wr16(scb, 5'd0, {ev, 1'b0, cus, rus, 4'd0}, S_CA7);
                 S_CA7: wr16(scb, 5'd2, 16'd0, S_STAT2);
 
@@ -473,7 +477,7 @@ module i82596 (
                 // the next RFD learns the next free RBD
                 S_RX9: if (rb_used) wr32(rfd, 5'd8, rb_first, S_RX10);
                        else st <= S_RX10;
-                S_RX10: wr16(rfd, 5'd12, {done, 1'b1, rx_cnt}, S_RX11);
+                S_RX10: wr16(rfd, 5'd12, {done && !rb_used, 1'b1, rx_cnt}, S_RX11);      // EOF: the frame ended here
                 S_RX11: wr16(rfd, 5'd0, done ? 16'hA000 : 16'h8000, S_RX12);
                 S_RX12: begin
                     ev[2] <= 1'b1;
