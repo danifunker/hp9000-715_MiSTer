@@ -11,7 +11,7 @@
 Environment: HPUX_HOST (default 192.168.99.215), HPUX_USER (root),
 HPUX_PASS (password, the board image's -- disks/README.md).
 """
-import ftplib, os, sys, time, warnings
+import ftplib, os, socket, sys, time, warnings
 
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 import telnetlib                                              # noqa: E402
@@ -24,6 +24,7 @@ MARK = '__HP715_%d__' % os.getpid()
 
 def login():
     t = telnetlib.Telnet(HOST, 23, 30)
+    t.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     t.read_until(b'login:', 30); t.write(USER.encode() + b'\r\n')
     t.read_until(b'assword:', 30); t.write(PASS.encode() + b'\r\n')
     # the login's TERM question, then a plain shell without echo
