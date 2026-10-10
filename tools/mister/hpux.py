@@ -5,6 +5,8 @@
                                        print its output and exit status
     hpux.py put LOCAL REMOTE           ftp a file in (binary)
     hpux.py get REMOTE LOCAL           ftp a file out
+    hpux.py type LOCAL REMOTE          send a text file through the telnet session,
+                                       a short line at a time (small frames only)
 
 Environment: HPUX_HOST (default 192.168.99.215), HPUX_USER (root),
 HPUX_PASS (password, the board image's -- disks/README.md).
@@ -20,7 +22,7 @@ PASS = os.environ.get('HPUX_PASS', 'password')
 MARK = '__HP715_%d__' % os.getpid()
 
 
-def run(cmds):
+def login():
     t = telnetlib.Telnet(HOST, 23, 30)
     t.read_until(b'login:', 30); t.write(USER.encode() + b'\r\n')
     t.read_until(b'assword:', 30); t.write(PASS.encode() + b'\r\n')
@@ -31,9 +33,27 @@ def run(cmds):
         t.read_until(b'# ', 30)
     t.write(b'exec /usr/bin/sh\r\n')
     time.sleep(1)
-    t.write(b'PS1=""; stty -echo\r\n')
+    t.write(b'PS1=""; PS2=""; stty -echo\r\n')
     time.sleep(1)
     t.read_very_eager()
+    return t
+
+
+def type_file(local, remote):
+    t = login()
+    t.write(("cat > %s <<'HP715EOF'\r\n" % remote).encode())
+    for line in open(local, encoding='latin-1'):
+        t.write(line.rstrip('\n').encode('latin-1') + b'\r\n')
+        time.sleep(0.05)
+    t.write(('HP715EOF\r\nwc -c %s; echo %s\r\n' % (remote, MARK)).encode())
+    print(t.read_until(MARK.encode(), 60).decode('latin-1').split(MARK)[0].strip())
+    t.write(b'exit\r\n')
+    t.close()
+    return 0
+
+
+def run(cmds):
+    t = login()
     rc = 0
     for c in cmds:
         t.write(('%s; echo %s $?\r\n' % (c, MARK)).encode())
@@ -65,6 +85,8 @@ def ftp(op, a, b):
 if __name__ == '__main__':
     if len(sys.argv) >= 3 and sys.argv[1] == 'run':
         sys.exit(run(sys.argv[2:]))
+    if len(sys.argv) == 4 and sys.argv[1] == 'type':
+        sys.exit(type_file(sys.argv[2], sys.argv[3]))
     if len(sys.argv) == 4 and sys.argv[1] in ('put', 'get'):
         sys.exit(ftp(sys.argv[1], sys.argv[2], sys.argv[3]))
     print(__doc__); sys.exit(2)
