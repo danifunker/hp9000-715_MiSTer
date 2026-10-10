@@ -2,7 +2,8 @@
  * (SIOC_IO on the CD's raw device). K&R C: the bundled cc compiles it.
  *   cc -o cdplay cdplay.c
  *   cdplay /dev/rdsk/c2t2d0 toc | status | play T1 [T2] | msf M:S:F M:S:F
- *                           | pause | resume | stop | volume N (0-255)
+ *                           | pause | resume | stop | volume N (0-255) | sense
+ * (sense: MODE SENSE page 0x0E, the ports' channels and volumes)
  */
 #include <stdio.h>
 #include <string.h>
@@ -53,7 +54,7 @@ int argc; char **argv;
 {
 	unsigned char c[12], b[64];
 	int m0, s0, f0, m1, s1, f1, t1, t2;
-	if (argc < 3) { printf("usage: cdplay dev toc|status|play T1 [T2]|msf M:S:F M:S:F|pause|resume|stop|volume N\n"); return 1; }
+	if (argc < 3) { printf("usage: cdplay dev toc|status|play T1 [T2]|msf M:S:F M:S:F|pause|resume|stop|volume N|sense\n"); return 1; }
 	if ((fd = open(argv[1], O_RDONLY)) < 0) { perror(argv[1]); return 1; }
 	memset((char *)c, 0, 12);
 	if (!strcmp(argv[2], "toc")) return toc(1) < 0;
@@ -86,6 +87,16 @@ int argc; char **argv;
 		b[4] = 0x0E; b[5] = 0x0E; b[6] = 4; b[12] = 1; b[13] = atoi(argv[3]); b[14] = 2; b[15] = b[13];
 		c[0] = 0x15; c[1] = 0x10; c[4] = 20;
 		return cmd(c, 6, b, 20, 0) < 0;
+	}
+	if (!strcmp(argv[2], "sense")) {
+		int i, n;
+		c[0] = 0x1A; c[2] = 0x0E; c[4] = 40;
+		if ((n = cmd(c, 6, b, 40, 1)) < 4) return 1;
+		for (i = 0; i < n; i++) printf("%02x%c", b[i], i + 1 == n ? '\n' : ' ');
+		i = 4 + b[3];
+		if (i + 16 <= n) printf("page %02x: port 0 ch %d vol %d, port 1 ch %d vol %d\n",
+		                       b[i] & 0x3F, b[i + 8], b[i + 9], b[i + 10], b[i + 11]);
+		return 0;
 	}
 	printf("unknown command %s\n", argv[2]);
 	return 1;
