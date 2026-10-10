@@ -73,6 +73,7 @@ localparam CONF_STR = {
 	"O[5:3],RAM (on reset),16MB,32MB,64MB,128MB;",
 	"O[9:8],SDRAM read capture,Edge 3,Edge 2.75,Edge 2.5,Edge 4;",
 	"O[11:10],Display,Auto,Graphics,Serial console;",
+	"O[14:12],Network,eth0,Off,eth1,macvlan,tap0;",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"O[125:123],Scale,V-Integer,Normal,Narrower HV-Integer,Wider HV-Integer,HV-Integer;",
 	"-;",
@@ -267,6 +268,9 @@ wire  [7:0] gfx_r, gfx_g, gfx_b;
 wire        gfx_hs, gfx_vs, gfx_de, gfx_underrun;
 wire  [8:0] gfx_pal_addr;
 wire [23:0] gfx_pal_rgb;
+wire        nb_req, nb_we, nb_ack;
+wire [12:0] nb_addr;
+wire [63:0] nb_wdata, nb_rdata;
 
 hp715 #(.CLK_HZ(64_000_000), .HAS_ARTIST(1'b1)) hp715
 (
@@ -274,6 +278,7 @@ hp715 #(.CLK_HZ(64_000_000), .HAS_ARTIST(1'b1)) hp715
 	.cfg_model(cfg_model), .cfg_ram_lg(cfg_ram_lg), .sim_cr16_mul(4'd0),
 	.soft_pwr_n(softoff_cnt == 0), .toc_button(status[6]),
 	.led_latch(leds), .led_strobe(led_strobe), .lasi_pcr(pcr), .audio_l(audio_l), .audio_r(audio_r), .cd_change(img_mounted[3]),
+	.nb_req(nb_req), .nb_we(nb_we), .nb_addr(nb_addr), .nb_wdata(nb_wdata), .nb_ack(nb_ack), .nb_rdata(nb_rdata),
 	.ram_req(ram_req), .ram_we(ram_we), .ram_line(ram_line), .ram_addr(ram_addr), .ram_be(ram_be),
 	.ram_wdata(ram_wdata), .ram_ack(ram_ack), .ram_wready(ram_wready), .ram_rvalid(ram_rvalid),
 	.ram_rbeat(ram_rbeat), .ram_rdata(ram_rdata),
@@ -384,6 +389,7 @@ ddr3_port ddr3
 	.chk_ack(chk_ack), .chk_rdata(chk_rdata),
 	.tr_req(tr_req), .tr_idx(tr_idx), .tr_data(tr_data), .tr_ack(tr_ack),
 	.lt_req(lt_req), .lt_addr(lt_addr), .lt_data(lt_data), .lt_ack(lt_ack),
+	.nb_req(nb_req), .nb_we(nb_we), .nb_addr(nb_addr), .nb_wdata(nb_wdata), .nb_ack(nb_ack), .nb_rdata(nb_rdata),
 	.vr_req(vr_req), .vr_we(vr_we), .vr_addr(vr_addr), .vr_len(vr_len), .vr_ack(vr_ack),
 	.vr_wvalid(vr_wvalid), .vr_wdata(vr_wdata), .vr_be(vr_be), .vr_wready(vr_wready),
 	.vr_rvalid(vr_rvalid), .vr_rdata(vr_rdata),

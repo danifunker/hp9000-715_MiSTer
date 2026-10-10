@@ -24,6 +24,13 @@ module hp715 #(
     output logic [31:0] lasi_pcr,           // bit 0 FLASH_LED, bit 1 PWR_ON_L
     output logic signed [15:0] audio_l, audio_r,   // Harmony's codec output and the CD's audio, mixed
     input  logic        cd_change,          // the CD-ROM's image was (re)mounted
+    // the LAN's wire: Main_MiSTer's Ethernet mailbox (rtl/lasi/i82596.sv),
+    // one 64-bit word at a time (offset in words), held until nb_ack
+    output logic        nb_req, nb_we,
+    output logic [12:0] nb_addr,
+    output logic [63:0] nb_wdata,
+    input  logic        nb_ack,
+    input  logic [63:0] nb_rdata,
     // system RAM
     output logic        ram_req, ram_we, ram_line,
     output logic [27:0] ram_addr,
@@ -204,7 +211,7 @@ module hp715 #(
     logic [63:0] dma_wdata, dma_rdata;
     logic [31:0] l_eir_addr;
     logic [4:0]  l_eir_data;
-    // LASI's DMA masters (the 53C710 scd_*, Harmony ad_*; the arbiter below)
+    // LASI's DMA masters (the 53C710 scd_*, Harmony ad_*, the 82596 ld_*; the arbiter below)
     logic        scd_req, scd_we, scd_ack;
     logic [31:0] scd_addr;
     logic [7:0]  scd_be;
@@ -217,6 +224,13 @@ module hp715 #(
     logic [31:0] ad_addr;
     logic [7:0]  ad_be;
     logic [63:0] ad_wdata;
+    // the 82596's registers (LASI page 7) and DMA
+    logic        n_req, n_rst, n_irq;
+    logic [31:0] n_rdata;
+    logic        ld_req, ld_we, ld_ack;
+    logic [31:0] ld_addr;
+    logic [7:0]  ld_be;
+    logic [63:0] ld_wdata;
 
     mioc #(.HAS_ARTIST(HAS_ARTIST)) u_mioc (
         .clk(clk), .rst_n(rst_n), .cfg_ram_lg(cfg_ram_lg),
@@ -268,6 +282,7 @@ module hp715 #(
         .scsi_req(s_req), .scsi_we(s_we), .scsi_addr(s_addr), .scsi_be(s_be), .scsi_wdata(s_wdata),
         .scsi_rdata(s_rdata), .scsi_rst(s_rst), .scsi_irq(s_irq),
         .aud_req(a_req), .aud_rst(a_rst), .aud_rdata(a_rdata_h), .aud_irq(a_irq),
+        .lan_req(n_req), .lan_rst(n_rst), .lan_rdata(n_rdata), .lan_irq(n_irq),
         .pcr(lasi_pcr), .artist_rst(artist_rst), .dbg_ps2_valid(l_ps2_v), .dbg_ps2(l_ps2));
     logic        l_ps2_v;
     logic [9:0]  l_ps2;
@@ -301,6 +316,15 @@ module hp715 #(
         .dma_ack(ad_ack), .dma_err(dma_err), .dma_rdata(dma_rdata),
         .out_l(h_l), .out_r(h_r), .out_new());
 
+    // ------------------------------------------------------------ LAN
+    i82596 u_lan (
+        .clk(clk), .rst(!rst_n), .rst_lan(n_rst),
+        .req(n_req), .we(gsc_we), .addr(gsc_addr[11:0]), .wdata(gsc_wdata), .rdata(n_rdata), .irq(n_irq),
+        .dma_req(ld_req), .dma_we(ld_we), .dma_addr(ld_addr), .dma_be(ld_be), .dma_wdata(ld_wdata),
+        .dma_ack(ld_ack), .dma_rdata(dma_rdata),
+        .nb_req(nb_req), .nb_we(nb_we), .nb_addr(nb_addr), .nb_wdata(nb_wdata), .nb_ack(nb_ack),
+        .nb_rdata(nb_rdata));
+
     // the codec's output and the CD's audio (on a 715 the drive's audio goes
     // to the codec's input; here it is added to the output), saturated
     always_ff @(posedge clk) begin
@@ -313,22 +337,26 @@ module hp715 #(
 
     // ------------------------------------------------------------ LASI's DMA masters
     // one doubleword at a time on the MIOC's dma_* port: Harmony first (a
-    // request every few sample periods), then the 53C710
-    logic        dg_busy, dg_aud;
+    // request every few sample periods), then the 53C710, then the 82596
+    // (its frames wait in its own buffer)
+    logic        dg_busy;
+    logic [1:0]  dg_who;                        // 0 Harmony, 1 53C710, 2 82596
     always_ff @(posedge clk) begin
         if (!rst_n) dg_busy <= 1'b0;
         else if (!dg_busy) begin
-            if (ad_req)      begin dg_busy <= 1'b1; dg_aud <= 1'b1; end
-            else if (scd_req) begin dg_busy <= 1'b1; dg_aud <= 1'b0; end
+            if (ad_req)       begin dg_busy <= 1'b1; dg_who <= 2'd0; end
+            else if (scd_req) begin dg_busy <= 1'b1; dg_who <= 2'd1; end
+            else if (ld_req)  begin dg_busy <= 1'b1; dg_who <= 2'd2; end
         end else if (dma_ack) dg_busy <= 1'b0;
     end
-    assign dma_req   = dg_busy && (dg_aud ? ad_req : scd_req);
-    assign dma_we    = dg_aud ? ad_we : scd_we;
-    assign dma_addr  = dg_aud ? ad_addr : scd_addr;
-    assign dma_be    = dg_aud ? ad_be : scd_be;
-    assign dma_wdata = dg_aud ? ad_wdata : scd_wdata;
-    assign ad_ack    = dg_busy && dg_aud && dma_ack;
-    assign scd_ack   = dg_busy && !dg_aud && dma_ack;
+    always_comb case (dg_who)
+        2'd0:    begin dma_req = dg_busy && ad_req;  dma_we = ad_we;  dma_addr = ad_addr;  dma_be = ad_be;  dma_wdata = ad_wdata;  end
+        2'd1:    begin dma_req = dg_busy && scd_req; dma_we = scd_we; dma_addr = scd_addr; dma_be = scd_be; dma_wdata = scd_wdata; end
+        default: begin dma_req = dg_busy && ld_req;  dma_we = ld_we;  dma_addr = ld_addr;  dma_be = ld_be;  dma_wdata = ld_wdata;  end
+    endcase
+    assign ad_ack    = dg_busy && dg_who == 2'd0 && dma_ack;
+    assign scd_ack   = dg_busy && dg_who == 2'd1 && dma_ack;
+    assign ld_ack    = dg_busy && dg_who == 2'd2 && dma_ack;
 
     // ---------------------------------------------------- debug events
     // types: 1 SCSI bus byte (aux = phase), 2 SCRIPTS instruction (addr =

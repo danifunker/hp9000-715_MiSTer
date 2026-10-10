@@ -163,6 +163,21 @@ logic [6:0]  vr_len;
 logic [63:0] vr_wdata, vr_rdata;
 logic [7:0]  vr_be;
 
+// the LAN's mailbox (Main_MiSTer's Ethernet bridge on the board): a plain
+// memory here, nothing on the other side
+logic        nb_req, nb_we, nb_ack;
+logic [12:0] nb_addr;
+logic [63:0] nb_wdata, nb_rdata;
+logic [63:0] nb_mem [8192];
+always_ff @(posedge clk_sys) begin
+	nb_ack <= 1'b0;
+	if (nb_req && !nb_ack) begin
+		if (nb_we) nb_mem[nb_addr] <= nb_wdata;
+		nb_rdata <= nb_mem[nb_addr];
+		nb_ack <= 1'b1;
+	end
+end
+
 // the simulator never looks at Artist's video outputs (romsim's --fbshot reads
 // the VRAM), so its pixel clock is the machine's
 hp715 #(.CLK_HZ(64_000_000), .SIM_FAST(1'b1), .HAS_ARTIST(1'b1)) u_hp715 (
@@ -170,6 +185,7 @@ hp715 #(.CLK_HZ(64_000_000), .SIM_FAST(1'b1), .HAS_ARTIST(1'b1)) u_hp715 (
 	.cfg_model(sim_status[1:0]), .cfg_ram_lg(ram_lg), .sim_cr16_mul(sim_status[9:6]),
 	.soft_pwr_n(!soft_power_off), .toc_button(toc_button),
 	.led_latch(leds), .led_strobe(led_strobe), .lasi_pcr(pcr), .audio_l(), .audio_r(), .cd_change(1'b0),
+	.nb_req(nb_req), .nb_we(nb_we), .nb_addr(nb_addr), .nb_wdata(nb_wdata), .nb_ack(nb_ack), .nb_rdata(nb_rdata),
 	.ram_req(ram_req), .ram_we(ram_we), .ram_line(ram_line), .ram_addr(ram_addr), .ram_be(ram_be),
 	.ram_wdata(ram_wdata), .ram_ack(ram_ack), .ram_wready(ram_wready), .ram_rvalid(ram_rvalid),
 	.ram_rbeat(ram_rbeat), .ram_rdata(ram_rdata),

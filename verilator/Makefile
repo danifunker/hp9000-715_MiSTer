@@ -35,7 +35,7 @@ V_OPT = --x-assign fast --x-initial fast --noassert --unroll-count 256
 # Core RTL under simulation: the machine (rtl/hp715.sv) inside sim.v.
 # CPU_RTL is defined below with the CPU benches.
 MACHINE_RTL = $(RTL)/mioc_ecc.sv $(RTL)/mioc.sv $(RTL)/hp_xbus.sv $(RTL)/lasi/lasi_uart.sv \
-	$(RTL)/lasi/lasi_ps2.sv $(RTL)/lasi/ps2_dev.sv $(RTL)/lasi/harmony.sv $(RTL)/lasi/lasi.sv $(RTL)/wax_stub.sv \
+	$(RTL)/lasi/lasi_ps2.sv $(RTL)/lasi/ps2_dev.sv $(RTL)/lasi/harmony.sv $(RTL)/lasi/i82596.sv $(RTL)/lasi/lasi.sv $(RTL)/wax_stub.sv \
 	$(RTL)/scsi/ncr53c710.sv $(RTL)/scsi/cd_audio.sv $(RTL)/scsi/scsi_targets.sv $(RTL)/artist/artist.sv $(RTL)/artist/artist_video.sv \
 	$(RTL)/rom_loader.sv $(RTL)/hp715.sv
 V_SRC = $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v
@@ -176,6 +176,15 @@ tb_cdaudio:
 	./obj_dir_tb/tb_cdaudio
 
 .PHONY: tb_cdaudio
+
+# the 82596 LAN: start-up, self-test, init, loopback, the bridge's RX/TX slots
+# through a Linux-style RFD/RBD ring and TBD chains (tb/tb_i82596.cpp)
+tb_i82596:
+	$(TB_V) -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC --top-module i82596 -o tb_i82596 \
+		$(RTL)/lasi/i82596.sv tb/tb_i82596.cpp
+	./obj_dir_tb/tb_i82596
+
+.PHONY: tb_i82596
 
 # ---------------------------------------------------------------------------
 # CPU test ROMs on the RTL core (verilator/cputest): `make cputest SUITE=alu1`

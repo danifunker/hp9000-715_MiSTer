@@ -4,7 +4,7 @@
 // 32-bit word per RAM line) and Artist's VRAM. Clocked by the machine's
 // clock (DDRAM_CLK = clk); one transaction at a time; the loader first, then
 // the check store, ROM reads, the display's line fetch, VRAM bursts, the LUT
-// copy, the debug ring. The RAM above 128 MB is to come.
+// copy, the LAN's mailbox, the debug ring. The RAM above 128 MB is to come.
 //
 // Map inside the core's window (DDR3 bytes 0x3000_0000-0x3FFF_FFFF; the
 // bridge counts 64-bit words):
@@ -22,6 +22,9 @@
 //   0x3340_0000  Artist's attribute plane, 256 KB: one bit a pixel (LUT0 /
 //                LUT1), pixel (x, y) in bit x % 64 of doubleword y * 32 + x / 64
 //                (vr_addr / rf_addr bit 18 = 1)
+// and outside it, at 0x1FF0_0000 (64 KB), the Ethernet mailbox Main_MiSTer
+// shares with the cores that bridge a LAN (support/sun/sun_enet.cpp; the
+// 82596's nb_* port, rtl/lasi/i82596.sv)
 //
 // VRAM bursts (rtl/artist/artist.sv vr_*): a read is acknowledged when the
 // bridge takes the command, its beats follow as vr_rvalid; a write's beat 0
@@ -60,6 +63,13 @@ module ddr3_port (
     input  logic [8:0]  lt_addr,
     input  logic [63:0] lt_data,
     output logic        lt_ack,
+    // the LAN's mailbox: one word at 0x1FF0_0000 + 8 * nb_addr, held until nb_ack
+    input  logic        nb_req,
+    input  logic        nb_we,
+    input  logic [12:0] nb_addr,
+    input  logic [63:0] nb_wdata,
+    output logic        nb_ack,
+    output logic [63:0] nb_rdata,
     // Artist's VRAM (word {y, x[10:3]}; bit 18: the attribute plane, word
     // {y, x[10:6]}), bursts of 1..64
     input  logic        vr_req,
@@ -97,6 +107,7 @@ module ddr3_port (
     localparam logic [28:0] VRM_BASE = 29'h0660_0000;     // 0x3300_0000 / 8
     localparam logic [28:0] LUT_BASE = 29'h0664_0000;     // 0x3320_0000 / 8
     localparam logic [28:0] ATR_BASE = 29'h0668_0000;     // 0x3340_0000 / 8
+    localparam logic [28:0] NB_BASE  = 29'h03FE_0000;     // 0x1FF0_0000 / 8
 
     // a VRAM-port word address -> DDR3
     function automatic logic [28:0] vaddr(input logic [18:0] a);
@@ -111,7 +122,7 @@ module ddr3_port (
 
     typedef enum logic [2:0] { S_IDLE, S_CMD, S_RDATA, S_DONE, S_TWR, S_VWR } st_e;
     st_e st;
-    logic [2:0] who;            // 0 loader, 1 check store, 2 ROM, 3 VRAM, 4 LUT copy, 5 display fetch
+    logic [2:0] who;            // 0 loader, 1 check store, 2 ROM, 3 VRAM, 4 LUT copy, 5 display fetch, 6 mailbox
     logic [1:0] beat;
     logic       odd;
     logic [6:0] vleft;          // VRAM beats still to come
@@ -125,7 +136,7 @@ module ddr3_port (
 
     always_ff @(posedge clk) begin
         rom_ack <= 1'b0; rom_rvalid <= 1'b0; chk_ack <= 1'b0; tr_ack <= 1'b0;
-        vr_rack <= 1'b0; vr_rvalid <= 1'b0; lt_ack <= 1'b0; rf_ack <= 1'b0; rf_rvalid <= 1'b0;
+        vr_rack <= 1'b0; vr_rvalid <= 1'b0; lt_ack <= 1'b0; rf_ack <= 1'b0; rf_rvalid <= 1'b0; nb_ack <= 1'b0;
         if (ld_wr) begin ld_pend <= 1'b1; ld_a <= ld_addr; ld_d <= ld_data; end
         if (rst) begin
             st <= S_IDLE; DDRAM_RD <= 1'b0; DDRAM_WE <= 1'b0; ld_pend <= 1'b0;
@@ -161,6 +172,11 @@ module ddr3_port (
                 end else if (lt_req && !lt_ack) begin
                     who <= 3'd4; st <= S_CMD;
                     DDRAM_WE <= 1'b1; DDRAM_ADDR <= LUT_BASE + {20'd0, lt_addr}; DDRAM_DIN <= lt_data;
+                end else if (nb_req && !nb_ack) begin
+                    who <= 3'd6; st <= S_CMD;
+                    DDRAM_ADDR <= NB_BASE + {16'd0, nb_addr};
+                    if (nb_we) begin DDRAM_WE <= 1'b1; DDRAM_DIN <= nb_wdata; end
+                    else DDRAM_RD <= 1'b1;
                 end else if (tr_req && !tr_ack) begin
                     // a 4-beat burst: address and count with the first beat
                     st <= S_TWR; beat <= 2'd0;
@@ -174,6 +190,7 @@ module ddr3_port (
                 if (DDRAM_WE) begin
                     if (who == 3'd0) ld_pend <= ld_wr;      // a new one may have arrived
                     else if (who == 3'd4) lt_ack <= 1'b1;
+                    else if (who == 3'd6) nb_ack <= 1'b1;
                     else chk_ack <= 1'b1;
                     st <= S_DONE;
                 end else begin
@@ -193,6 +210,9 @@ module ddr3_port (
                     rom_rvalid <= 1'b1; rom_rdata <= DDRAM_DOUT;
                     beat <= beat + 2'd1;
                     if (beat == 2'd3) st <= S_IDLE;
+                end else if (who == 3'd6) begin
+                    nb_ack <= 1'b1; nb_rdata <= DDRAM_DOUT;
+                    st <= S_DONE;
                 end else begin
                     chk_ack <= 1'b1; chk_rdata <= odd ? DDRAM_DOUT[31:0] : DDRAM_DOUT[63:32];
                     st <= S_DONE;

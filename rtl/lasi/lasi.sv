@@ -3,11 +3,11 @@
 // at a time, answered the cycle after the request; and a GSC master for its
 // interrupt transaction (IAR[4:0] written to IAR[31:5]).
 //
-// Pages (4 KB, offset bits 15:12): 0 interrupt registers, 4 Harmony audio
-// and 6 SCSI (rtl/lasi/harmony.sv and the 53C710, outside this module on
-// the aud_* and scsi_* ports), 5 RS-232, 8 PS/2, 9 RTC, B clock registers,
-// C PCR/ERRLOG/VER/IORESET/AMR. The units not built yet -- parallel and its
-// DMA (1-3, P-010), LAN (7, P-005), floppy (A, D, P-004) -- read 0 and
+// Pages (4 KB, offset bits 15:12): 0 interrupt registers, 4 Harmony audio,
+// 6 SCSI and 7 LAN (rtl/lasi/harmony.sv, the 53C710 and rtl/lasi/i82596.sv,
+// outside this module on the aud_*, scsi_* and lan_* ports), 5 RS-232, 8
+// PS/2, 9 RTC, B clock registers, C PCR/ERRLOG/VER/IORESET/AMR. The units
+// not built yet -- parallel and its DMA (1-3, P-010), floppy (A, D, P-004) -- read 0 and
 // ignore writes (STUBS S-015); so does everything above page D (LASI
 // answers its whole space, Lasi ERS app. A).
 module lasi #(
@@ -64,6 +64,11 @@ module lasi #(
     output logic        aud_rst,           // machine reset or IORESET bit 3 (RST_AUD_L) clear
     input  logic [31:0] aud_rdata,
     input  logic        aud_irq,
+    // the 82596 (page 7, rtl/lasi/i82596.sv), the same way
+    output logic        lan_req,
+    output logic        lan_rst,           // IORESET bit 1 (RST_LAN_L) clear
+    input  logic [31:0] lan_rdata,
+    input  logic        lan_irq,
     // misc outputs
     output logic [31:0] pcr,
     output logic        artist_rst,       // IORESET bit 8 (RST_ARTIST_L) clear
@@ -161,12 +166,17 @@ module lasi #(
     assign scsi_be = be;
     assign scsi_wdata = wdata;
     assign scsi_rst = !rst_n || !ioreset[0] || (req && we && s_page && addr[11:2] == 10'd0);
-    logic s_pend, a_pend;
+    logic s_pend, a_pend, l_pend;
 
     // -------------------------------------------------------- Harmony
     wire a_page = in_lasi && page == 4'h4;
     assign aud_req = req && a_page;
     assign aud_rst = !rst_n || !ioreset[3];
+
+    // -------------------------------------------------------- the 82596
+    wire l_page = in_lasi && page == 4'h7;
+    assign lan_req = req && l_page;
+    assign lan_rst = !ioreset[1];
 
     // -------------------------------------------- interrupt sources (GSC bits)
     logic [31:0] src, src_q;
@@ -174,6 +184,7 @@ module lasi #(
     always_comb begin
         src = 32'd0;
         src[5]  = u_irq;
+        src[8]  = lan_irq;
         src[9]  = scsi_irq;
         src[13] = aud_irq;
         src[21] = ext_int && !toc_remap;
@@ -187,8 +198,10 @@ module lasi #(
         irr_clr <= 1'b0;
         s_pend <= 1'b0;
         a_pend <= 1'b0;
+        l_pend <= 1'b0;
         if (s_pend) begin ack <= 1'b1; rdata <= scsi_rdata; end
         if (a_pend) begin ack <= 1'b1; rdata <= aud_rdata; end
+        if (l_pend) begin ack <= 1'b1; rdata <= lan_rdata; end
 
         if (!rst_n) begin
             ioreset <= 9'd0; amr <= 32'd0; errlog <= 32'd0; pcr <= 32'd1;
@@ -231,7 +244,8 @@ module lasi #(
 
         if (rst_n && req && s_page) s_pend <= 1'b1;
         if (rst_n && req && a_page) a_pend <= 1'b1;
-        if (rst_n && req && !s_page && !a_page) begin
+        if (rst_n && req && l_page) l_pend <= 1'b1;
+        if (rst_n && req && !s_page && !a_page && !l_page) begin
             logic [31:0] r;
             r = 32'd0;
             if (in_lasi) case (page)
