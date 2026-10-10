@@ -226,15 +226,17 @@ module i82596 (
                 S_NB: if (!nb_req) nb_req <= 1'b1;
                 else if (nb_ack) begin nb_req <= 1'b0; n_rd <= nb_rdata; st <= nret; end
 
-                // ---- the mailbox at start-up: the magic off, Main's ring positions taken over, the magic last
+                // ---- the mailbox at start-up: the magic off, all four ring pointers zero (Main's
+                // sun_enet expects that of a new generation), the magic last
                 S_BOOT: begin
                     bk <= bk + 3'd1;
+                    txw <= 32'd0; rxr <= 32'd0;
                     case (bk)
                         3'd0: nb(NB_MAGIC, 1'b1, 64'd0, S_BOOT);
-                        3'd1: nb(NB_TXR, 1'b0, 64'd0, S_BOOT);
-                        3'd2: begin txw <= n_rd[31:0]; nb(NB_TXW, 1'b1, {32'd0, n_rd[31:0]}, S_BOOT); end
-                        3'd3: nb(NB_RXW, 1'b0, 64'd0, S_BOOT);
-                        3'd4: begin rxr <= n_rd[31:0]; nb(NB_RXR, 1'b1, {32'd0, n_rd[31:0]}, S_BOOT); end
+                        3'd1: nb(NB_TXW, 1'b1, 64'd0, S_BOOT);
+                        3'd2: nb(NB_TXR, 1'b1, 64'd0, S_BOOT);
+                        3'd3: nb(NB_RXW, 1'b1, 64'd0, S_BOOT);
+                        3'd4: nb(NB_RXR, 1'b1, 64'd0, S_BOOT);
                         3'd5: nb(NB_MAC, 1'b1, 64'd0, S_BOOT);
                         3'd6: nb(NB_GEN, 1'b1, {32'd0, tick}, S_BOOT);
                         default: nb(NB_MAGIC, 1'b1, MAGIC, S_IDLE);

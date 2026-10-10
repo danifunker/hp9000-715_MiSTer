@@ -123,11 +123,10 @@ int main(int argc, char** argv) {
 	Verilated::commandArgs(argc, argv);
 	t = new Vi82596;
 	t->rst = 1; t->rst_lan = 0; run(5); t->rst = 0;
-	mbx[TXR] = 41; mbx[RXW] = 17; mbx[RXR] = 3;                    // Main's leftovers
+	mbx[TXW] = 5; mbx[TXR] = 41; mbx[RXW] = 0x1502140d41403094ull; mbx[RXR] = 3;   // stale memory
 	run(1000);
 	expect("mailbox magic", mbx[MAGIC] >> 32, 0x48504554);
-	expect("TXW := Main's TXR", mbx[TXW], 41);
-	expect("RXR := Main's RXW", mbx[RXR], 17);
+	expect("ring pointers zeroed", (mbx[TXW] | mbx[TXR] | mbx[RXW] | mbx[RXR]) != 0, 0);
 
 	// self-test, then the ROM's alternative SCP (0x17A2 = 0x17A0 | 2)
 	memset(&mem[0x1000], 0xFF, 8);
@@ -263,7 +262,7 @@ int main(int argc, char** argv) {
 	std::vector<uint8_t> f1 = frame(MYMAC, 104, 2), f2 = frame(BC, 64, 3), f3 = frame(OTHER, 64, 4), f4 = frame(MYMAC, 1204, 5);
 	post_rx(f1); post_rx(f2); post_rx(f3); post_rx(f4);
 	run(60000);
-	expect("RXR took all four", mbx[RXR], 21);
+	expect("RXR took all four", mbx[RXR], 4);
 	expect("RFD0 status", r16(0x4000), 0xA000);
 	expect("RFD0 RBD", rp(0x4008), 0x5000);
 	expect("RFD0 count", r16(0x400C), 0xC000);
