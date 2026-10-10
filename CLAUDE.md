@@ -40,8 +40,11 @@ raster at 64 MHz with LUT0/LUT1 by a 1-bit attribute plane and the cursor
 laid over, no more cursor in the VRAM); MiSTer.ini has `[HP9K715]`
 video_mode=8, vscale_mode=1. The real HDMI output can be seen through the
 user's OBS (`tools/mister/obs_shot.py`). **Build 25 is the released alpha** (graphics
-console by default; core-side integer scaling, OSD "Scale"). Next:
-`RESUME-20261009-artist-raster.md`.
+console by default; core-side integer scaling, OSD "Scale"). **2026-10-10:**
+Artist at the programmed timing (own pixel clock), Harmony audio, CD audio and
+the **82596 LAN** (HP-UX's lan2 on the user's network, build 35); Main_MiSTer
+branch `hp9k715-enhancements` (`support/hp9k`). Next: system stream
+`RESUME-20261010-features.md`, CPU stream `RESUME-20261010-cpu.md`.
 
 ## The user's process
 
@@ -82,7 +85,9 @@ console by default; core-side integer scaling, OSD "Scale"). Next:
 | `RESUME-20261009-hpux-login.md` | superseded: the two user-mode FP bugs (trap 22 ISR/IOR, fr0 = +0) found and fixed, build 14 reaches `Console Login:` |
 | `RESUME-20261009-artist.md` | superseded: root login, the stale-text SIGILL fix (build 15); the Artist plan |
 | `RESUME-20261009-x11.md` | superseded: Artist built (builds 16-17), the PDC console and HP-UX's X login on it |
-| `RESUME-20261009-artist-raster.md` | **current**: build 23 released (Artist's own picture, LUT1/attribute plane, vectors, OBS tool), the window-move stubs to chase, what is left |
+| `RESUME-20261010-features.md` | **current, system stream**: VGA timing, Harmony, CD audio, the 82596 LAN, Main's `support/hp9k`; what is left |
+| `RESUME-20261010-cpu.md` | **current, CPU stream**: cpu-requests #9 (BV reserved bits, blocks HP-UX 11i media), the area limit, dual issue later |
+| `RESUME-20261009-artist-raster.md` | superseded: build 23 released (Artist's own picture, LUT1/attribute plane, vectors, OBS tool), the window-move stubs to chase, what is left |
 | `RESUME-20261009-artist-x.md` | superseded: CDE on the board (build 18), review 09's X fixes + the timing split in build 20 (to check), the board tools (key/mouse/vram), what is still missing (HDMI check, LUT1/attribute planes, parametric/dashed lines, release) |
 | `docs/design/cpu-requests.md` | system -> CPU requests between those streams |
 | `docs/reference/rom/` | the ROM analysis: README (index + headline FPGA demands), BOOTFLOW, HARDWARE (incl. the reconstructed MIOC), FIRMWARE |
