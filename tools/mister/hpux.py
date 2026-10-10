@@ -57,7 +57,7 @@ def run(cmds):
     t = login()
     rc = 0
     for c in cmds:
-        t.write(('%s; echo %s $?\r\n' % (c, MARK)).encode())
+        t.write(('%s\r\necho %s $?\r\n' % (c, MARK)).encode())     # its own line: 'cmd &' works
         out = t.read_until(MARK.encode(), 600).decode('latin-1')
         tail = t.read_until(b'\n', 10).decode('latin-1').strip()
         body = out[:out.rfind(MARK)]
