@@ -44,9 +44,11 @@ assign HDMI_FREEZE = 0;
 assign HDMI_BLACKOUT = 0;
 assign HDMI_BOB_DEINT = 0;
 
-assign AUDIO_S = 0;
-assign AUDIO_L = 0;
-assign AUDIO_R = 0;
+// Harmony's codec output (rtl/lasi/harmony.sv), signed 16-bit, held between samples
+wire [15:0] audio_l, audio_r;
+assign AUDIO_S = 1;
+assign AUDIO_L = audio_l;
+assign AUDIO_R = audio_r;
 assign AUDIO_MIX = 0;
 
 assign BUTTONS = 0;
@@ -162,6 +164,11 @@ pll pll
 	.locked(pll_locked)
 );
 
+// Artist's pixel clock: its own PLL, reconfigured to the programmed mode's
+// frequency (VIDEO below; rtl/pll_video.v)
+wire clk_pix, pix_locked;
+reg  prst_s1 = 1'b1, prst_pix = 1'b1;   // its side held while it is retargeted
+
 altddio_out #(
 	.extend_oe_disable("OFF"), .intended_device_family("Cyclone V"), .invert_output("OFF"),
 	.lpm_hint("UNUSED"), .lpm_type("altddio_out"), .oe_reg("UNREGISTERED"), .power_up_high("OFF"), .width(1)
@@ -255,6 +262,7 @@ wire  [6:0] rf_len;
 wire [63:0] rf_rdata;
 wire        gfx_on, gfx_pal_wr;
 wire [11:0] gfx_width, gfx_height;
+wire  [2:0] gfx_pix_mode;
 wire  [7:0] gfx_r, gfx_g, gfx_b;
 wire        gfx_hs, gfx_vs, gfx_de, gfx_underrun;
 wire  [8:0] gfx_pal_addr;
@@ -262,10 +270,10 @@ wire [23:0] gfx_pal_rgb;
 
 hp715 #(.CLK_HZ(64_000_000), .HAS_ARTIST(1'b1)) hp715
 (
-	.clk(clk_sys), .reset(m_reset),
+	.clk(clk_sys), .reset(m_reset), .pclk(clk_pix), .prst(prst_pix),
 	.cfg_model(cfg_model), .cfg_ram_lg(cfg_ram_lg), .sim_cr16_mul(4'd0),
 	.soft_pwr_n(softoff_cnt == 0), .toc_button(status[6]),
-	.led_latch(leds), .led_strobe(led_strobe), .lasi_pcr(pcr),
+	.led_latch(leds), .led_strobe(led_strobe), .lasi_pcr(pcr), .audio_l(audio_l), .audio_r(audio_r),
 	.ram_req(ram_req), .ram_we(ram_we), .ram_line(ram_line), .ram_addr(ram_addr), .ram_be(ram_be),
 	.ram_wdata(ram_wdata), .ram_ack(ram_ack), .ram_wready(ram_wready), .ram_rvalid(ram_rvalid),
 	.ram_rbeat(ram_rbeat), .ram_rdata(ram_rdata),
@@ -286,7 +294,7 @@ hp715 #(.CLK_HZ(64_000_000), .HAS_ARTIST(1'b1)) hp715
 	.vr_wvalid(vr_wvalid), .vr_wdata(vr_wdata), .vr_be(vr_be), .vr_wready(vr_wready),
 	.vr_rvalid(vr_rvalid), .vr_rdata(vr_rdata),
 	.rf_req(rf_req), .rf_addr(rf_addr), .rf_len(rf_len), .rf_ack(rf_ack), .rf_rvalid(rf_rvalid), .rf_rdata(rf_rdata),
-	.gfx_on(gfx_on), .gfx_width(gfx_width), .gfx_height(gfx_height),
+	.gfx_on(gfx_on), .gfx_width(gfx_width), .gfx_height(gfx_height), .gfx_pix_mode(gfx_pix_mode),
 	.gfx_r(gfx_r), .gfx_g(gfx_g), .gfx_b(gfx_b), .gfx_hs(gfx_hs), .gfx_vs(gfx_vs), .gfx_de(gfx_de),
 	.gfx_underrun(gfx_underrun),
 	.gfx_pal_wr(gfx_pal_wr), .gfx_pal_addr(gfx_pal_addr), .gfx_pal_rgb(gfx_pal_rgb),
@@ -420,22 +428,146 @@ eeprom_save #(.CLK_HZ(64_000_000)) eeprom_save
 
 ///////////////////////   VIDEO   ////////////////////////////////
 
-// Artist makes its own picture (rtl/artist/artist_video.sv): the active size
-// from its timing registers, one pixel a clock, through LUT0/LUT1 by the
-// attribute plane, the hardware cursor laid over it. OSD "Display": Auto =
-// Artist while its video is on, else the serial console; Graphics = always
-// Artist; Serial console = never. Auto keeps Artist once its video has been
-// on since the machine's reset: a blanked screen (X's screen saver clears
-// MISC_VIDEO bits 27/25) stays black, as on a 715, instead of turning into
-// the console view. Both outputs (scaler and analog) carry it (STUBS
-// S-024). The scaler's window: "Original" aspect = square pixels (the
-// active size) for Artist, 4:3 for the console; OSD "Scale" (default
-// V-Integer: 1024 lines 1:1 on a 1080-line HDMI mode, a fit when the mode
-// has fewer lines) computed from the HDMI mode by sys/video_freak.sv. The
-// HDMI mode itself is the MiSTer's (MiSTer.ini video_mode).
+// Artist makes its own picture (rtl/artist/artist_video.sv) at the timing
+// the firmware programs, on its own pixel clock clk_pix (STUBS S-024): the
+// ROM's monitor records give 1280x1024 at 60 Hz (108.181 MHz; its 72, 75
+// and 50 Hz records, 110-135 MHz, are shown with that timing: the scaler's
+// input does not take more on this device), 1024x768 at 60-75 Hz ...
+// 640x480 at 60 Hz (25.175); artist.sv's pix_mode names the clock and the
+// state machine below reconfigures the PLL to it. Every pixel goes through
+// LUT0/LUT1 by the attribute plane, the hardware cursor laid over it. OSD
+// "Display": Auto = Artist while its video is on, else the serial console;
+// Graphics = always Artist; Serial console = never. Auto keeps Artist once
+// its video has been on since the machine's reset: a blanked screen (X's
+// screen saver clears MISC_VIDEO bits 27/25) stays black, as on a 715,
+// instead of turning into the console view. The serial console is 640x480
+// at 27.05 MHz (108.181 / 4; 858 x 525, 60.04 Hz), so it needs the static
+// clock and Artist's 1280x1024 modes do too: a normal boot never
+// reconfigures. Both outputs carry the picture: the scaler, and the analog
+// VGA at the real monitor timing. The scaler's window: "Original" aspect =
+// square pixels (the active size) for Artist, 4:3 for the console; OSD
+// "Scale" (default V-Integer: 1024 lines 1:1 on a 1080-line HDMI mode, a
+// fit when the mode has fewer lines) computed from the HDMI mode by
+// sys/video_freak.sv. The HDMI mode itself is the MiSTer's (MiSTer.ini
+// video_mode).
 reg  gfx_seen = 1'b0;
 always @(posedge clk_sys) gfx_seen <= m_reset ? 1'b0 : gfx_seen | gfx_on;
 wire gfx_show = status[11:10] == 2'd2 ? 1'b0 : status[11:10] == 2'd1 ? 1'b1 : gfx_on | gfx_seen;
+// the clock the shown picture needs (0 = 108.181 MHz, the console's too)
+reg  [2:0] pix_want = 3'd0;
+always @(posedge clk_sys) pix_want <= gfx_show ? gfx_pix_mode : 3'd0;
+
+wire [63:0] pix_to_pll, pix_from_pll;
+pll_video pllv
+(
+	.refclk(CLK_50M),
+	.rst(0),
+	.outclk_0(clk_pix),
+	.locked(pix_locked),
+	.reconfig_to_pll(pix_to_pll),
+	.reconfig_from_pll(pix_from_pll)
+);
+
+wire        pixcfg_wait;
+reg         pixcfg_write = 0;
+reg   [5:0] pixcfg_addr = 0;
+reg  [31:0] pixcfg_data = 0;
+pll_cfg_hdmi pllv_cfg
+(
+	.mgmt_clk(CLK_50M),
+	.mgmt_reset(0),
+	.mgmt_waitrequest(pixcfg_wait),
+	.mgmt_write(pixcfg_write),
+	.mgmt_address(pixcfg_addr),
+	.mgmt_writedata(pixcfg_data),
+	.reconfig_to_pll(pix_to_pll),
+	.reconfig_from_pll(pix_from_pll)
+);
+
+// The PLL's settings per pix_mode: {M, C0, K} as Main_MiSTer writes the HDMI
+// PLL's (video.cpp setPLL: a divider d is {odd, (d+1)/2 high, d/2 low}; N
+// bypassed; Fvco = 50 MHz x (M + K/2^32) in 650..1250 MHz, Fout = Fvco / C0).
+function [95:0] pix_cfg(input [2:0] i);
+	case (i)
+		3'd1:    pix_cfg = {32'h00020706, 32'h00000404, 32'h88AEFB2B};  //  84.587: M 13, C 8
+		3'd2:    pix_cfg = {32'h00000707, 32'h00020504, 32'h2CCCCCCD};  //  78.750: M 14, C 9
+		3'd3:    pix_cfg = {32'h00020706, 32'h00020504, 32'h80000000};  //  75.000: M 13, C 9
+		3'd4:    pix_cfg = {32'h00000707, 32'h00020605, 32'h1A9E6EEB};  //  64.109: M 14, C 11
+		3'd5:    pix_cfg = {32'h00020706, 32'h00000707, 32'hDC28F5C3};  //  49.500: M 13, C 14
+		3'd6:    pix_cfg = {32'h00020706, 32'h00020B0A, 32'h3AE147AE};  //  31.500: M 13, C 21
+		3'd7:    pix_cfg = {32'h00020706, 32'h00000D0D, 32'h174BC6A8};  //  25.175: M 13, C 26
+		default: pix_cfg = {32'h00020807, 32'h00020403, 32'h25350093};  // 108.181: M 15, C 7 (static)
+	endcase
+endfunction
+
+// The retarget (on CLK_50M, the reconfiguration block's clock): the wanted
+// clock must hold for 42 ms (the ROM writes the timing words one at a time),
+// then M, N, C0, charge pump, bandwidth, K and start, as Main_MiSTer does
+// for the HDMI PLL; the pixel side is held (black, prst_pix) from the
+// decision until 40 ms after the PLL has locked again, so the scaler and a
+// monitor see a clean blank, not a frame at two rates.
+reg pix_quiet = 1'b0;
+always @(posedge CLK_50M) begin : pix_reconfig
+	reg  [2:0] w_s1 = 3'd0, w_s2 = 3'd0, cur = 3'd0;
+	reg [20:0] hold = 21'd0;
+	reg [21:0] settle = 22'd0;
+	reg  [3:0] st = 4'd0;
+	reg [95:0] cfg;
+	w_s1 <= pix_want; w_s2 <= w_s1;
+	hold <= (w_s2 != w_s1 || w_s2 == cur) ? 21'd0 : hold + 1'd1;
+	if (st != 0 || !pix_locked) settle <= 22'd2_000_000;
+	else if (settle != 0) settle <= settle - 1'd1;
+	pix_quiet <= st != 0 || settle != 0 || !pix_locked;
+	if (!pixcfg_wait) begin
+		pixcfg_write <= 1'b0;
+		case (st)
+			4'd0: if (&hold && pix_locked) begin cur <= w_s2; cfg <= pix_cfg(w_s2); st <= 4'd1; end
+			4'd1: begin pixcfg_addr <= 6'd4; pixcfg_data <= cfg[95:64]; pixcfg_write <= 1'b1; st <= 4'd2; end  // M
+			4'd2: begin pixcfg_addr <= 6'd3; pixcfg_data <= 32'h00010000; pixcfg_write <= 1'b1; st <= 4'd3; end // N bypassed
+			4'd3: begin pixcfg_addr <= 6'd5; pixcfg_data <= cfg[63:32]; pixcfg_write <= 1'b1; st <= 4'd4; end  // C0
+			4'd4: begin pixcfg_addr <= 6'd9; pixcfg_data <= 32'd2; pixcfg_write <= 1'b1; st <= 4'd5; end        // charge pump
+			4'd5: begin pixcfg_addr <= 6'd8; pixcfg_data <= 32'd7; pixcfg_write <= 1'b1; st <= 4'd6; end        // bandwidth
+			4'd6: begin pixcfg_addr <= 6'd7; pixcfg_data <= cfg[31:0]; pixcfg_write <= 1'b1; st <= 4'd7; end   // K
+			4'd7: begin pixcfg_addr <= 6'd2; pixcfg_data <= 32'd0; pixcfg_write <= 1'b1; st <= 4'd8; end        // start
+			default: st <= 4'd0;
+		endcase
+	end
+end
+always @(posedge clk_pix) begin prst_s1 <= pix_quiet; prst_pix <= prst_s1; end
+
+// the serial console: 640x480 in 858 x 525 at 27.05 MHz (a pixel every
+// fourth clk_pix at 108.181 MHz: 31.52 kHz, 60.04 Hz); the machine's RS-232 console as
+// text, the front-panel LEDs and the power LED (green while LASI's PWR_ON_L
+// is clear, blinking with FLASH_LED) on a status line (STUBS S-018)
+reg  [1:0] pdiv = 0;
+reg  [9:0] hc = 0, vc = 0;
+reg  [24:0] blink = 0;
+always @(posedge clk_sys) blink <= blink + 1'd1;
+always @(posedge clk_pix) begin
+	pdiv <= pdiv + 1'd1;
+	if (pdiv == 2'd3) begin
+		if (hc == 10'd857) begin hc <= 0; vc <= (vc == 10'd524) ? 10'd0 : vc + 1'd1; end
+		else hc <= hc + 1'd1;
+	end
+end
+wire       pwr_on = !pcr[1] && (!pcr[0] || blink[24]);
+wire [7:0] st_r, st_g, st_b;
+wire       st_hs, st_vs, st_de;
+
+serial_term serial_term
+(
+	.clk(clk_sys), .rst(m_reset), .pclk(clk_pix),
+	.tx_strobe(con_tx), .tx_byte(con_tx_byte),
+	.leds(leds), .pwr(pwr_on),
+	.pix_ce(pdiv == 2'd0), .hc(hc), .vc(vc),
+	.hs_in(hc >= 10'd656 && hc < 10'd752), .vs_in(vc >= 10'd490 && vc < 10'd492),
+	.de_in(hc < 10'd640 && vc < 10'd480),
+	.r(st_r), .g(st_g), .b(st_b), .hs(st_hs), .vs(st_vs), .de(st_de)
+);
+
+// the shown picture, black while the clock is being retargeted
+reg  show_s1 = 1'b0, show_pix = 1'b0;
+always @(posedge clk_pix) begin show_s1 <= gfx_show; show_pix <= show_s1; end
 wire [2:0] scale_osd = status[125:123];
 wire       vid_de;
 video_freak video_freak
@@ -450,40 +582,11 @@ video_freak video_freak
 	.SCALE(scale_osd == 3'd0 ? 3'd1 : scale_osd == 3'd1 ? 3'd0 : scale_osd)
 );
 
-// The serial console: 640x480 at 21.3 MHz (one pixel every third clock,
-// 680 x 525 total, 59.7 Hz): the machine's RS-232 console as text, the
-// front-panel LEDs and the power LED (green while LASI's PWR_ON_L is clear,
-// blinking with FLASH_LED) on a status line (STUBS S-018)
-reg  [1:0] pdiv = 0;
-reg  [9:0] hc = 0, vc = 0;
-reg  [24:0] blink = 0;
-always @(posedge clk_sys) begin
-	blink <= blink + 1'd1;
-	pdiv <= (pdiv == 2'd2) ? 2'd0 : pdiv + 1'd1;
-	if (pdiv == 2'd2) begin
-		if (hc == 10'd679) begin hc <= 0; vc <= (vc == 10'd524) ? 10'd0 : vc + 1'd1; end
-		else hc <= hc + 1'd1;
-	end
-end
-wire       pwr_on = !pcr[1] && (!pcr[0] || blink[24]);
-wire [7:0] st_r, st_g, st_b;
-wire       st_hs, st_vs, st_de;
-
-serial_term serial_term
-(
-	.clk(clk_sys), .rst(m_reset),
-	.tx_strobe(con_tx), .tx_byte(con_tx_byte),
-	.leds(leds), .pwr(pwr_on),
-	.pix_ce(pdiv == 2'd0), .hc(hc), .vc(vc),
-	.hs_in(hc >= 10'd656 && hc < 10'd672), .vs_in(vc >= 10'd490 && vc < 10'd492),
-	.de_in(hc < 10'd640 && vc < 10'd480),
-	.r(st_r), .g(st_g), .b(st_b), .hs(st_hs), .vs(st_vs), .de(st_de)
-);
-
-assign CLK_VIDEO = clk_sys;
-assign CE_PIXEL  = gfx_show ? 1'b1 : pdiv == 2'd0;
-assign {VGA_R, VGA_G, VGA_B, VGA_HS, VGA_VS, vid_de} = gfx_show ? {gfx_r, gfx_g, gfx_b, gfx_hs, gfx_vs, gfx_de}
-                                                                  : {st_r, st_g, st_b, st_hs, st_vs, st_de};
+assign CLK_VIDEO = clk_pix;
+assign CE_PIXEL  = show_pix ? 1'b1 : pdiv == 2'd0;
+assign {VGA_HS, VGA_VS} = show_pix ? {gfx_hs, gfx_vs} : {st_hs, st_vs};
+assign {VGA_R, VGA_G, VGA_B, vid_de} = prst_pix ? 25'd0 : show_pix ? {gfx_r, gfx_g, gfx_b, gfx_de}
+                                                                    : {st_r, st_g, st_b, st_de};
 
 ///////////////////////   LEDS   /////////////////////////////////
 

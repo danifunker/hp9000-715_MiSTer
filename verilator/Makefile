@@ -35,7 +35,7 @@ V_OPT = --x-assign fast --x-initial fast --noassert --unroll-count 256
 # Core RTL under simulation: the machine (rtl/hp715.sv) inside sim.v.
 # CPU_RTL is defined below with the CPU benches.
 MACHINE_RTL = $(RTL)/mioc_ecc.sv $(RTL)/mioc.sv $(RTL)/hp_xbus.sv $(RTL)/lasi/lasi_uart.sv \
-	$(RTL)/lasi/lasi_ps2.sv $(RTL)/lasi/ps2_dev.sv $(RTL)/lasi/lasi.sv $(RTL)/wax_stub.sv \
+	$(RTL)/lasi/lasi_ps2.sv $(RTL)/lasi/ps2_dev.sv $(RTL)/lasi/harmony.sv $(RTL)/lasi/lasi.sv $(RTL)/wax_stub.sv \
 	$(RTL)/scsi/ncr53c710.sv $(RTL)/scsi/scsi_targets.sv $(RTL)/artist/artist.sv $(RTL)/artist/artist_video.sv \
 	$(RTL)/rom_loader.sv $(RTL)/hp715.sv
 V_SRC = $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v
@@ -149,6 +149,15 @@ tb_artist:
 	./obj_dir_tb/tb_artist
 
 .PHONY: tb_artist
+
+# Harmony audio (rtl/lasi/harmony.sv): registers, the ROM's loopback DMA
+# tests, chained-page playback, output and rate (tb/tb_harmony.cpp)
+tb_harmony:
+	$(TB_V) -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC --top-module harmony -o tb_harmony \
+		$(RTL)/lasi/harmony.sv tb/tb_harmony.cpp
+	./obj_dir_tb/tb_harmony
+
+.PHONY: tb_harmony
 
 # ---------------------------------------------------------------------------
 # CPU test ROMs on the RTL core (verilator/cputest): `make cputest SUITE=alu1`

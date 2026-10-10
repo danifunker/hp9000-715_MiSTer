@@ -34,10 +34,14 @@
 // LUT1, written by fills with CONTROL_PLANE set (bit 24 = LUT1; review 09
 // 4.2) and cleared at reset; it lives beside the VRAM (vr_addr[18] = 1: word
 // {y, x[10:6]}, pixel x in bit x[5:0]). The display (artist_video) makes the
-// picture from both, a line ahead (rf_* port), with the hardware cursor
-// laid over it, and drives the video outputs.
+// picture from both, two lines ahead (rf_* port), with the hardware cursor
+// laid over it, and drives the video outputs at the programmed timing on
+// the pixel clock pclk, which the top makes at the frequency pix_mode names
+// (the ROM's monitor records, 08 3.4).
 module artist (
     input  logic        clk,
+    input  logic        pclk,           // the pixel clock (vid_* outputs)
+    input  logic        prst,           // pixel side held (pclk being retargeted)
     input  logic        rst_n,          // machine reset
     input  logic        chip_rst,       // LASI IORESET bit 8 (RST_ARTIST_L) clear
     input  logic        dbg_trace,      // simulator: print every operation
@@ -69,8 +73,10 @@ module artist (
     // display
     output logic        video_on,       // MISC_VIDEO bits 27 and 25
     output logic [11:0] hactive, vactive,
-    output logic [7:0]  vid_r, vid_g, vid_b,
+    output logic [2:0]  pix_mode,       // the pixel clock the programmed mode needs (below)
+    output logic [7:0]  vid_r, vid_g, vid_b,   // pclk
     output logic        vid_hs, vid_vs, vid_de,
+    output logic        vid_vblank,     // the raster's vertical blank
     output logic        vid_underrun,
     output logic        pal_wr,         // LUT entry pal_addr := pal_rgb (0xRRGGBB; 256-511 = LUT1)
     output logic [8:0]  pal_addr,
@@ -106,6 +112,46 @@ module artist (
     assign hactive  = hact4[11:0];
     assign vactive  = {misc_video[11:8], reg20[31:24]} + 12'd1;
     assign video_on = misc_video[27] && misc_video[25];
+    // the pixel clock: the ROM's 13 monitor records (08 3.4) by their timing
+    // words (record 4, the flat panel at 84.000 MHz, has record 2's words and
+    // gets its 84.587); anything else by its width. HP9K715.sv turns the
+    // index into the PLL's settings:
+    //   0 108.181 (1280x1024: records 1, 5, 8, 12, 13)  1 84.587 (2, 4)
+    //   2 78.750 (9)  3 75.000 (3)  4 64.109 (6)  5 49.500 (10)  6 31.500 (11)
+    //   7 25.175 (7)
+    // The framework's scaler input does not take more than ~108 MHz on this
+    // device (build 26: its line-buffer reads failed at 135), so every
+    // 1280 x 1024 record -- 72 Hz at 135 MHz (1, 12), VESA 75 Hz at 135 (8),
+    // 50 Hz at 110 (13) -- is shown with record 5's 60 Hz timing (STUBS
+    // S-024). The cursor's position still comes from the programmed words.
+    logic       big;
+    always_comb begin
+        big = 1'b0;
+        case ({reg19, reg20})
+            {32'h3F2F2F0F, 32'hFF3C0202}, {32'h3F3D2303, 32'hFF250200},
+            {32'h3F27370F, 32'hFF89026B}: begin pix_mode = 3'd0; big = 1'b1; end
+            {32'h3F312D0A, 32'hFF190202}: pix_mode = 3'd0;
+            {32'hFF1F1F0F, 32'hFF3F0303}: pix_mode = 3'd1;
+            {32'hFF2B1703, 32'hFF1B0200}: pix_mode = 3'd2;
+            {32'hFF232105, 32'hFF1C0502}: pix_mode = 3'd3;
+            {32'hFF1F1F0F, 32'hFF130302}: pix_mode = 3'd4;
+            {32'hC7271303, 32'h57140200}: pix_mode = 3'd5;
+            {32'h9F1D0F03, 32'hDF0F0200}: pix_mode = 3'd6;
+            {32'h9F0B1705, 32'hDF1F0109}: pix_mode = 3'd7;
+            default: pix_mode = hactive >= 12'd1280 ? 3'd0 : hactive >= 12'd1024 ? 3'd1 :
+                                hactive >= 12'd800 ? 3'd5 : 3'd7;
+        endcase
+    end
+    // porches and sync widths (08 3.4): 0x300200 in units of 4 pixels,
+    // 0x300208 in lines, each field one less than the width
+    wire [31:0] t19 = big ? 32'h3F312D0A : reg19;
+    wire [31:0] t20 = big ? 32'hFF190202 : reg20;
+    wire [10:0] hfp = {3'd0, t19[7:0]} + 11'd1 << 2;
+    wire [10:0] hsw = {3'd0, t19[15:8]} + 11'd1 << 2;
+    wire [10:0] hbp = {3'd0, t19[23:16]} + 11'd1 << 2;
+    wire [8:0]  vfp = {1'b0, t20[7:0]} + 9'd1;
+    wire [8:0]  vsw = {1'b0, t20[15:8]} + 9'd1;
+    wire [8:0]  vbp = {1'b0, t20[23:16]} + 9'd1;
 
     // the self-test's signature analyser: the constant the STI expects for
     // the current width (08 3.7; STUBS S-023)
@@ -290,12 +336,15 @@ module artist (
 
     // ------------------------------------------------------------ the display
     artist_video u_video (
-        .clk(clk), .rst(rst), .hactive(hactive), .vactive(vactive), .video_on(video_on),
+        .clk(clk), .rst(rst), .pclk(pclk), .prst(prst),
+        .hactive(hactive), .vactive(vactive), .hfp(hfp), .hsw(hsw), .hbp(hbp), .vfp(vfp), .vsw(vsw), .vbp(vbp),
+        .video_on(video_on),
         .lut_wr(pal_wr), .lut_addr(pal_addr), .lut_rgb(pal_rgb),
         .c_on(c_want), .c_x(c_x), .c_y(c_y), .c_yoff(c_yoff), .c_fg(cur_col[3]), .c_bg(cur_col[2]),
         .c_row(c_row), .c_img(c_img), .c_msk(c_msk),
         .rf_req(rf_req), .rf_addr(rf_addr), .rf_len(rf_len), .rf_ack(rf_ack), .rf_rvalid(rf_rvalid), .rf_rdata(rf_rdata),
-        .r(vid_r), .g(vid_g), .b(vid_b), .hs(vid_hs), .vs(vid_vs), .de(vid_de), .underrun(vid_underrun));
+        .r(vid_r), .g(vid_g), .b(vid_b), .hs(vid_hs), .vs(vid_vs), .de(vid_de), .vblank(vid_vblank),
+        .underrun(vid_underrun));
 
     assign vr_wvalid = f_n != 4'd0;
     assign vr_wdata  = fifo[f_rp][63:0];

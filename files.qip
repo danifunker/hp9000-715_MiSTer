@@ -24,6 +24,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/hp_xbus.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/lasi/lasi_uart.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/lasi/lasi_ps2.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/lasi/ps2_dev.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/lasi/harmony.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/lasi/lasi.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/scsi/ncr53c710.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/scsi/scsi_targets.sv
@@ -33,6 +34,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/wax_stub.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/rom_loader.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/hp715.sv
 # MiSTer side
+set_global_assignment -name VERILOG_FILE rtl/pll_video.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mister/sdram64.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mister/ddr3_port.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mister/eeprom_save.sv

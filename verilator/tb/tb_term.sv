@@ -15,7 +15,7 @@ module tb_term (input logic clk);
     logic [7:0]  txb;
     logic [7:0]  r, g, b;
     logic        hs, vs, de;
-    serial_term #(.FONT("../../rtl/mister/font8x16.hex")) dut (.clk(clk), .rst(rst), .tx_strobe(tx), .tx_byte(txb), .leds(8'b1101_1110), .pwr(1'b1),
+    serial_term #(.FONT("../../rtl/mister/font8x16.hex")) dut (.clk(clk), .rst(rst), .pclk(clk), .tx_strobe(tx), .tx_byte(txb), .leds(8'b1101_1110), .pwr(1'b1),
         .pix_ce(pdiv == 2'd0), .hc(hc), .vc(vc), .hs_in(hc >= 10'd656 && hc < 10'd672),
         .vs_in(vc >= 10'd490 && vc < 10'd492), .de_in(hc < 10'd640 && vc < 10'd480),
         .r(r), .g(g), .b(b), .hs(hs), .vs(vs), .de(de));

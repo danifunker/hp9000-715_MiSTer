@@ -164,23 +164,62 @@ not done (S-023).
 ### 4.1 The display (`rtl/artist/artist_video.sv`)
 
 Artist makes the picture, as the 715's RAMDAC does, and it is the core's
-video (`HP9K715.sv` VGA_*, CE_PIXEL = 1 on clk_sys; the OSD "Display"
-picks it or the serial console): one pixel a clock at 64 MHz, the active
-size from the timing registers (`hactive` = 4 * ((MISC_VIDEO[3:0] << 8 |
-0x300200[31:24]) + 1), `vactive` = (MISC_VIDEO[11:8] << 8 |
-0x300208[31:24]) + 1, at most 2048 x 1024, taken at a frame's start), fixed
-blanking of 16 + 32 + 48 clocks and 3 + 4 + 9 lines: 1280 x 1024 at 44.7 Hz,
-1024 x 768 at 72.9 Hz. The MiSTer scaler converts that to the HDMI mode
-(the ini section `[HP9K715]` video_mode=8, vscale_mode=1 shows 1024 lines
-1:1 on 1080p). `video_on` = MISC_VIDEO bits 27 and 25 (black while clear).
+video (`HP9K715.sv` VGA_*, CE_PIXEL = 1; the OSD "Display" picks it or the
+serial console), **at the timing the firmware programs** (since build 26,
+2026-10-09; STUBS S-024), one pixel a clock of its own pixel clock:
 
-While line n is shown, line n + 1's VRAM words (hactive / 8) and attribute
-words (hactive / 64) are fetched into the other half of two line buffers
-(`rf_*`: bursts of up to 64, one at a time, a separate client of the DDR3
-port, above the engine's VRAM bursts); a line not complete when its turn
-comes sets the sticky `vid_underrun`. Pixel pipeline: line-buffer reads ->
-the pixel byte and its attribute bit address the 512-entry LUT -> the
-cursor's bit overrides it -> outputs (3 clocks).
+* **Timing** from the registers (08 3.4): `hactive` = 4 * ((MISC_VIDEO[3:0]
+  << 8 | 0x300200[31:24]) + 1), back porch / sync / front porch =
+  4 * (0x300200[23:16] / [15:8] / [7:0] + 1) pixels; `vactive` =
+  (MISC_VIDEO[11:8] << 8 | 0x300208[31:24]) + 1, back porch / sync / front
+  porch = 0x300208[23:16] / [15:8] / [7:0] + 1 lines. Taken at the start of
+  a frame once it has been stable for two clocks; active size at most 2048 x
+  1024; anything under 256 x 200 (no mode set yet) shows as monitor 1's
+  1280 x 1024 timing. Syncs are positive pulses (the polarity of HP's
+  monitors is not known). `video_on` = MISC_VIDEO bits 27 and 25 (black
+  while clear).
+* **The pixel clock**: `rtl/pll_video.v`, a PLL of its own reconfigured at
+  run time (`sys/pll_cfg/pll_cfg_hdmi.v`: M, N, C0, K, charge pump,
+  bandwidth, as Main_MiSTer programs the HDMI PLL). `artist.sv`'s `pix_mode`
+  matches 0x300200/0x300208 against the ROM's 13 monitor records: 108.181
+  (1280 x 1024: records 1, 5, 8, 12, 13), 84.587 (2 and 4 -- the flat
+  panel's 84.000 has record 2's words), 78.75 (9), 75 (3), 64.109 (6), 49.5
+  (10), 31.5 (11), 25.175 MHz (7); other timing words by the width (1280:
+  108.181, 1024: 84.587, 800: 49.5, else 25.175). **The 1280 x 1024 records
+  above 108 MHz** -- HP's 72 Hz (1, 12; 135 MHz), VESA 75 Hz (8; 135) and
+  50 Hz (13; 110) -- are shown with record 5's 60 Hz timing (1708 x 1056):
+  at 135 MHz the framework's scaler input (its downscale line buffer) and
+  its composite encoder missed timing by ~2 ns (build 26), so the core
+  stays at 108.181 MHz at most (S-024). The cursor's position still comes
+  from the programmed words. The PLL settings (`HP9K715.sv` `pix_cfg`): N
+  bypassed, Fvco = 50 MHz x (M + K/2^32) in 650..1250 MHz, Fout = Fvco /
+  C0, all exact to the hertz. The static configuration is 108.181 MHz, the
+  1280 x 1024 modes' and the serial console's (640 x 480 at 27.05 MHz = a
+  pixel every fourth clock, 858 x 525, 60.04 Hz), so a normal boot never
+  reconfigures; a new clock must hold for 42 ms (the ROM writes the words
+  one at a time), and the picture is held black (`prst`) from the decision
+  until 40 ms after the PLL has locked again. The machine never sees the
+  0x300300 synthesiser (stored only; its M/N depend on a reference the ROM
+  takes from page zero).
+* **Clock crossing**: the line fetch, the cursor rows and the LUT writes
+  stay on the machine's clock; the raster, the line-buffer and LUT reads
+  and the cursor overlay run on the pixel clock. At the start of every line
+  the pixel side toggles a flag with the line's numbers (held for the whole
+  line); the machine side then fetches the line **two ahead** -- its VRAM
+  words (hactive / 8) and attribute words (hactive / 64) -- into one of four
+  banks of the dual-clock line buffers (`rf_*`: bursts of up to 64, one at
+  a time, a separate client of the DDR3 port, above the engine's VRAM
+  bursts) and gets the next line's cursor row, position and colours ready,
+  which the pixel side takes when that line starts. A line still being
+  fetched when its turn comes sets the sticky `vid_underrun`. At 108.181
+  MHz a 1708-pixel line lasts 1010 machine clocks (1376 before), plenty for
+  the 180 words with the engine busy. Pixel pipeline: line-buffer reads -> the
+  pixel's byte and attribute bit -> the 512-entry LUT -> the cursor's bit
+  overrides it -> outputs (4 pixel clocks).
+* Both outputs carry it: the MiSTer scaler (HDMI, OSD "Scale"), and the
+  analog VGA at the real monitor timing (1280 x 1024 at 60 Hz / 63.3 kHz
+  for the 1280 x 1024 monitors). `vid_vblank` tells the machine side when the raster is in
+  its vertical blank (not yet readable by software, S-023).
 
 **The hardware cursor**: a 64 x 64 sprite, the image in buffer 6, the mask
 in buffer 7, written through the window or BINC in an Otc32 mode, 32 pixels
@@ -212,12 +251,18 @@ The self_test signature 0x30023C returns the constant for the current width
   draw the tail of the whole line --, dashed segments, a double dash, a
   dashed polyline, points), J-plane moves, the attribute plane (cleared
   after reset from junk, LUT1 and LUT0 paints incl. a 1-pixel-wide one).
-  The display is served by its own fetch model (random latency and gaps)
-  and checked a whole frame at a time from its video outputs against
+  The display is served by its own fetch model (random latency and gaps),
+  runs on a pixel clock of its own (108.181 MHz against the machine's 64) and
+  is checked a whole frame at a time from its video outputs against
   LUT[attribute][pixel] with the cursor laid over: without a cursor, at
   100,200, over a fill drawn under it (the VRAM never sees the cursor), off
   the left edge, clipped right and below, 10 rows cut off at the top,
-  switched off; no underruns.
+  switched off; no underruns. The raster's timing is measured on the
+  outputs (pixels a line, front porch, sync widths, lines between vertical
+  syncs, the vertical front porch) for monitor 1's words (shown at record
+  5's 1708 x 1056), monitor 2 (1024 x 768 at 84.587 MHz) and monitor 7 (640
+  x 480 at 25.175 MHz, the slowest fetch-to-pixel ratio), and every monitor
+  record's timing words must name its pixel clock.
 * romsim (`verilator/romsim`): `--arttrace` prints every operation,
   `--fbshot CYCLE FILE` / `--fbshot-end FILE` write the screen (active area
   through LUT0/LUT1 by the attribute plane, no cursor) as a PPM; sim.v

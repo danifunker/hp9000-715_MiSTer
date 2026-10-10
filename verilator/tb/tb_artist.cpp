@@ -109,22 +109,45 @@ static void rf_step() {
 }
 static void rf_commit(bool rvalid) { if (rvalid && ++rf.idx == rf.left) { rf.st = 0; rf.wait = -1; } }
 
-// a frame from the video outputs: rows of DE pixels after the end of a vertical sync
+// a frame from the video outputs (pclk): rows of DE pixels after the end of
+// a vertical sync, and the raster's timing as seen on the outputs: pixel
+// clocks per line, where the horizontal sync starts after DE falls and how
+// long it is, lines per frame, where the vertical sync starts after the last
+// active line and how many lines it lasts
 static std::vector<uint32_t> frame;
 static int cap_st = 0, cap_x = 0, cap_y = 0, cap_w = 0;
-static bool prev_vs = false, prev_de = false;
+static bool prev_vs = false, prev_de = false, prev_hs = false;
+static long px_n = 0, de_fall = -1, hs_rise = -1, line_start = -1;
+static int m_line = 0, m_hfp = 0, m_hsw = 0, m_lines = 0, m_vfp = 0, m_vsw = 0, lines_since_de = 0, vs_line = 0;
 static void capture() {
-	bool vs = t->vid_vs, de = t->vid_de;
-	if (cap_st == 1 && prev_vs && !vs) { cap_st = 2; cap_y = 0; cap_x = 0; frame.clear(); }
+	bool vs = t->vid_vs, de = t->vid_de, hs = t->vid_hs;
+	px_n++;
+	if (de && !prev_de) { if (line_start >= 0) m_line = px_n - line_start; line_start = px_n; lines_since_de = 0; }
+	if (!de && prev_de) de_fall = px_n;
+	if (hs && !prev_hs) { hs_rise = px_n; if (de_fall >= 0 && lines_since_de == 0) m_hfp = hs_rise - de_fall; lines_since_de++; if (vs) vs_line++; }
+	if (!hs && prev_hs && hs_rise >= 0) m_hsw = px_n - hs_rise;
+	if (vs && !prev_vs) { m_vfp = lines_since_de; vs_line = 0; }
+	if (!vs && prev_vs) m_vsw = vs_line;
+	if (cap_st == 1 && prev_vs && !vs) { cap_st = 2; cap_y = 0; cap_x = 0; frame.clear(); m_lines = 0; }
 	else if (cap_st == 2) {
 		if (de) { frame.push_back(t->vid_r << 16 | t->vid_g << 8 | t->vid_b); cap_x++; }
 		if (prev_de && !de) { if (cap_y == 0) cap_w = cap_x; cap_y++; cap_x = 0; }
+		if (hs && !prev_hs) m_lines++;
 		if (vs) cap_st = 3;
 	}
-	prev_vs = vs; prev_de = de;
+	prev_vs = vs; prev_de = de; prev_hs = hs;
 }
 
+// two clocks: the machine's at 64 MHz, the pixel clock at 108.181 MHz
+// (1280x1024) or whatever pix_ps says; every pixel edge before the next
+// machine edge is applied first
+static uint64_t pix_ps = 9244, next_pix = 0, next_sys = 0;
 static void tick() {
+	while (next_pix < next_sys) {
+		t->pclk = 1; t->eval(); capture(); t->pclk = 0; t->eval();
+		next_pix += pix_ps;
+	}
+	next_sys += 15625;
 	mem_step(); rf_step();
 	bool wready = t->vr_wready, rvalid = t->vr_rvalid, frv = t->rf_rvalid;
 	uint64_t wdata = t->vr_wdata; unsigned wbe = t->vr_be;
@@ -132,7 +155,6 @@ static void tick() {
 	mem_commit(wready, rvalid, wdata, wbe);
 	rf_commit(frv);
 	if (t->pal_wr) lut[t->pal_addr] = t->pal_rgb;
-	capture();
 	t->clk = 0; t->eval();
 	cyc++;
 }
@@ -389,9 +411,9 @@ int main(int argc, char** argv) {
 	for (int i = 0; i < 2048 * 1024; i++) vram[i] = ref[i] = rnd() & 0xFF;     // DDR3 powers up with junk
 	for (int i = 0; i < 32768; i++) aram[i] = (uint64_t)rnd() << 49 ^ (uint64_t)rnd() << 30 ^ (uint64_t)rnd() << 15 ^ rnd();
 	// (Artist clears the attribute plane after a reset: aref stays all LUT0)
-	t->rst_n = 0; t->chip_rst = 0; t->req = 0; t->dbg_trace = argc > 1;
+	t->rst_n = 0; t->chip_rst = 0; t->req = 0; t->dbg_trace = argc > 1; t->prst = 1;
 	for (int i = 0; i < 4; i++) tick();
-	t->rst_n = 1; tick();
+	t->rst_n = 1; t->prst = 0; tick();
 
 	// ---- decode and identification (08 1.1)
 	gsc(false, 0xF8000000, 0); expect("HPA 0xF8000000 bus error", last_err, 1);
@@ -728,22 +750,32 @@ int main(int argc, char** argv) {
 			if (cap_st != 3) { printf("FAIL: no frame\n"); fails++; }
 		};
 		// cx, cy: the sprite's row 0 / column 0; rows above `top` are not shown
+		int fw = 1280, fh = 1024;
 		auto expect_frame = [&](const char* what, bool on, int cx, int cy, int top) {
 			grab(); grab();                 // the first may have started before the last change
 			int bad = 0;
-			if (cap_w != 1280 || cap_y != 1024) { printf("FAIL: %s: frame %dx%d\n", what, cap_w, cap_y); fails++; return; }
-			for (int y = 0; y < 1024; y++)
-				for (int x = 0; x < 1280; x++) {
+			if (cap_w != fw || cap_y != fh) { printf("FAIL: %s: frame %dx%d\n", what, cap_w, cap_y); fails++; return; }
+			for (int y = 0; y < fh; y++)
+				for (int x = 0; x < fw; x++) {
 					int i = y * 2048 + x, c = x - cx, r = y - cy;
 					uint32_t want = lut[aref[i] << 8 | ref[i]];
 					if (on && c >= 0 && c < 64 && r >= 0 && r < 64 && y >= top && (msk[r] >> (63 - c) & 1))
 						want = img[r] >> (63 - c) & 1 ? cfg : cbg;
-					uint32_t got = frame[y * 1280 + x];
+					uint32_t got = frame[y * fw + x];
 					if (got != want) { if (bad < 6) printf("  %s: %d,%d is %06x, expected %06x\n", what, x, y, got, want); bad++; }
 				}
 			if (bad) { printf("FAIL: %s: %d pixels\n", what, bad); fails++; } else printf("ok   %s\n", what);
 		};
 		expect_frame("picture through LUT0/LUT1, no cursor", false, 0, 0, 0);
+		// monitor 1's timing words (72 Hz at 135 MHz) are shown with monitor
+		// 5's 60 Hz timing: 1708 x 1056 at 108.181 MHz
+		expect("1280x1024: pixel clocks a line", m_line, 1708);
+		expect("1280x1024: front porch", m_hfp, 44);
+		expect("1280x1024: horizontal sync", m_hsw, 184);
+		expect("1280x1024: lines between vertical syncs", m_lines, 1024 + 3 + 26);
+		expect("1280x1024: vertical front porch", m_vfp - 1, 3);
+		expect("1280x1024: vertical sync", m_vsw, 3);
+		expect("1280x1024: pixel clock 0 (108.181 MHz)", t->pix_mode, 0);
 		gsc(true, 0xF8300100, pos(100, 200)); gsc(true, 0xF8300104, 0x80);
 		expect_frame("cursor at 100,200", true, 100, 200, 0);
 		// drawing under it: the cursor stays, the VRAM never sees it
@@ -761,6 +793,41 @@ int main(int argc, char** argv) {
 		gsc(true, 0xF8300104, 0x00);
 		expect_frame("cursor off", false, 0, 0, 0);
 		expect("display underruns", t->vid_underrun, 0);
+
+		// the ROM's monitor 2: 1024x768 at 84.587 MHz, 1344 x 840 (75 Hz)
+		gsc(true, 0xF8300200, 0xFF1F1F0F); gsc(true, 0xF8300208, 0xFF3F0303); gsc(true, 0xF8300218, 0xEB800200);
+		expect("1024x768: pixel clock 1 (84.587 MHz)", t->pix_mode, 1);
+		pix_ps = 11822; fw = 1024; fh = 768;
+		expect_frame("1024x768 picture", false, 0, 0, 0);
+		expect("1024x768: pixel clocks a line", m_line, 1344);
+		expect("1024x768: front porch", m_hfp, 64);
+		expect("1024x768: horizontal sync", m_hsw, 128);
+		expect("1024x768: lines between vertical syncs", m_lines, 768 + 4 + 64);
+		expect("1024x768: vertical front porch", m_vfp - 1, 4);
+		expect("1024x768: vertical sync", m_vsw, 4);
+		// at 108 MHz pixels the line takes 1010 machine clocks, at 25.175 MHz
+		// (640x480, monitor 7) 2054; the fetch keeps up at both
+		gsc(true, 0xF8300200, 0x9F0B1705); gsc(true, 0xF8300208, 0xDF1F0109); gsc(true, 0xF8300218, 0x0B800100);
+		gsc(true, 0xF8300218, 0xEB800100);
+		expect("640x480: pixel clock 7 (25.175 MHz)", t->pix_mode, 7);
+		pix_ps = 39722; fw = 640; fh = 480;
+		expect_frame("640x480 picture", false, 0, 0, 0);
+		expect("640x480: pixel clocks a line", m_line, 808);
+		expect("640x480: lines between vertical syncs", m_lines, 480 + 10 + 32);
+		expect("display underruns", t->vid_underrun, 0);
+
+		// every monitor record's timing words name its pixel clock (08 3.4)
+		static const struct { uint32_t r19, r20; int mode; } recs[] = {
+			{0x3F2F2F0F, 0xFF3C0202, 0}, {0xFF1F1F0F, 0xFF3F0303, 1}, {0xFF232105, 0xFF1C0502, 3},
+			{0x3F312D0A, 0xFF190202, 0}, {0xFF1F1F0F, 0xFF130302, 4}, {0x9F0B1705, 0xDF1F0109, 7},
+			{0x3F3D2303, 0xFF250200, 0}, {0xFF2B1703, 0xFF1B0200, 2}, {0xC7271303, 0x57140200, 5},
+			{0x9F1D0F03, 0xDF0F0200, 6}, {0x3F27370F, 0xFF89026B, 0}};
+		int badm = 0;
+		for (auto& r : recs) {
+			gsc(true, 0xF8300200, r.r19); gsc(true, 0xF8300208, r.r20);
+			if (t->pix_mode != r.mode) { printf("  %08x %08x: pixel clock %d, expected %d\n", r.r19, r.r20, t->pix_mode, r.mode); badm++; }
+		}
+		if (badm) { printf("FAIL: monitor records' pixel clocks\n"); fails++; } else printf("ok   monitor records' pixel clocks\n");
 	}
 	check("final VRAM");
 

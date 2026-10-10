@@ -10,6 +10,8 @@ module hp715 #(
 ) (
     input  logic        clk,
     input  logic        reset,              // power-on, the MiSTer reset, a ROM download
+    input  logic        pclk,               // Artist's pixel clock (gfx_r ... gfx_de)
+    input  logic        prst,               // its side held while pclk is retargeted
     // configuration
     input  logic [1:0]  cfg_model,          // 0 = 715/64, 1 = 715/80, 2 = 715/100
     input  logic [3:0]  cfg_ram_lg,         // 2^n MB of RAM, 3..8
@@ -20,6 +22,7 @@ module hp715 #(
     output logic [7:0]  led_latch,          // the eight status LEDs (active low)
     output logic        led_strobe,
     output logic [31:0] lasi_pcr,           // bit 0 FLASH_LED, bit 1 PWR_ON_L
+    output logic signed [15:0] audio_l, audio_r,   // Harmony's codec output
     // system RAM
     output logic        ram_req, ram_we, ram_line,
     output logic [27:0] ram_addr,
@@ -97,7 +100,8 @@ module hp715 #(
     input  logic [63:0] rf_rdata,
     output logic        gfx_on,             // the Artist's video is enabled
     output logic [11:0] gfx_width, gfx_height,
-    output logic [7:0]  gfx_r, gfx_g, gfx_b,   // its picture (one pixel a clock)
+    output logic [2:0]  gfx_pix_mode,       // the pixel clock its mode needs (rtl/artist/artist.sv)
+    output logic [7:0]  gfx_r, gfx_g, gfx_b,   // its picture (one pixel a pclk)
     output logic        gfx_hs, gfx_vs, gfx_de,
     output logic        gfx_underrun,
     output logic        gfx_pal_wr,         // LUT entry gfx_pal_addr := gfx_pal_rgb (256-511 = LUT1)
@@ -199,6 +203,18 @@ module hp715 #(
     logic [63:0] dma_wdata, dma_rdata;
     logic [31:0] l_eir_addr;
     logic [4:0]  l_eir_data;
+    // LASI's DMA masters (the 53C710 scd_*, Harmony ad_*; the arbiter below)
+    logic        scd_req, scd_we, scd_ack;
+    logic [31:0] scd_addr;
+    logic [7:0]  scd_be;
+    logic [63:0] scd_wdata;
+    // Harmony's registers (LASI page 4)
+    logic        a_req, a_rst, a_irq;
+    logic [31:0] a_rdata_h;
+    logic        ad_req, ad_we, ad_ack;
+    logic [31:0] ad_addr;
+    logic [7:0]  ad_be;
+    logic [63:0] ad_wdata;
 
     mioc #(.HAS_ARTIST(HAS_ARTIST)) u_mioc (
         .clk(clk), .rst_n(rst_n), .cfg_ram_lg(cfg_ram_lg),
@@ -249,6 +265,7 @@ module hp715 #(
         .rtc_set(rtc_set), .rtc_value(rtc_value),
         .scsi_req(s_req), .scsi_we(s_we), .scsi_addr(s_addr), .scsi_be(s_be), .scsi_wdata(s_wdata),
         .scsi_rdata(s_rdata), .scsi_rst(s_rst), .scsi_irq(s_irq),
+        .aud_req(a_req), .aud_rst(a_rst), .aud_rdata(a_rdata_h), .aud_irq(a_irq),
         .pcr(lasi_pcr), .artist_rst(artist_rst), .dbg_ps2_valid(l_ps2_v), .dbg_ps2(l_ps2));
     logic        l_ps2_v;
     logic [9:0]  l_ps2;
@@ -265,13 +282,41 @@ module hp715 #(
     ncr53c710 #(.STO_CLKS(SIM_FAST ? 200_000 : CLK_HZ / 4)) u_scsi (
         .clk(clk), .rst(s_rst),
         .req(s_req), .we(s_we), .addr(s_addr), .be(s_be), .wdata(s_wdata), .rdata(s_rdata), .irq(s_irq),
-        .dma_req(dma_req), .dma_we(dma_we), .dma_addr(dma_addr), .dma_be(dma_be), .dma_wdata(dma_wdata),
-        .dma_ack(dma_ack), .dma_err(dma_err), .dma_rdata(dma_rdata),
+        .dma_req(scd_req), .dma_we(scd_we), .dma_addr(scd_addr), .dma_be(scd_be), .dma_wdata(scd_wdata),
+        .dma_ack(scd_ack), .dma_err(dma_err), .dma_rdata(dma_rdata),
         .sb_sel(sb_sel), .sb_sel_id(sb_sel_id), .sb_sel_atn(sb_sel_atn), .sb_sel_done(sb_sel_done),
         .sb_sel_fail(sb_sel_fail), .sb_bsy(sb_bsy), .sb_req(sb_req), .sb_phase(sb_phase), .sb_tdata(sb_tdata),
         .sb_ack(sb_ack), .sb_idata(sb_idata), .sb_ackhold(sb_ackhold), .sb_atn(sb_atn), .sb_rst(sb_rst),
         .dbg_dec(s_dec), .dbg_dsp(s_dsp), .dbg_ins(s_ins), .dbg_dsps(s_dsps), .dbg_dstat(s_dstat),
         .dbg_sstat0(s_sstat0));
+
+    // ------------------------------------------------------------ Harmony
+    harmony #(.CLK_HZ(CLK_HZ)) u_harmony (
+        .clk(clk), .rst(a_rst),
+        .req(a_req), .we(gsc_we), .addr(gsc_addr[11:0]), .be(gsc_be), .wdata(gsc_wdata), .rdata(a_rdata_h),
+        .irq(a_irq),
+        .dma_req(ad_req), .dma_we(ad_we), .dma_addr(ad_addr), .dma_be(ad_be), .dma_wdata(ad_wdata),
+        .dma_ack(ad_ack), .dma_err(dma_err), .dma_rdata(dma_rdata),
+        .out_l(audio_l), .out_r(audio_r), .out_new());
+
+    // ------------------------------------------------------------ LASI's DMA masters
+    // one doubleword at a time on the MIOC's dma_* port: Harmony first (a
+    // request every few sample periods), then the 53C710
+    logic        dg_busy, dg_aud;
+    always_ff @(posedge clk) begin
+        if (!rst_n) dg_busy <= 1'b0;
+        else if (!dg_busy) begin
+            if (ad_req)      begin dg_busy <= 1'b1; dg_aud <= 1'b1; end
+            else if (scd_req) begin dg_busy <= 1'b1; dg_aud <= 1'b0; end
+        end else if (dma_ack) dg_busy <= 1'b0;
+    end
+    assign dma_req   = dg_busy && (dg_aud ? ad_req : scd_req);
+    assign dma_we    = dg_aud ? ad_we : scd_we;
+    assign dma_addr  = dg_aud ? ad_addr : scd_addr;
+    assign dma_be    = dg_aud ? ad_be : scd_be;
+    assign dma_wdata = dg_aud ? ad_wdata : scd_wdata;
+    assign ad_ack    = dg_busy && dg_aud && dma_ack;
+    assign scd_ack   = dg_busy && !dg_aud && dma_ack;
 
     // ---------------------------------------------------- debug events
     // types: 1 SCSI bus byte (aux = phase), 2 SCRIPTS instruction (addr =
@@ -445,23 +490,23 @@ module hp715 #(
     logic [31:0] a_rdata;
     generate if (HAS_ARTIST) begin : g_artist
         artist u_artist (
-            .clk(clk), .rst_n(rst_n), .chip_rst(artist_rst), .dbg_trace(dbg_ctl[5]),
+            .clk(clk), .pclk(pclk), .prst(prst), .rst_n(rst_n), .chip_rst(artist_rst), .dbg_trace(dbg_ctl[5]),
             .req(gsc_req && gsc_dev == 2'd3), .we(gsc_we), .addr(gsc_addr), .be(gsc_be), .wdata(gsc_wdata),
             .ack(a_ack), .err(a_err), .rdata(a_rdata),
             .vr_req(vr_req), .vr_we(vr_we), .vr_addr(vr_addr), .vr_len(vr_len), .vr_ack(vr_ack),
             .vr_wvalid(vr_wvalid), .vr_wdata(vr_wdata), .vr_be(vr_be), .vr_wready(vr_wready),
             .vr_rvalid(vr_rvalid), .vr_rdata(vr_rdata),
             .rf_req(rf_req), .rf_addr(rf_addr), .rf_len(rf_len), .rf_ack(rf_ack), .rf_rvalid(rf_rvalid), .rf_rdata(rf_rdata),
-            .video_on(gfx_on), .hactive(gfx_width), .vactive(gfx_height),
+            .video_on(gfx_on), .hactive(gfx_width), .vactive(gfx_height), .pix_mode(gfx_pix_mode),
             .vid_r(gfx_r), .vid_g(gfx_g), .vid_b(gfx_b), .vid_hs(gfx_hs), .vid_vs(gfx_vs), .vid_de(gfx_de),
-            .vid_underrun(gfx_underrun),
+            .vid_vblank(), .vid_underrun(gfx_underrun),
             .pal_wr(gfx_pal_wr), .pal_addr(gfx_pal_addr), .pal_rgb(gfx_pal_rgb), .busy());
     end else begin : g_no_artist
         assign a_ack = 1'b0; assign a_err = 1'b0; assign a_rdata = 32'd0;
         assign vr_req = 1'b0; assign vr_we = 1'b0; assign vr_addr = 19'd0; assign vr_len = 7'd0;
         assign vr_wvalid = 1'b0; assign vr_wdata = 64'd0; assign vr_be = 8'd0;
         assign rf_req = 1'b0; assign rf_addr = 19'd0; assign rf_len = 7'd0;
-        assign gfx_on = 1'b0; assign gfx_width = 12'd0; assign gfx_height = 12'd0;
+        assign gfx_on = 1'b0; assign gfx_width = 12'd0; assign gfx_height = 12'd0; assign gfx_pix_mode = 3'd0;
         assign {gfx_r, gfx_g, gfx_b, gfx_hs, gfx_vs, gfx_de, gfx_underrun} = '0;
         assign gfx_pal_wr = 1'b0; assign gfx_pal_addr = 9'd0; assign gfx_pal_rgb = 24'd0;
     end endgenerate

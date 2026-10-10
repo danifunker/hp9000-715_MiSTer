@@ -163,11 +163,13 @@ logic [6:0]  vr_len;
 logic [63:0] vr_wdata, vr_rdata;
 logic [7:0]  vr_be;
 
+// the simulator never looks at Artist's video outputs (romsim's --fbshot reads
+// the VRAM), so its pixel clock is the machine's
 hp715 #(.CLK_HZ(64_000_000), .SIM_FAST(1'b1), .HAS_ARTIST(1'b1)) u_hp715 (
-	.clk(clk_sys), .reset(m_reset),
+	.clk(clk_sys), .reset(m_reset), .pclk(clk_sys), .prst(m_reset),
 	.cfg_model(sim_status[1:0]), .cfg_ram_lg(ram_lg), .sim_cr16_mul(sim_status[9:6]),
 	.soft_pwr_n(!soft_power_off), .toc_button(toc_button),
-	.led_latch(leds), .led_strobe(led_strobe), .lasi_pcr(pcr),
+	.led_latch(leds), .led_strobe(led_strobe), .lasi_pcr(pcr), .audio_l(), .audio_r(),
 	.ram_req(ram_req), .ram_we(ram_we), .ram_line(ram_line), .ram_addr(ram_addr), .ram_be(ram_be),
 	.ram_wdata(ram_wdata), .ram_ack(ram_ack), .ram_wready(ram_wready), .ram_rvalid(ram_rvalid),
 	.ram_rbeat(ram_rbeat), .ram_rdata(ram_rdata),
@@ -187,7 +189,7 @@ hp715 #(.CLK_HZ(64_000_000), .SIM_FAST(1'b1), .HAS_ARTIST(1'b1)) u_hp715 (
 	.vr_wvalid(vr_wvalid), .vr_wdata(vr_wdata), .vr_be(vr_be), .vr_wready(vr_wready),
 	.vr_rvalid(vr_rvalid), .vr_rdata(vr_rdata),
 	.rf_req(rf_req), .rf_addr(rf_addr), .rf_len(rf_len), .rf_ack(rf_ack), .rf_rvalid(rf_rvalid), .rf_rdata(rf_rdata),
-	.gfx_on(gfx_on), .gfx_width(gfx_width), .gfx_height(gfx_height),
+	.gfx_on(gfx_on), .gfx_width(gfx_width), .gfx_height(gfx_height), .gfx_pix_mode(),
 	.gfx_r(), .gfx_g(), .gfx_b(), .gfx_hs(), .gfx_vs(), .gfx_de(), .gfx_underrun(),
 	.gfx_pal_wr(gfx_pal_wr), .gfx_pal_addr(gfx_pal_addr), .gfx_pal_rgb(gfx_pal_rgb),
 	.dbg_ctl(sim_trace), .dbg_retire(debug_retire), .dbg_nullified(debug_nullified), .dbg_iaoq_f(debug_iaoq_f),
