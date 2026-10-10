@@ -1,10 +1,13 @@
 // tb_i82596 -- rtl/lasi/i82596.sv on its own, against a memory and a
 // Main_MiSTer-style mailbox: the start-up handshake, PORT self-test and
 // alternative SCP, the initialisation (ISCP busy, CX|CNA), IA setup and
-// configure, an internal-loopback frame into a simplified RFD (the ROM's
-// test), a Linux-style flexible RFD/RBD ring fed from the bridge's RX slots
-// (address filter, RBD chaining, the RBD pointer written back, EL), and
-// transmits through TBD chains into the TX slots.
+// configure, an internal-loopback frame into a simplified RFD, the ROM's
+// "Trying LAN" sequence (docs: the session's ROM analysis; RFDs of 14 bytes
+// + RBDs, internal and external loopback, the RBD pointer the chip writes,
+// RU abort, the RU state already written when the command word clears,
+// padding), a Linux-style flexible RFD/RBD ring fed from the bridge's RX
+// slots (address filter, FCS stripped, RBD chaining, EL), and transmits
+// through TBD chains into the TX slots.
 //   make -C verilator tb_i82596
 #include "Vi82596.h"
 #include "verilated.h"
@@ -12,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include <functional>
 
 static Vi82596* t;
 static uint64_t cyc = 0;
@@ -27,7 +31,9 @@ static void wp(uint32_t a, uint32_t v) { w16(a, v & 0xFFFF); w16(a + 2, v >> 16)
 static uint16_t r16(uint32_t a) { return mem[a] << 8 | mem[a + 1]; }
 static uint32_t rp(uint32_t a) { return r16(a) | (uint32_t)r16(a + 2) << 16; }
 
+static const uint32_t SCP = 0x17A0, ISCP = 0x17B4, SCB = 0x17BC;
 static int dma_wait = -1, nb_wait = -1;
+static uint16_t stat_at_clear = 0xFFFF;               // the SCB status when the chip last cleared the command
 static void bus_step() {
 	t->dma_ack = 0;
 	if (!t->dma_req) dma_wait = -1;
@@ -38,6 +44,8 @@ static void bus_step() {
 			if (t->dma_we) {
 				for (int i = 0; i < 8; i++)
 					if (t->dma_be >> (7 - i) & 1) mem[a + i] = t->dma_wdata >> (56 - 8 * i);
+				if (a == ((SCB + 2) & ~7u) && (t->dma_be >> (7 - ((SCB + 2) & 7)) & 1))
+					stat_at_clear = mem[SCB] << 8 | mem[SCB + 1];
 			} else {
 				uint64_t d = 0;
 				for (int i = 0; i < 8; i++) d = d << 8 | mem[a + i];
@@ -79,16 +87,19 @@ static void expect(const char* what, uint32_t got, uint32_t want) {
 // the mailbox (word offsets)
 enum { MAGIC = 0, GEN = 1, TXW = 2, TXR = 3, RXW = 4, RXR = 5, MAC = 6 };
 static const uint32_t TXS = 0x200, RXS = 0xA00;
-static void post_rx(const std::vector<uint8_t>& f) {     // Main: a frame (with an FCS) into the next RX slot
+static void post_rx(const std::vector<uint8_t>& f) {     // Main: a frame, its FCS appended, into the next RX slot
 	uint64_t w = mbx[RXW];
 	uint32_t s = RXS + 0x100 * (w % 16);
-	std::vector<uint8_t> b(f); b.resize((b.size() + 7) & ~7u);
+	std::vector<uint8_t> b(f);
+	for (int i = 0; i < 4; i++) b.push_back(0xC0 + i);
+	size_t n = b.size();
+	b.resize((b.size() + 7) & ~7u);
 	for (size_t i = 0; i < b.size(); i += 8) {
 		uint64_t d = 0;
 		for (int j = 7; j >= 0; j--) d = d << 8 | b[i + j];
 		mbx[s + 1 + i / 8] = d;
 	}
-	mbx[s] = f.size();
+	mbx[s] = n;
 	mbx[RXW] = w + 1;
 }
 static std::vector<uint8_t> tx_slot(uint64_t i) {
@@ -99,13 +110,13 @@ static std::vector<uint8_t> tx_slot(uint64_t i) {
 }
 
 static const uint8_t MYMAC[6] = { 0x08, 0x00, 0x09, 0x12, 0x34, 0x56 };
+static const uint8_t BC6[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 static std::vector<uint8_t> frame(const uint8_t* da, int len, int seed) {
 	std::vector<uint8_t> f(len);
 	for (int i = 0; i < len; i++) f[i] = i < 6 ? da[i] : i < 12 ? 0x20 + i : (uint8_t)(seed * 7 + i * 13);
 	return f;
 }
 
-static const uint32_t SCP = 0x17A0, ISCP = 0x17B4, SCB = 0x17BC;
 static void scb_cmd(uint16_t c) { w16(SCB + 2, c); wr(8, 1); run(2000); }
 
 int main(int argc, char** argv) {
@@ -163,6 +174,72 @@ int main(int argc, char** argv) {
 	expect("interrupts", irq_edges, 1);
 	scb_cmd(0xF000);
 	expect("SCB status acked", r16(SCB), 0x0020);
+
+	// the ROM's "Trying LAN": hardware reset, self-test, alternative SCP, CA; configure 0x2E, IA,
+	// RU start on 10 RFDs (size 14) + 10 RBDs (256 bytes); configure 0x6E + a 60-byte frame; 0xEE + another
+	wr(0, 1); run(50);
+	port(0x1001); run(500); port(0x17A2); wr(8, 1); run(1000);
+	expect("ROM: init status", r16(SCB) >> 12, 0xA);
+	scb_cmd(0xA000);
+	static const uint8_t rcfg[12] = { 0x8C, 0xC8, 0x00, 0x2E, 0x00, 0x60, 0x00, 0xF2, 0x00, 0x00, 0x40, 0xFD };
+	auto rom_cb = [](uint16_t cmd, std::function<void(uint32_t)> body) {
+		uint32_t c = 0x1F00;
+		memset(&mem[c], 0, 0x80);
+		w16(c, 0); w16(c + 2, 0x8000 | cmd); wp(c + 4, 0xFFFFFFFF);
+		body(c);
+		wp(SCB + 4, c);
+		w16(SCB + 2, (mem[SCB + 2] << 8 | mem[SCB + 3]) | 0x0100); wr(8, 1); run(3000);
+		uint16_t st = r16(c);
+		scb_cmd(r16(SCB) & 0xF000);
+		return st;
+	};
+	auto rom_conf = [&](uint8_t b3) {
+		return rom_cb(2, [&](uint32_t c) { for (int i = 0; i < 12; i++) w8(c + 8 + i, i == 3 ? b3 : rcfg[i]); });
+	};
+	expect("ROM: configure", rom_conf(0x2E), 0xA000);
+	expect("ROM: IA setup", rom_cb(1, [](uint32_t c) { memcpy(&mem[c + 8], MYMAC, 6); }), 0xA000);
+	for (int n = 0; n < 10; n++) {
+		uint32_t r = 0x800 + 0x20 * n, b = 0x940 + 0x20 * n;
+		w16(r, 0); w16(r + 2, n == 9 ? 0x8008 : 0x0008); wp(r + 4, n == 9 ? 0x800 : r + 0x20);
+		wp(r + 8, n == 0 ? 0x940 : 0xFFFFFFFF); w16(r + 12, 0); w16(r + 14, 14);
+		w16(b, 0); wp(b + 4, n == 9 ? 0x940 : b + 0x20); wp(b + 8, 0xA80 + 0x100 * n); w16(b + 12, n == 9 ? 0x8100 : 0x100);
+	}
+	wp(SCB + 8, 0x800);
+	w16(SCB + 2, 0x0010); wr(8, 1); run(2000);
+	expect("ROM: RU state ready when the command cleared", stat_at_clear >> 4 & 0xF, 4);
+	std::vector<uint8_t> lf(60, 0x55);
+	memcpy(&lf[0], MYMAC, 6); memcpy(&lf[6], MYMAC, 6); lf[12] = 0x08; lf[13] = 0x00;
+	auto rom_tx = [&](const std::vector<uint8_t>& f) {
+		memcpy(&mem[0x1E00], f.data(), f.size());
+		return rom_cb(4, [&](uint32_t c) {
+			w16(c + 2, 0x800C); wp(c + 8, c + 0x40); w16(c + 12, 0);
+			w16(c + 0x40, 0x8000 | f.size()); wp(c + 0x44, 0xFFFFFFFF); wp(c + 0x48, 0x1E00);
+		});
+	};
+	expect("ROM: configure internal loopback", rom_conf(0x6E), 0xA000);
+	expect("ROM: transmit", rom_tx(lf), 0xA000);
+	expect("ROM: RFD 0x800 status", r16(0x800), 0xA000);
+	expect("ROM: RFD 0x800 count", r16(0x80C) & 0x3FFF, 14);
+	expect("ROM: RFD source address", memcmp(&mem[0x816], MYMAC, 6), 0);
+	expect("ROM: RBD 0x940 count", r16(0x940), 0xC000 | 46);
+	expect("ROM: frame", memcmp(&mem[0x810], lf.data(), 14) || memcmp(&mem[0xA80], lf.data() + 14, 46), 0);
+	expect("ROM: RFD 0x820 told its RBD", rp(0x828), 0x960);
+	expect("ROM: configure external loopback", rom_conf(0xEE), 0xA000);
+	lf[20] = 0x11;
+	expect("ROM: transmit 2", rom_tx(lf), 0xA000);
+	expect("ROM: RFD 0x820 status", r16(0x820), 0xA000);
+	expect("ROM: RFD 0x820 RBD", rp(0x828), 0x960);
+	expect("ROM: frame 2", memcmp(&mem[0xB80], lf.data() + 14, 46), 0);
+	expect("ROM: configure", rom_conf(0x2E), 0xA000);
+	w16(SCB + 2, 0x0040); wr(8, 1); run(2000);
+	expect("ROM: RU idle after the abort", stat_at_clear >> 4 & 0xF, 0);
+	scb_cmd(r16(SCB) & 0xF000);
+	// a short frame to the bridge is padded (configure byte 11 LNGFLD = 0)
+	uint64_t txp = mbx[TXW];
+	std::vector<uint8_t> arp = frame(BC6, 42, 9);
+	expect("ROM: short transmit", rom_tx(arp), 0xA000);
+	std::vector<uint8_t> arp60(arp); arp60.resize(60, 0);
+	expect("ROM: padded to 60", tx_slot(txp) == arp60, 1);
 
 	// configure as Linux (no loopback, CRC in memory), RFD ring with RBDs, frames from the bridge
 	for (int i = 0; i < 14; i++) w8(0x2028 + i, cfg[i]);
