@@ -17,7 +17,8 @@
 // (loopback, no-source-insertion, promiscuous, broadcast disable, padding,
 // CRC-in-memory kept), multicast setup (every multicast frame is taken),
 // transmit (the TCB's own data from +16, then in the flexible mode its TBD
-// chain; padded to 60 bytes when configured), TDR (link OK), dump, diagnose
+// chain; the station address inserted after the destination unless NO SRC
+// ADD INS; padded to 60 bytes when configured), TDR (link OK), dump, diagnose
 // (passed), each completed C|OK. The receive unit fills RFDs {+0 status, +2
 // command, +4 link, +8 RBD, +12 count, +14 size, +16 data}, in the flexible
 // mode continuing into RBDs {+0 count, +4 next, +8 buffer, +12 size}: the
@@ -82,7 +83,7 @@ module i82596 (
         S_RXP1, S_RXP2, S_RXP3, S_RXP4,
         S_RX0, S_RX1, S_RX2, S_RX3, S_RX4, S_RX5, S_RX9, S_RX10, S_RX11, S_RX12, S_RX13,
         S_RB0, S_RB2, S_RB3, S_RB4, S_RB5, S_RB6,
-        S_GATHER, S_GATH2, S_SCAT, S_SCAT2, S_SCAT3
+        S_GATHER, S_GATH2, S_SAI, S_SCAT, S_SCAT2, S_SCAT3
     } st_e;
     st_e st, ret, nret, cret, rxret;
 
@@ -494,7 +495,15 @@ module i82596 (
                         fb_we <= 1'b1; fb_wa <= fb_len; fb_wd <= f8; fb_len <= fb_len + 11'd1;
                     end
                     c_a <= c_a + 32'd1; c_n <= c_n - 14'd1;
-                    st <= S_GATHER;
+                    st <= !no_sai && fb_len == 11'd5 ? S_SAI : S_GATHER;
+                end
+                // source address insertion (configure byte 3 bit 3 = 0, as HP-UX's lan2 has it):
+                // the station address goes in after the destination
+                S_SAI: begin
+                    logic [2:0] i;
+                    i = 3'(fb_len - 11'd6);
+                    fb_we <= 1'b1; fb_wa <= fb_len; fb_wd <= mac[47 - 8 * i -: 8]; fb_len <= fb_len + 11'd1;
+                    if (fb_len == 11'd11) st <= S_GATHER;
                 end
                 // ---- fbuf from fb_pos -> memory at c_a, up to c_n bytes (sc_n counts them): bytes
                 // shifted into sg_dw, written a doubleword at a time (a partial one padded out)

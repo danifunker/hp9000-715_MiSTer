@@ -310,6 +310,26 @@ int main(int argc, char** argv) {
 	expect("TX frame 2", tx_slot(txw0 + 1) == t2, 1);
 	expect("SCB status CX CNA, CU idle", r16(SCB) & 0xFF00, 0xA000);
 
+	// source address insertion (configure byte 3 bit 3 = 0, HP-UX's lan2): the frame in memory is
+	// destination + type + data, on the wire destination + station address + type + data
+	for (int i = 0; i < 14; i++) w8(0x2028 + i, cfg[i]);
+	w8(0x2028 + 3, 0x26); w8(0x2028 + 11, 0xFF);
+	w16(0x2020, 0); w16(0x2022, 0x8002); wp(SCB + 4, 0x2020);
+	scb_cmd(0x0100); scb_cmd(r16(SCB) & 0xF000);
+	std::vector<uint8_t> sarp(BC6, BC6 + 6);
+	sarp.push_back(0x08); sarp.push_back(0x06);
+	for (int i = 0; i < 40; i++) sarp.push_back(i);
+	memcpy(&mem[0x20300], sarp.data(), sarp.size());
+	w16(0x6000, 0); w16(0x6002, 0x800C); wp(0x6004, 0xFFFFFFFF); wp(0x6008, 0x6100); w16(0x600C, 0);
+	w16(0x6100, 0x8000 | sarp.size()); wp(0x6104, 0xFFFFFFFF); wp(0x6108, 0x20300);
+	wp(SCB + 4, 0x6000);
+	txw0 = mbx[TXW];
+	scb_cmd(0x0100); run(20000);
+	std::vector<uint8_t> wire(BC6, BC6 + 6);
+	wire.insert(wire.end(), MYMAC, MYMAC + 6);
+	wire.insert(wire.end(), sarp.begin() + 6, sarp.end());
+	expect("TX with the source address inserted", tx_slot(txw0) == wire, 1);
+
 	printf("%s: %d failure(s), %llu cycles\n", fails ? "FAIL" : "PASS", fails, (unsigned long long)cyc);
 	delete t;
 	return fails ? 1 : 0;
