@@ -408,7 +408,10 @@ module hp715 #(
     // (aux = the kind, rtl/lasi/i82596.sv dbg_*), 18 a system call's return
     // (the first user-mode instruction retired after it -- HP-UX returns by a
     // privilege-lowering branch, not RFI: addr = r28, the value returned; data
-    // = {r22, the error number, the instruction's IAOQ}). Each
+    // = {r22, the error number, the instruction's IAOQ}), 19 a user-mode
+    // control-flow discontinuity after the one-shot trigger fired (a taken
+    // branch, a return, a trap return: addr = the instruction before, data =
+    // {the instruction reached, its word}) -- a loop's exact path. Each
     // source has a one-deep slot; the lowest-numbered full slot goes out
     // each cycle.
     //
@@ -435,8 +438,10 @@ module hp715 #(
     logic [7:0]  s_dstat, s_sstat0;
     logic        ev_ack_q, ev_irq_q, ev_dec_q;
     logic [32:0] ev_line_q;
-    logic [13:0] ev_full;
-    logic [111:0] ev_slot [14];
+    logic [14:0] ev_full;
+    logic [111:0] ev_slot [15];
+    logic [31:0] ev_piaoq;             // the last retired instruction's IAOQ
+    logic        ev_pvalid;
     logic        ev_shot;              // one-shot mode armed (Pause / dbg_shot[49])
     logic [16:0] ev_shot_cnt;
     logic [15:0] ev_trig_k;            // matching system calls seen
@@ -461,11 +466,19 @@ module hp715 #(
             5'd28: sc_r28 <= c_gr_data1; default: ; endcase
     end
     always_ff @(posedge clk) begin
-        logic [13:0]  set;
-        logic [111:0] e [14];
+        logic [14:0]  set;
+        logic [111:0] e [15];
         logic         shot_key, rfi;
         set = '0;
-        for (int i = 0; i < 14; i++) e[i] = '0;
+        for (int i = 0; i < 15; i++) e[i] = '0;
+        // control flow in user mode after the trigger: every retired instruction not at the previous one + 4
+        if (dbg_retire) begin
+            ev_piaoq <= dbg_iaoq_f; ev_pvalid <= 1'b1;
+            if (ev_pvalid && ev_post != 14'd0 && dbg_iaoq_f[1:0] == 2'b11 && dbg_iaoq_f[31:2] != ev_piaoq[31:2] + 30'd1) begin
+                set[14] = 1; e[14] = {8'd19, 8'd0, ev_piaoq, dbg_iaoq_f, dbg_insn};
+            end
+        end
+        if (!rst_n) ev_pvalid <= 1'b0;
         rfi = dbg_retire && dbg_iaoq_f[1:0] == 2'b11 && sc_kern;             // back in user mode
         shot_key = ps2_key[10] != ev_key_q && ps2_key[9] && ps2_key[8] && ps2_key[7:0] == 8'h77;
         ev_key_q <= ps2_key[10];
@@ -547,13 +560,13 @@ module hp715 #(
         if (!reset) begin
             logic sent;
             sent = 1'b0;
-            for (int i = 0; i < 14; i++) begin
+            for (int i = 0; i < 15; i++) begin
                 if (ev_full[i] && !sent) begin
                     dbg_ev_valid <= 1'b1; dbg_ev <= ev_slot[i]; sent = 1'b1;
                     ev_full[i] <= 1'b0;
                 end
             end
-            for (int i = 0; i < 14; i++) if (set[i]) begin ev_full[i] <= 1'b1; ev_slot[i] <= e[i]; end
+            for (int i = 0; i < 15; i++) if (set[i]) begin ev_full[i] <= 1'b1; ev_slot[i] <= e[i]; end
         end
     end
 
