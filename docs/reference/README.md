@@ -32,3 +32,7 @@ this file says where they came from.
 - `Lasi_ers` text garbles every bit-field diagram; cite the PDF pages.
 - The 715 service handbook's "715/64-100 block diagram" (Fig 6-3) is the 712's.
 - `docs/review/01`..`05` grade every document for relevance to the 715/64-100.
+
+## HP-UX 11i v1 (12/2004) media (2026-10-11)
+
+`hpux11i-200412/` (ignored): the "HP Instant Information" documentation ISO from the user's NAS (`smb://daninas.local/Software/HP9000/HP-UX11i v1 2004-12`), which also holds the TCOE (workstation) Core OS DVD copied to the MiSTer as `games/HP9K715/hpux11i_tcoe_200412.iso` -- the 12/2004 release supports the 715/64 under TCOE/MTOE.
