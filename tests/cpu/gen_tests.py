@@ -540,6 +540,33 @@ def gen_branch(rng):
                "\tbe%s\t0(%%sr4, %%r3)" % nul, None)
         uncond("ble%s" % nul, ["\tmtsp\t%r0, %sr4", "\tldil\tL%1f, %r3", "\tldo\tR%1f(%r3), %r3"],
                "\tble%s\t0(%%sr4, %%r3)" % nul, "%r31")
+    # BV/BLR with reserved bits 19:29 / 31 set: executed, the bits ignored
+    # (ACD p.5-2; HP-UX 11i's ISL returns with PA 2.0's bve (rp) = bv r0(rp)
+    # with bit 19 set, cpu-requests #9). QEMU only decodes the bve shape
+    # (bit 19 alone, x = 0): the others trap 8 there (QEMU_REF_BUGS bv-blr-rv)
+    body, ins = [], []
+    for rv, nul in ((0x1000, 0), (0x1000, 1), (0x1FFD, 0), (0x0040, 1), (0x0FFC, 0)):
+        word = 0xE860C000 | rv | (nul << 1)                 # bv %r0(%r3) + rv
+        body += ["\tldil\tL%1f, %r3", "\tldo\tR%1f(%r3), %r3", "\tldi\t0, %r6",
+                 "\t.word\t0x%08x" % word,
+                 "\tdepi\t-1, 31, 1, %r6",
+                 "\tdepi\t-1, 30, 1, %r6",
+                 "\tb,n\t2f",
+                 "1:\tdepi\t-1, 29, 1, %r6",
+                 "2:\tstw,ma\t%r6, 4(%r9)", "\tstw,ma\t%r3, 4(%r9)", "\tstw,ma\t%r0, 4(%r9)"]
+        ins.append({"word": word, "qemu_ok": rv == 0x1000})
+    suite.add("bv-rv", len(ins), 3, body, ins)
+    body, ins = [], []
+    for idx, rv in ((0, 0x1000), (2, 0x1FFD), (3, 0x0040), (1, 0x0FFC)):
+        word = 0xE9644000 | rv                              # blr %r4, %r11 + rv
+        body += ["\tldi\t%d, %%r4" % idx, "\tldi\t0, %r6",
+                 "\t.word\t0x%08x" % word,
+                 "\tdepi\t-1, 31, 1, %r6"]
+        for k in range(4):
+            body += ["\tb\t2f", "\tdepi\t-1, %d, 1, %%r6" % (27 - k)]
+        body += ["2:\tstw,ma\t%r6, 4(%r9)", "\tstw,ma\t%r11, 4(%r9)", "\tstw,ma\t%r4, 4(%r9)"]
+        ins.append({"index": idx, "word": word, "qemu_ok": False})
+    suite.add("blr-rv", len(ins), 3, body, ins)
     # blr: target = (address of blr) + 8 + 8*index; slots of two insns each
     body, ins = [], []
     for idx in range(4):

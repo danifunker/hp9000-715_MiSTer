@@ -450,14 +450,12 @@ module pa_decode
             case (c3)
                 3'd0: begin c.br = BR_BL;   c.disp = br_disp17(insn); c.rt_we = 1'b1; c.link = 1'b1; end
                 3'd1: begin c.br = BR_GATE; c.disp = br_disp17(insn); c.rt_we = 1'b1; c.link = 1'b1; end
-                3'd2: begin
-                    c.br = BR_BLR; c.ra = f11_15; c.rt_we = 1'b1; c.link = 1'b1;
-                    if (insn[12:2] != 0 || insn[0]) c.illegal = 1'b1;
-                end
-                3'd6: begin
-                    c.br = BR_BV; c.ra = f11_15; c.rb = f6_10;
-                    if (insn[12:2] != 0 || insn[0]) c.illegal = 1'b1;
-                end
+                // BLR/BV: bits 19:29 and 31 are reserved and ignored (ACD p.5-2
+                // "processors must ignore Reserved instruction fields"); HP-UX 11i's
+                // ISL returns with PA 2.0's bve (rp) = bv r0(rp) with bit 19 set
+                // (cpu-requests #9). 3A/3-5 and 3A/7 (PA 2.0 only) stay trap 8.
+                3'd2: begin c.br = BR_BLR; c.ra = f11_15; c.rt_we = 1'b1; c.link = 1'b1; end
+                3'd6: begin c.br = BR_BV;  c.ra = f11_15; c.rb = f6_10; end
                 default: c.illegal = 1'b1;
             endcase
         end

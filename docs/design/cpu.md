@@ -489,7 +489,7 @@ everything (no RTL); Test is `todo` (tests/cpu, sec. 7).
 | Undefined DIAG encoding | **trap 8** at PL 0 (Q7 settled by review 07: no reachable undefined DIAG in either OS on a correctly identified PCX-L; trap 8 makes HP-UX's PCX-T misidentification visible). At PL != 0 the privilege check comes first (trap 10), as for every DIAG. The simulator logs every DIAG executed outside the ROM | ERS s.8.3.9 lists every defined one |
 | **Nullified** undefined or PA 2.0 opcode | never traps (nullification is decided before the decode-time traps are raised): HP-UX 10.20 has ~30 nullified LDD/STD words in generic PA 1.1 paths (review 07 s.3.4) | ERS s.5.3.5 (group 3 traps never occur on nullified instructions) |
 | Reserved instruction fields ("rv", ERS "X" bits) | ignored | ACD p.5-2; ERS s.8.3.9 "assume X == 0" |
-| PA 2.0-only forms (bit 26 of 02 set, `,*`/`,d` completers, LDD/STD/LDDA/STDA/LDCD/STDBY, the 14/16/17/1C/1E/1F long-displacement loads/stores, FMPYFADD 2E, CMPB/CMPIB doubleword 27/2F/3B, EXTRD/DEPD 36/3C/3D, MAX-2 3E, BVE, B,L,PUSH, B,L long, CLRBTS/POPBTS/PUSHBTS, MFIA, MTSARCM, IxTLBT, PxTLB,L, FDC short, FIC 4F, unsigned FCNV, FNEG/FNEGABS) | trap 8 (or unimplemented exception for 0C/0E forms) -- never execute them | PA 1.1 tables; QEMU wrongly executes several of them (sec. 7.3) |
+| PA 2.0-only forms (bit 26 of 02 set, `,*`/`,d` completers, LDD/STD/LDDA/STDA/LDCD/STDBY, the 14/16/17/1C/1E/1F long-displacement loads/stores, FMPYFADD 2E, CMPB/CMPIB doubleword 27/2F/3B, EXTRD/DEPD 36/3C/3D, MAX-2 3E, BVE,L, B,L,PUSH, B,L long, MFIA, MTSARCM, IxTLBT, PxTLB,L, FDC short, FIC 4F, unsigned FCNV, FNEG/FNEGABS) | trap 8 (or unimplemented exception for 0C/0E forms) -- never execute them. **Except** forms that are a PA 1.1 instruction with reserved bits set: BVE (= BV with bit 19) and CLRBTS/POPBTS/PUSHBTS (= BLR r0,r0 with bit 31) execute as that instruction (4.3.11, cpu-requests #9) | PA 1.1 tables; QEMU wrongly executes several of them (sec. 7.3) |
 | Privileged instruction at PL != 0 | trap 10 before any other effect | ACD p.4-21 |
 | MAX-1 in QEMU | QEMU refuses MAX-1 unless PA 2.0 (Q translate.c:3099-3143); **wrong for the 7100LC** -- MAX-1 is a PCX-L feature (ERS s.2.1.4) | |
 
@@ -759,11 +759,16 @@ traps them as illegal (its `bb_*` patterns require bit 17 = 1, Q insns.decode
 | BLE,n wd(sr,b) | 39 | br | GR31 <- IAOQ_Back + 4, SR0 <- IASQ_Back | planned | todo |
 | BL,n target,t | 3A / 0 (bits 16:18) | br | always predicted taken | planned | todo |
 | GATE,n target,t | 3A / 1 | br | trap 8 if PSW.B; privilege promotion from the I-LAB type | planned | todo |
-| BLR,n x,t | 3A / 2, bits 19:29 = 0, bit 31 = 0 | br | | planned | todo |
-| BV,n x(b) | 3A / 6, bits 19:29 = 0, bit 31 = 0 | br | | planned | todo |
+| BLR,n x,t | 3A / 2 (bits 19:29, 31 reserved: ignored) | br | | done | branch `blr`, `blr-rv` |
+| BV,n x(b) | 3A / 6 (bits 19:29, 31 reserved: ignored) | br | | done | branch `bv`, `bv-rv` |
 
-3A/3, 3A/4, 3A/5, 3A/7 and BLR/BV with non-zero reserved bits -> trap 8 (PA 2.0
-B,L,PUSH / B,L long / BVE / CLRBTS ...).
+3A/3, 3A/4, 3A/5 and 3A/7 -> trap 8 (PA 2.0 B,L,PUSH / B,L long / BVE,L ...).
+BLR/BV ignore their reserved bits (ACD p.5-2, the general rule in 4.1):
+HP-UX 11i v1's ISL returns with PA 2.0's `bve (rp)` = `bv r0(rp)` with bit 19
+set, and HP shipped it for PA 1.1 machines (cpu-requests #9, 2026-10-11).
+PA 2.0's CLRBTS/PUSHBTS/POPBTS (3A/2 with bit 31 = 1) therefore execute as BLR
+with x = 0, t = 0 (target IAOQ_Front + 8 = sequential execution, as QEMU's
+`nopbts`) -- no PA 1.1 binary contains them.
 
 #### 4.3.12 Floating point (ACD ch.6, tables D-10, D-12..D-20; ERS ch.7)
 

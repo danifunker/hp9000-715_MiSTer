@@ -1409,6 +1409,17 @@ QEMU_REF_BUGS = [
                 "generator's expectations",
      "manual": "ACD p.4-25, p.5-?? (CLDW/CLDD/CSTW/CSTD, COPR, SPOPn)",
      "qemu": "target/hppa/insns.decode (the uid field is not decoded for 09/0B/0C)"},
+    {"id": "bv-blr-rv",
+     "suite": "branch",
+     "groups": r"^(bv|blr)-rv$",
+     "vector": lambda v: not v["qemu_ok"],
+     "traps_delta": -1,                      # QEMU traps once per such vector
+     "summary": "BV/BLR with reserved bits 19:29 or 31 set execute with the bits "
+                "ignored (HP's 11i ISL uses bve (rp) on PA 1.1 machines); QEMU "
+                "decodes only the bve shape (bit 19, x = 0) and traps 8 on the rest",
+     "manual": "ACD p.5-2 (Reserved Instruction Fields: 'processors must ignore'); "
+               "docs/design/cpu.md 4.3; cpu-requests #9",
+     "qemu": "target/hppa/insns.decode blr/bv (reserved bits must be 0), bve"},
     {"id": "pa20-majors",
      "suite": "trap",
      "groups": r"^illegal$",
