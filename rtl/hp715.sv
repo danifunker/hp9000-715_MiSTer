@@ -431,6 +431,10 @@ module hp715 #(
     // runs on until the K-th (dbg_shot[47:32]) system call whose number is
     // dbg_shot[15:0] (and, when dbg_shot[48], whose r26 is dbg_shot[31:16]),
     // then freezes 60000 events later (every interruption recorded meanwhile): the ring holds what led up to it and the path after it.
+    // dbg_shot[15:0] = 0xFFFE is the flow trigger: user-mode control flow
+    // outside the shared-library area (event 19) and every interruption are
+    // recorded from the start, and the first flow event whose target is the
+    // address {dbg_shot[31:16], dbg_shot[47:32]} triggers a 20000-event tail.
     // Pause re-arms (the counts restart). The OSD status word carries
     // dbg_shot (HP9K715.sv: status[127:64]; tools/mister/board.sh trig).
     logic        s_dec;
@@ -468,14 +472,21 @@ module hp715 #(
     always_ff @(posedge clk) begin
         logic [14:0]  set;
         logic [111:0] e [15];
-        logic         shot_key, rfi;
+        logic         shot_key, rfi, flow_mode, flow_hit;
+        logic [31:0]  flow_tgt;
+        flow_tgt = {dbg_shot[31:16], dbg_shot[47:32]};
         set = '0;
         for (int i = 0; i < 15; i++) e[i] = '0;
-        // control flow in user mode after the trigger: every retired instruction not at the previous one + 4
+        // control flow in user mode after the trigger (or, in the flow-trigger mode, from the start, outside
+        // the shared libraries): every retired instruction not at the previous one + 4
+        flow_mode = dbg_shot[15:0] == 16'hFFFE;
+        flow_hit = 1'b0;
         if (dbg_retire) begin
             ev_piaoq <= dbg_iaoq_f; ev_pvalid <= 1'b1;
-            if (ev_pvalid && ev_post != 16'd0 && dbg_iaoq_f[1:0] == 2'b11 && dbg_iaoq_f[31:2] != ev_piaoq[31:2] + 30'd1) begin
+            if (ev_pvalid && dbg_iaoq_f[1:0] == 2'b11 && dbg_iaoq_f[31:2] != ev_piaoq[31:2] + 30'd1 &&
+                (ev_post != 16'd0 || (flow_mode && (dbg_iaoq_f[31:28] != 4'hC || ev_piaoq[31:28] != 4'hC)))) begin
                 set[14] = 1; e[14] = {8'd19, 8'd0, ev_piaoq, dbg_iaoq_f, dbg_insn};
+                flow_hit = flow_mode && dbg_iaoq_f[31:2] == flow_tgt[31:2];
             end
         end
         if (!rst_n) ev_pvalid <= 1'b0;
@@ -524,7 +535,7 @@ module hp715 #(
             if (!n_dbg_v) set[3] = 1'b0;
             // (an external interrupt taken in user mode stays: its IIAOQ samples a spinning process's PC;
             // after the trigger every interruption stays)
-            if (ev_post == 16'd0 &&
+            if (ev_post == 16'd0 && !flow_mode &&
                 ((dbg_trap_vec == 6'd4 && dbg_iaoq_f[1:0] != 2'b11) || dbg_trap_vec == 6'd6 || dbg_trap_vec == 6'd7 || dbg_trap_vec == 6'd15 ||
                  dbg_trap_vec == 6'd16 || dbg_trap_vec == 6'd17 || dbg_trap_vec == 6'd20 || dbg_trap_vec == 6'd21 ||
                  dbg_trap_vec == 6'd26)) set[7] = 1'b0;
@@ -546,6 +557,8 @@ module hp715 #(
                 end else if (ev_post != 16'd0) begin                      // triggered: 60000 more
                     if (ev_post == 16'd1) ev_frozen <= 1'b1;
                     ev_post <= ev_post - 16'd1;
+                end else if (flow_mode) begin
+                    if (flow_hit) ev_post <= 16'd19999;
                 end else if (set[11] && sc_r22[15:0] == dbg_shot[15:0] && (!dbg_shot[48] || sc_r26[15:0] == dbg_shot[31:16])) begin
                     if (ev_trig_k == dbg_shot[47:32]) ev_post <= 16'd59999;
                     else ev_trig_k <= ev_trig_k + 16'd1;
