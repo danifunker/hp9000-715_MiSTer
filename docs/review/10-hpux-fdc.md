@@ -128,6 +128,11 @@ failure code is `(sub-test result << 8) + step`.
 
 With fastboot on (the shipped EEPROMs) the ROM does not touch the floppy.
 
+**Result (2026-10-11, romsim at the real CR16 rate, system.md 11):** all seven
+sub-tests pass with `rtl/lasi/lasi_fdc.sv`; the list of failed items is HIL,
+RS232 2 and Parallel (stubs P-001, P-010), no Floppy. `make -C verilator
+tb_fdc` replays the same accesses.
+
 ## 6. The register map as built
 
 Page A (0xF010A000), byte registers, the same byte in every lane:

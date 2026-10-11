@@ -198,7 +198,7 @@ for PS/2, R06b).
 | +0x7000 | 82596 LAN | `rtl/lasi/i82596.sv` (2026-10-10, S-027): reset, PORT, CA; the SCB, the command unit (IA setup, configure, transmit with TBD chains, TDR ...) and the receive unit (simplified and flexible RFDs, RBD lists) as DMA on the MIOC's `dma_*` port (after Harmony and the 53C710 in `hp715.sv`'s arbiter); frames to Main_MiSTer's Ethernet bridge (the DDR3 mailbox at 0x1FF0_0000, `ddr3_port.sv` `nb_*`; OSD Network) or, in loopback, straight back; IRQ = IPR bit 8, IORESET bit 1. `make -C verilator tb_i82596` | HW 4.6; Lasi ERS 4; R06 4.3 |
 | +0x8000 | PS/2 keyboard (+0x000) and mouse (+0x100), mirrored every 0x200 | `lasi_ps2.sv`: ID, RESET, 4-deep RX FIFO, 1-deep TX, CONTROL (ENBL, LPBXR, DIAG), STATUS (RBNE, TBNE, CMPINTR), loopback; device side to a keyboard/mouse model | Lasi ERS 9; HW 4.7; R06b 1 |
 | +0x9000 | RTC | 32-bit seconds counter, 1 Hz from the board clock, write clears the prescaler; set from the MiSTer RTC at power-up *(later)* | Lasi ERS 8 |
-| +0xA000, +0xD000 | floppy and its DMA | absent: registers read 0 (P-004) | |
+| +0xA000, +0xD000 | floppy (WD37C65C) and its DMA | `rtl/lasi/lasi_fdc.sv` (2026-10-11, S-028): LASI's 4-byte FIFO, control/status, FDAR and DMA enable, the DMA in both directions (one word per byte, top lane) on the MIOC's `dma_*` port (after Harmony in `hp715.sv`'s arbiter), DMA_IRQ at offsets 0x1FF/0x3FF; a 765A command layer **with no drive** (RECALIBRATE ends in equipment check, reads/writes end at once with missing address mark; no data phase), QEMU's 82077 INT rules; IRQ = IPR bit 20, IORESET bit 5, unit reset at +0x000. HP-UX 11i's pflop probe finds no drive; `make -C verilator tb_fdc` | Lasi ERS 10; HW 4.9; review 10 |
 | +0xB000 | clock registers | four words of storage | HW 4.2 |
 | +0xC000 | PCR, ERRLOG (0), VER (0), IORESET, AMR | storage; IORESET bits hold their units in reset; PCR bit 1 does nothing on a 715 (BOOT 7 item 13) | HW 4.1 |
 | +0xE000-0xFFFFF | unassigned | read 0, writes ignored | Lasi ERS app. A |
@@ -349,6 +349,15 @@ loads the same file through the same loader (`verilator/sim.v`).
   after a restore (`--gsctrace`, `--l1trace`, `--flags-from`), and a
   simulator-only CR16 speed-up (`--turbo N`, default after 30M cycles: the
   ROM's long delays are CR16 loops; selftest1's timer test needs the real
-  rate).
+  rate). **The I/O self-test (fastboot off) also needs the real rate**: with
+  `--turbo` the ROM's waits are too short for the RTC to tick and for
+  Harmony's loopback samples, so "Audio" and "Real Time Clock" fail, and the
+  audio interrupt that arrives late sits in IRR and fails the floppy test's
+  first check (IRR == 0) -- "Floppy" too. Recipe (2026-10-11): an EEPROM
+  with fastboot off (`mkeeprom.py bootstrap --fastboot 0 -o scratch/slow.eep
+  --hex scratch/slow.hex`), `--turbo 15 --save-on '0x06.C2EF' FILE` (the
+  checkpoint just before `io_selftest`, ~15 min), then `--restore FILE`
+  without `--turbo` to `BOOT_ADMIN>` (~140M cycles): only HIL and RS-232 2
+  (WAX, P-001) and Parallel (P-010) fail.
 * `tests/run-rom.sh`: boots the ROM headless and asserts milestones on the
   serial log and the chassis codes (BOOT 3.2).
