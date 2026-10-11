@@ -334,7 +334,12 @@ module hp715 #(
         .dma_req(ld_req), .dma_we(ld_we), .dma_addr(ld_addr), .dma_be(ld_be), .dma_wdata(ld_wdata),
         .dma_ack(ld_ack), .dma_rdata(dma_rdata),
         .nb_req(nb_req), .nb_we(nb_we), .nb_addr(nb_addr), .nb_wdata(nb_wdata), .nb_ack(nb_ack),
-        .nb_rdata(nb_rdata));
+        .nb_rdata(nb_rdata),
+        .dbg_valid(n_dbg_v), .dbg_aux(n_dbg_aux), .dbg_addr(n_dbg_addr), .dbg_data(n_dbg_data));
+    logic        n_dbg_v;
+    logic [7:0]  n_dbg_aux;
+    logic [31:0] n_dbg_addr;
+    logic [63:0] n_dbg_data;
 
     // ------------------------------------------------------------ floppy
     lasi_fdc #(.CLK_HZ(CLK_HZ), .SIM_FAST(SIM_FAST)) u_fdc (
@@ -396,7 +401,10 @@ module hp715 #(
     // = {I side, 3'b0, operation}, addr = the physical line {RPN, VA[11:0]},
     // data = {VA, 32'd0}; of a run of FDCE or FICE only the first), 13 a
     // byte on a PS/2 port (aux = {port, 1 = device to host}, data = the
-    // byte), 14 a key event from hps_io (data = ps2_key). Each
+    // byte), 14 a key event from hps_io (data = ps2_key), 16 the rest of a
+    // system call (addr = r2, the caller's return address into libc's stub;
+    // data = {r24, r23}, the third and fourth arguments), 17 an 82596 event
+    // (aux = the kind, rtl/lasi/i82596.sv dbg_*). Each
     // source has a one-deep slot; the lowest-numbered full slot goes out
     // each cycle.
     //
@@ -404,29 +412,46 @@ module hp715 #(
     // privileged-operation or privileged-register trap (8, 10, 11) the
     // recorder stops until the next reset, so the ring keeps what led up to
     // it (HP-UX's user processes dying of SIGILL on stale text, 2026-10-09).
+    //
+    // One-shot capture (2026-10-11, the 11i installer's stalls): Scroll Lock
+    // (set-2 code 0x7E, make) on the hps_io keyboard arms a filtered one-shot
+    // run -- only system calls (15, 16), interruptions other than the
+    // routine ones (4, 6, 7, 15, 16, 17, 20, 21), SCSI interrupts (3), keys
+    // (14) and 82596 events (17) are recorded, and after 65536 of them the
+    // recorder freezes. So the ring holds the first ~0.5 s of a loop that
+    // would otherwise overwrite its own start, pressed just before the step
+    // that stalls. Scroll Lock again re-arms (the count restarts).
     logic        s_dec;
     logic [31:0] s_dsp, s_ins, s_dsps;
     logic [7:0]  s_dstat, s_sstat0;
     logic        ev_ack_q, ev_irq_q, ev_dec_q;
     logic [32:0] ev_line_q;
-    logic [11:0] ev_full;
-    logic [111:0] ev_slot [12];
+    logic [12:0] ev_full;
+    logic [111:0] ev_slot [13];
+    logic        ev_shot;              // one-shot mode armed (Scroll Lock)
+    logic [16:0] ev_shot_cnt;
     logic        ev_key_q;
     logic [10:0] ev_freeze_cnt;
     logic        ev_freeze_arm, ev_frozen;
     logic [4:0]  ev_cop_q;
-    // r22/r25/r26 as last written (system-call number and arguments, event 15)
-    logic [31:0] sc_r22, sc_r25, sc_r26;
+    // r22/r25/r26 (and r2/r23/r24) as last written (system-call number and arguments, events 15/16)
+    logic [31:0] sc_r22, sc_r25, sc_r26, sc_r2, sc_r23, sc_r24;
     logic [1:0]  sc_pend;
     always_ff @(posedge clk) begin
-        if (c_gr_we[0]) case (c_gr_num0) 5'd22: sc_r22 <= c_gr_data0; 5'd25: sc_r25 <= c_gr_data0; 5'd26: sc_r26 <= c_gr_data0; default: ; endcase
-        if (c_gr_we[1]) case (c_gr_num1) 5'd22: sc_r22 <= c_gr_data1; 5'd25: sc_r25 <= c_gr_data1; 5'd26: sc_r26 <= c_gr_data1; default: ; endcase
+        if (c_gr_we[0]) case (c_gr_num0)
+            5'd2: sc_r2 <= c_gr_data0; 5'd22: sc_r22 <= c_gr_data0; 5'd23: sc_r23 <= c_gr_data0;
+            5'd24: sc_r24 <= c_gr_data0; 5'd25: sc_r25 <= c_gr_data0; 5'd26: sc_r26 <= c_gr_data0; default: ; endcase
+        if (c_gr_we[1]) case (c_gr_num1)
+            5'd2: sc_r2 <= c_gr_data1; 5'd22: sc_r22 <= c_gr_data1; 5'd23: sc_r23 <= c_gr_data1;
+            5'd24: sc_r24 <= c_gr_data1; 5'd25: sc_r25 <= c_gr_data1; 5'd26: sc_r26 <= c_gr_data1; default: ; endcase
     end
     always_ff @(posedge clk) begin
-        logic [11:0]  set;
-        logic [111:0] e [12];
+        logic [12:0]  set;
+        logic [111:0] e [13];
+        logic         shot_key;
         set = '0;
-        for (int i = 0; i < 12; i++) e[i] = '0;
+        for (int i = 0; i < 13; i++) e[i] = '0;
+        shot_key = ps2_key[10] != ev_key_q && ps2_key[9] && !ps2_key[8] && ps2_key[7:0] == 8'h7E;
         ev_key_q <= ps2_key[10];
         if (l_ps2_v) begin set[9] = 1; e[9] = {8'd13, 6'd0, l_ps2[9:8], 32'd0, 56'd0, l_ps2[7:0]}; end
         if (ps2_key[10] != ev_key_q) begin set[10] = 1; e[10] = {8'd14, 8'd0, 32'd0, 53'd0, ps2_key}; end
@@ -449,6 +474,15 @@ module hp715 #(
         // a system call: recorded two cycles after its trap, when the delay slot's r22 write has reached the mirror
         sc_pend <= {sc_pend[0], dbg_trap && dbg_trap_vec == 6'd7 && dbg_iaoq_f[31:2] == 30'h3000_0001 && dbg_iaoq_f[1:0] != 2'b00};
         if (sc_pend[1]) begin set[11] = 1; e[11] = {8'd15, 8'd0, sc_r22, sc_r26, sc_r25}; end
+        if (sc_pend[1]) begin set[12] = 1; e[12] = {8'd16, 8'd0, sc_r2, sc_r24, sc_r23}; end
+        if (n_dbg_v) begin set[3] = 1; e[3] = {8'd17, n_dbg_aux, n_dbg_addr, n_dbg_data}; end   // over a DMA event: the LAN's own view matters more
+        // the one-shot filter: system calls, the interesting interruptions, SCSI interrupts, keys, the LAN
+        if (ev_shot) begin
+            set[0] = 1'b0; set[1] = 1'b0; set[4] = 1'b0; set[5] = 1'b0; set[6] = 1'b0; set[8] = 1'b0; set[9] = 1'b0;
+            if (!n_dbg_v) set[3] = 1'b0;
+            if (dbg_trap_vec == 6'd4 || dbg_trap_vec == 6'd6 || dbg_trap_vec == 6'd7 || dbg_trap_vec == 6'd15 ||
+                dbg_trap_vec == 6'd16 || dbg_trap_vec == 6'd17 || dbg_trap_vec == 6'd20 || dbg_trap_vec == 6'd21) set[7] = 1'b0;
+        end
         // a whole-cache loop (FDCE/FICE, op 2 on either side) is recorded by its first operation only
         if (c_cop_valid) begin
             ev_cop_q <= {c_cop_i, c_cop};
@@ -460,7 +494,13 @@ module hp715 #(
         dbg_ev_valid <= 1'b0;
         if (!rst_n) begin
             ev_full <= '0; ev_freeze_arm <= 1'b0; ev_frozen <= 1'b0; ev_freeze_cnt <= '0;
+            ev_shot <= 1'b0; ev_shot_cnt <= '0;
         end else begin
+            if (shot_key) begin ev_shot <= 1'b1; ev_shot_cnt <= '0; ev_frozen <= 1'b0; ev_freeze_arm <= 1'b0; end
+            else if (ev_shot && !ev_frozen && |set) begin
+                if (ev_shot_cnt == 17'd65535) ev_frozen <= 1'b1;
+                else ev_shot_cnt <= ev_shot_cnt + 17'd1;
+            end
             if (dbg_trap && dbg_iaoq_f[1:0] == 2'b11 && !ev_freeze_arm
                 && (dbg_trap_vec == 6'd8 || dbg_trap_vec == 6'd10 || dbg_trap_vec == 6'd11)) begin
                 ev_freeze_arm <= 1'b1; ev_freeze_cnt <= 11'd1024;
@@ -472,13 +512,13 @@ module hp715 #(
         if (rst_n) begin
             logic sent;
             sent = 1'b0;
-            for (int i = 0; i < 12; i++) begin
+            for (int i = 0; i < 13; i++) begin
                 if (ev_full[i] && !sent) begin
                     dbg_ev_valid <= 1'b1; dbg_ev <= ev_slot[i]; sent = 1'b1;
                     ev_full[i] <= 1'b0;
                 end
             end
-            for (int i = 0; i < 12; i++) if (set[i]) begin ev_full[i] <= 1'b1; ev_slot[i] <= e[i]; end
+            for (int i = 0; i < 13; i++) if (set[i]) begin ev_full[i] <= 1'b1; ev_slot[i] <= e[i]; end
         end
     end
 

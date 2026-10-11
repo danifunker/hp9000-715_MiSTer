@@ -52,7 +52,17 @@ module i82596 (
     output logic [12:0] nb_addr,
     output logic [63:0] nb_wdata,
     input  logic        nb_ack,
-    input  logic [63:0] nb_rdata
+    input  logic [63:0] nb_rdata,
+    // debug events for the board's recorder (rtl/hp715.sv type 17): aux = 1
+    // PORT (addr = the PORT word), 2 CA (addr = the SCB, data = its command
+    // word), 3 a CB started (addr, data = {command, link}), 4 the SCB status
+    // written (data = {CX FR CNA RNR, CUS, RUS}), 5 a frame delivered into an
+    // RFD (addr, data = {count, EOF}), 6 a frame sent to the bridge (addr =
+    // length), 7 hardware reset taken
+    output logic        dbg_valid,
+    output logic [7:0]  dbg_aux,
+    output logic [31:0] dbg_addr,
+    output logic [63:0] dbg_data
 );
     localparam logic [31:0] NUL = 32'hFFFF_FFFF;
 
@@ -177,9 +187,14 @@ module i82596 (
     assign rdata = 32'd0;
     assign irq = |pub_ev && !irq_gap;
 
+    task automatic dbg(input logic [7:0] k, input logic [31:0] a, input logic [63:0] d);
+        dbg_valid <= 1'b1; dbg_aux <= k; dbg_addr <= a; dbg_data <= d;
+    endtask
+
     always_ff @(posedge clk) begin
         fb_we <= 1'b0;
         irq_gap <= 1'b0;
+        dbg_valid <= 1'b0;
         tick <= tick + 32'd1;
         if (rst || (rst_lan && !dma_req && !nb_req)) begin
             st <= S_BOOT; bk <= 3'd0; dma_req <= 1'b0; nb_req <= 1'b0;
@@ -247,6 +262,7 @@ module i82596 (
                 S_IDLE: begin
                     c_tv <= 1'b0;
                     if (hrst_pend) begin
+                        dbg(8'd7, 32'd0, 64'd0);
                         hrst_pend <= 1'b0; inited <= 1'b0; ev <= 4'd0; pub_ev <= 4'd0;
                         cus <= CU_IDLE; rus <= RU_IDLE; rb_v <= 1'b0;
                     end else if (port_pend) begin
@@ -264,6 +280,7 @@ module i82596 (
                 // ---- PORT: reset, self-test (signature 0, result 0 = passed), alternative SCP, dump
                 S_PORT: begin
                     st <= S_IDLE;
+                    dbg(8'd1, port_v, 64'd0);
                     case (port_v[3:0])
                         4'd0: hrst_pend <= 1'b1;
                         4'd1: begin
@@ -283,6 +300,7 @@ module i82596 (
                 // ---- a channel attention: the SCB command; the status written, then the command cleared
                 S_CA1: begin
                     scb_cmd <= f16;
+                    dbg(8'd2, scb, {48'd0, f16});
                     ev <= ev & ~f16[15:12];
                     if (f16[7]) wr16(scb, 5'd2, 16'd0, S_CARST);             // software reset
                     else st <= S_CA2;
@@ -317,6 +335,7 @@ module i82596 (
                 // ---- the SCB status word; then the interrupt (a gap if it was already up)
                 S_STAT: wr16(scb, 5'd0, {ev, 1'b0, cus, rus, 4'd0}, S_STAT2);
                 S_STAT2: begin
+                    dbg(8'd4, scb, {52'd0, ev, 1'b0, cus, rus});
                     pub_ev <= ev;
                     if (|(ev & ~pub_ev) && |pub_ev) irq_gap <= 1'b1;
                     st <= S_IDLE;
@@ -326,6 +345,7 @@ module i82596 (
                 S_CB1: begin cb_cmd <= f16; rd(cb, 5'd4, S_CB2); end
                 S_CB2: begin
                     cb_link <= f32;
+                    dbg(8'd3, cb, {16'd0, cb_cmd, f32});
                     k <= 4'd0;
                     case (cb_cmd[2:0])
                         3'd1: rd(cb, 5'd8, S_IA);
@@ -406,7 +426,7 @@ module i82596 (
                     end else st <= S_TXO2;
                 end
                 S_TXO4: nb(slot, 1'b1, {53'd0, fb_len}, S_TXO5);
-                S_TXO5: begin txw <= txw + 32'd1; nb(NB_TXW, 1'b1, {32'd0, txw + 32'd1}, S_CBF); end
+                S_TXO5: begin dbg(8'd6, {21'd0, fb_len}, 64'd0); txw <= txw + 32'd1; nb(NB_TXW, 1'b1, {32'd0, txw + 32'd1}, S_CBF); end
 
                 // ---- the bridge: a frame waiting (RXW, Main's)? Into fbuf, its address checked on the way
                 S_RXP1: if (n_rd[31:0] != rxr) begin
@@ -480,6 +500,7 @@ module i82596 (
                 S_RX10: wr16(rfd, 5'd12, {done && !rb_used, 1'b1, rx_cnt}, S_RX11);      // EOF: the frame ended here
                 S_RX11: wr16(rfd, 5'd0, done ? 16'hA000 : 16'h8000, S_RX12);
                 S_RX12: begin
+                    dbg(8'd5, rfd, {48'd0, done, 1'b0, rx_cnt});
                     ev[2] <= 1'b1;
                     if (rfd_cmd[15] || !done) begin rus <= RU_NORES; ev[0] <= 1'b1; st <= rxret; end
                     else begin

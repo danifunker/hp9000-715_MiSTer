@@ -21,6 +21,8 @@ decoded unless --raw:
     13 PS/2 byte (kbd/mouse, > host to device, < device to host)
     14 key event from hps_io (make/break, E0, set-2 code)
     15 HP-UX system call (r22 = number, r26/r25 = first two arguments)
+    16 the rest of it (addr = r2, the caller of libc's stub; r24/r23)
+    17 82596 event (PORT, CA, CB, STAT, RX, TX, reset)
 The recorder freezes 1024 events after a user-mode trap 8/10/11 (until the
 core is reset), so after a SIGILL the ring ends with what led to it.
 """
@@ -55,6 +57,14 @@ def decode(t, a, addr, d):
     if t == 14: return 'key  %s %s%02x' % ('make ' if d >> 9 & 1 else 'break', 'E0 ' if d >> 8 & 1 else '', d & 0xFF)
     if t == 10: return 'sel  id %d %s' % (a & 7, 'answered' if d & 1 else 'no target')
     if t == 15: return 'sysc %3d r26 %08x r25 %08x' % (addr, d >> 32, d & 0xFFFFFFFF)
+    if t == 16: return 'sysa rp %08x r24 %08x r23 %08x' % (addr, d >> 32, d & 0xFFFFFFFF)
+    if t == 17:
+        k = ['?', 'PORT', 'CA', 'CB', 'STAT', 'RX', 'TX', 'RESET'][a] if a < 8 else 'k%d' % a
+        if a == 2: return 'lan  CA    scb %08x cmd %04x' % (addr, d & 0xFFFF)
+        if a == 3: return 'lan  CB    %08x cmd %04x link %08x' % (addr, (d >> 32) & 0xFFFF, d & 0xFFFFFFFF)
+        if a == 4: return 'lan  STAT  scb %08x ev %x cus %d rus %d' % (addr, (d >> 8) & 0xF, (d >> 4) & 7, d & 0xF)
+        if a == 5: return 'lan  RX    rfd %08x count %d eof %d' % (addr, d & 0x3FFF, (d >> 15) & 1)
+        return 'lan  %-5s %08x %016x' % (k, addr, d)
     return 't%d a%02x %08x %016x' % (t, a, addr, d)
 
 
