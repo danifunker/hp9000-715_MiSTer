@@ -405,7 +405,9 @@ module hp715 #(
     // byte), 14 a key event from hps_io (data = ps2_key), 16 the rest of a
     // system call (addr = r2, the caller's return address into libc's stub;
     // data = {r24, r23}, the third and fourth arguments), 17 an 82596 event
-    // (aux = the kind, rtl/lasi/i82596.sv dbg_*). Each
+    // (aux = the kind, rtl/lasi/i82596.sv dbg_*), 18 a system call's return
+    // (the first RFI after a system call: addr = r28, the value returned;
+    // data = {r22, the error number, 32'd0}). Each
     // source has a one-deep slot; the lowest-numbered full slot goes out
     // each cycle.
     //
@@ -432,8 +434,8 @@ module hp715 #(
     logic [7:0]  s_dstat, s_sstat0;
     logic        ev_ack_q, ev_irq_q, ev_dec_q;
     logic [32:0] ev_line_q;
-    logic [12:0] ev_full;
-    logic [111:0] ev_slot [13];
+    logic [13:0] ev_full;
+    logic [111:0] ev_slot [14];
     logic        ev_shot;              // one-shot mode armed (Pause / dbg_shot[49])
     logic [16:0] ev_shot_cnt;
     logic [15:0] ev_trig_k;            // matching system calls seen
@@ -443,22 +445,26 @@ module hp715 #(
     logic        ev_freeze_arm, ev_frozen;
     logic [4:0]  ev_cop_q;
     // r22/r25/r26 (and r2/r23/r24) as last written (system-call number and arguments, events 15/16)
-    logic [31:0] sc_r22, sc_r25, sc_r26, sc_r2, sc_r23, sc_r24;
-    logic [1:0]  sc_pend;
+    logic [31:0] sc_r22, sc_r25, sc_r26, sc_r2, sc_r23, sc_r24, sc_r28;
+    logic [1:0]  sc_pend, sr_pend;
+    logic        sc_open;              // a system call is in progress (until its RFI)
     always_ff @(posedge clk) begin
         if (c_gr_we[0]) case (c_gr_num0)
             5'd2: sc_r2 <= c_gr_data0; 5'd22: sc_r22 <= c_gr_data0; 5'd23: sc_r23 <= c_gr_data0;
-            5'd24: sc_r24 <= c_gr_data0; 5'd25: sc_r25 <= c_gr_data0; 5'd26: sc_r26 <= c_gr_data0; default: ; endcase
+            5'd24: sc_r24 <= c_gr_data0; 5'd25: sc_r25 <= c_gr_data0; 5'd26: sc_r26 <= c_gr_data0;
+            5'd28: sc_r28 <= c_gr_data0; default: ; endcase
         if (c_gr_we[1]) case (c_gr_num1)
             5'd2: sc_r2 <= c_gr_data1; 5'd22: sc_r22 <= c_gr_data1; 5'd23: sc_r23 <= c_gr_data1;
-            5'd24: sc_r24 <= c_gr_data1; 5'd25: sc_r25 <= c_gr_data1; 5'd26: sc_r26 <= c_gr_data1; default: ; endcase
+            5'd24: sc_r24 <= c_gr_data1; 5'd25: sc_r25 <= c_gr_data1; 5'd26: sc_r26 <= c_gr_data1;
+            5'd28: sc_r28 <= c_gr_data1; default: ; endcase
     end
     always_ff @(posedge clk) begin
-        logic [12:0]  set;
-        logic [111:0] e [13];
-        logic         shot_key;
+        logic [13:0]  set;
+        logic [111:0] e [14];
+        logic         shot_key, rfi;
         set = '0;
-        for (int i = 0; i < 13; i++) e[i] = '0;
+        for (int i = 0; i < 14; i++) e[i] = '0;
+        rfi = dbg_retire && !dbg_nullified && dbg_insn[31:26] == 6'd0 && (dbg_insn[12:5] == 8'h60 || dbg_insn[12:5] == 8'h65);
         shot_key = ps2_key[10] != ev_key_q && ps2_key[9] && ps2_key[8] && ps2_key[7:0] == 8'h77;
         ev_key_q <= ps2_key[10];
         if (l_ps2_v) begin set[9] = 1; e[9] = {8'd13, 6'd0, l_ps2[9:8], 32'd0, 56'd0, l_ps2[7:0]}; end
@@ -483,6 +489,12 @@ module hp715 #(
         sc_pend <= {sc_pend[0], dbg_trap && dbg_trap_vec == 6'd7 && dbg_iaoq_f[31:2] == 30'h3000_0001 && dbg_iaoq_f[1:0] != 2'b00};
         if (sc_pend[1]) begin set[11] = 1; e[11] = {8'd15, 8'd0, sc_r22, sc_r26, sc_r25}; end
         if (sc_pend[1]) begin set[12] = 1; e[12] = {8'd16, 8'd0, sc_r2, sc_r24, sc_r23}; end
+        // its return: the first RFI after it, two cycles later (the restored r28 has reached the mirror)
+        if (!rst_n) sc_open <= 1'b0;
+        else if (sc_pend[1]) sc_open <= 1'b1;
+        else if (rfi) sc_open <= 1'b0;
+        sr_pend <= {sr_pend[0], rfi && sc_open};
+        if (sr_pend[1]) begin set[13] = 1; e[13] = {8'd18, 8'd0, sc_r28, sc_r22, 32'd0}; end
         if (n_dbg_v) begin set[3] = 1; e[3] = {8'd17, n_dbg_aux, n_dbg_addr, n_dbg_data}; end   // over a DMA event: the LAN's own view matters more
         // a whole-cache loop (FDCE/FICE, op 2 on either side) is recorded by its first operation only
         if (c_cop_valid) begin
@@ -533,13 +545,13 @@ module hp715 #(
         if (!reset) begin
             logic sent;
             sent = 1'b0;
-            for (int i = 0; i < 13; i++) begin
+            for (int i = 0; i < 14; i++) begin
                 if (ev_full[i] && !sent) begin
                     dbg_ev_valid <= 1'b1; dbg_ev <= ev_slot[i]; sent = 1'b1;
                     ev_full[i] <= 1'b0;
                 end
             end
-            for (int i = 0; i < 13; i++) if (set[i]) begin ev_full[i] <= 1'b1; ev_slot[i] <= e[i]; end
+            for (int i = 0; i < 14; i++) if (set[i]) begin ev_full[i] <= 1'b1; ev_slot[i] <= e[i]; end
         end
     end
 
