@@ -418,7 +418,7 @@ module hp715 #(
     // reports it as the extended code 0x77, make; Scroll Lock never arrives --
     // Main_MiSTer takes it for its joystick emulation) or dbg_shot[49] from
     // reset arms a filtered run -- only system calls (15, 16), interruptions
-    // other than the routine ones (4, 6, 7, 15, 16, 17, 20, 21, 26), SCSI
+    // other than the routine ones (4 unless taken in user mode, 6, 7, 15, 16, 17, 20, 21, 26), SCSI
     // interrupts (3), keys (14) and 82596 events (17) are recorded. With no
     // trigger (dbg_shot[15:0] = 0) the recorder freezes after 65536 of them,
     // so the ring holds the first ~0.5 s after the key. With a trigger it
@@ -495,13 +495,16 @@ module hp715 #(
         if (ev_shot) begin
             set[0] = 1'b0; set[1] = 1'b0; set[4] = 1'b0; set[5] = 1'b0; set[6] = 1'b0; set[8] = 1'b0; set[9] = 1'b0;
             if (!n_dbg_v) set[3] = 1'b0;
-            if (dbg_trap_vec == 6'd4 || dbg_trap_vec == 6'd6 || dbg_trap_vec == 6'd7 || dbg_trap_vec == 6'd15 ||
+            // (an external interrupt taken in user mode stays: its IIAOQ samples a spinning process's PC)
+            if ((dbg_trap_vec == 6'd4 && dbg_iaoq_f[1:0] != 2'b11) || dbg_trap_vec == 6'd6 || dbg_trap_vec == 6'd7 || dbg_trap_vec == 6'd15 ||
                 dbg_trap_vec == 6'd16 || dbg_trap_vec == 6'd17 || dbg_trap_vec == 6'd20 || dbg_trap_vec == 6'd21 ||
                 dbg_trap_vec == 6'd26) set[7] = 1'b0;
         end
         if (ev_frozen) set = '0;
         dbg_ev_valid <= 1'b0;
-        if (!rst_n) begin
+        // only the board's reset clears a freeze: HP-UX's reboot (the broadcast reset) must
+        // leave the ring as it was when a user process died of SIGILL (2026-10-11)
+        if (reset) begin
             ev_full <= '0; ev_freeze_arm <= 1'b0; ev_frozen <= 1'b0; ev_freeze_cnt <= '0;
             ev_shot <= dbg_shot[49]; ev_shot_cnt <= '0; ev_trig_k <= '0; ev_post <= '0;
         end else begin
@@ -527,7 +530,7 @@ module hp715 #(
                 else ev_freeze_cnt <= ev_freeze_cnt - 11'd1;
             end
         end
-        if (rst_n) begin
+        if (!reset) begin
             logic sent;
             sent = 1'b0;
             for (int i = 0; i < 13; i++) begin
