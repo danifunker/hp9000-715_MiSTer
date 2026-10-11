@@ -35,7 +35,7 @@ V_OPT = --x-assign fast --x-initial fast --noassert --unroll-count 256
 # Core RTL under simulation: the machine (rtl/hp715.sv) inside sim.v.
 # CPU_RTL is defined below with the CPU benches.
 MACHINE_RTL = $(RTL)/mioc_ecc.sv $(RTL)/mioc.sv $(RTL)/hp_xbus.sv $(RTL)/lasi/lasi_uart.sv \
-	$(RTL)/lasi/lasi_ps2.sv $(RTL)/lasi/ps2_dev.sv $(RTL)/lasi/harmony.sv $(RTL)/lasi/i82596.sv $(RTL)/lasi/lasi.sv $(RTL)/wax_stub.sv \
+	$(RTL)/lasi/lasi_ps2.sv $(RTL)/lasi/ps2_dev.sv $(RTL)/lasi/harmony.sv $(RTL)/lasi/i82596.sv $(RTL)/lasi/lasi_fdc.sv $(RTL)/lasi/lasi.sv $(RTL)/wax_stub.sv \
 	$(RTL)/scsi/ncr53c710.sv $(RTL)/scsi/cd_audio.sv $(RTL)/scsi/scsi_targets.sv $(RTL)/artist/artist.sv $(RTL)/artist/artist_video.sv \
 	$(RTL)/rom_loader.sv $(RTL)/hp715.sv
 V_SRC = $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v
@@ -185,6 +185,15 @@ tb_i82596:
 	./obj_dir_tb/tb_i82596
 
 .PHONY: tb_i82596
+
+# LASI's floppy (WD37C65C, no drive) and its DMA: HP's ROM floppy self-test
+# replayed, HP-UX 11i's probe, the other 765 commands (tb/tb_fdc.cpp)
+tb_fdc:
+	$(TB_V) -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -GSIM_FAST=1 --top-module lasi_fdc -o tb_fdc \
+		$(RTL)/lasi/lasi_fdc.sv tb/tb_fdc.cpp
+	./obj_dir_tb/tb_fdc
+
+.PHONY: tb_fdc
 
 # ---------------------------------------------------------------------------
 # CPU test ROMs on the RTL core (verilator/cputest): `make cputest SUITE=alu1`

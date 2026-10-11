@@ -48,6 +48,7 @@ roms/hp-firmware/
 roms/*.bin
 # HP-UX binaries extracted from disk images (tools/hpux/), and their disassembly
 roms/hpux/
+roms/hpux11i/
 # Scratch Quartus projects and experiments
 scratch/
 # Simulation output

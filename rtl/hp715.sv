@@ -231,6 +231,13 @@ module hp715 #(
     logic [31:0] ld_addr;
     logic [7:0]  ld_be;
     logic [63:0] ld_wdata;
+    // the floppy's registers (LASI pages A and D) and DMA
+    logic        f_req, f_pd, f_rst, f_irq;
+    logic [31:0] f_rdata;
+    logic        fd_req, fd_we, fd_ack;
+    logic [31:0] fd_addr;
+    logic [7:0]  fd_be;
+    logic [63:0] fd_wdata;
 
     mioc #(.HAS_ARTIST(HAS_ARTIST)) u_mioc (
         .clk(clk), .rst_n(rst_n), .cfg_ram_lg(cfg_ram_lg),
@@ -283,6 +290,7 @@ module hp715 #(
         .scsi_rdata(s_rdata), .scsi_rst(s_rst), .scsi_irq(s_irq),
         .aud_req(a_req), .aud_rst(a_rst), .aud_rdata(a_rdata_h), .aud_irq(a_irq),
         .lan_req(n_req), .lan_rst(n_rst), .lan_rdata(n_rdata), .lan_irq(n_irq),
+        .fdc_req(f_req), .fdc_pd(f_pd), .fdc_rst(f_rst), .fdc_rdata(f_rdata), .fdc_irq(f_irq),
         .pcr(lasi_pcr), .artist_rst(artist_rst), .dbg_ps2_valid(l_ps2_v), .dbg_ps2(l_ps2));
     logic        l_ps2_v;
     logic [9:0]  l_ps2;
@@ -325,6 +333,14 @@ module hp715 #(
         .nb_req(nb_req), .nb_we(nb_we), .nb_addr(nb_addr), .nb_wdata(nb_wdata), .nb_ack(nb_ack),
         .nb_rdata(nb_rdata));
 
+    // ------------------------------------------------------------ floppy
+    lasi_fdc #(.CLK_HZ(CLK_HZ), .SIM_FAST(SIM_FAST)) u_fdc (
+        .clk(clk), .rst(f_rst),
+        .req(f_req), .we(gsc_we), .pd(f_pd), .addr(gsc_addr[11:0]), .be(gsc_be), .wdata(gsc_wdata),
+        .rdata(f_rdata), .irq(f_irq),
+        .dma_req(fd_req), .dma_we(fd_we), .dma_addr(fd_addr), .dma_be(fd_be), .dma_wdata(fd_wdata),
+        .dma_ack(fd_ack), .dma_rdata(dma_rdata));
+
     // the codec's output and the CD's audio (on a 715 the drive's audio goes
     // to the codec's input; here it is added to the output), saturated
     always_ff @(posedge clk) begin
@@ -337,14 +353,15 @@ module hp715 #(
 
     // ------------------------------------------------------------ LASI's DMA masters
     // one doubleword at a time on the MIOC's dma_* port: Harmony first (a
-    // request every few sample periods), then the 53C710, then the 82596
-    // (its frames wait in its own buffer)
+    // request every few sample periods), then the floppy (a 4-byte FIFO),
+    // then the 53C710, then the 82596 (its frames wait in its own buffer)
     logic        dg_busy;
-    logic [1:0]  dg_who;                        // 0 Harmony, 1 53C710, 2 82596
+    logic [1:0]  dg_who;                        // 0 Harmony, 1 53C710, 2 82596, 3 floppy
     always_ff @(posedge clk) begin
         if (!rst_n) dg_busy <= 1'b0;
         else if (!dg_busy) begin
             if (ad_req)       begin dg_busy <= 1'b1; dg_who <= 2'd0; end
+            else if (fd_req)  begin dg_busy <= 1'b1; dg_who <= 2'd3; end
             else if (scd_req) begin dg_busy <= 1'b1; dg_who <= 2'd1; end
             else if (ld_req)  begin dg_busy <= 1'b1; dg_who <= 2'd2; end
         end else if (dma_ack) dg_busy <= 1'b0;
@@ -352,11 +369,13 @@ module hp715 #(
     always_comb case (dg_who)
         2'd0:    begin dma_req = dg_busy && ad_req;  dma_we = ad_we;  dma_addr = ad_addr;  dma_be = ad_be;  dma_wdata = ad_wdata;  end
         2'd1:    begin dma_req = dg_busy && scd_req; dma_we = scd_we; dma_addr = scd_addr; dma_be = scd_be; dma_wdata = scd_wdata; end
-        default: begin dma_req = dg_busy && ld_req;  dma_we = ld_we;  dma_addr = ld_addr;  dma_be = ld_be;  dma_wdata = ld_wdata;  end
+        2'd2:    begin dma_req = dg_busy && ld_req;  dma_we = ld_we;  dma_addr = ld_addr;  dma_be = ld_be;  dma_wdata = ld_wdata;  end
+        default: begin dma_req = dg_busy && fd_req;  dma_we = fd_we;  dma_addr = fd_addr;  dma_be = fd_be;  dma_wdata = fd_wdata;  end
     endcase
     assign ad_ack    = dg_busy && dg_who == 2'd0 && dma_ack;
     assign scd_ack   = dg_busy && dg_who == 2'd1 && dma_ack;
     assign ld_ack    = dg_busy && dg_who == 2'd2 && dma_ack;
+    assign fd_ack    = dg_busy && dg_who == 2'd3 && dma_ack;
 
     // ---------------------------------------------------- debug events
     // types: 1 SCSI bus byte (aux = phase), 2 SCRIPTS instruction (addr =

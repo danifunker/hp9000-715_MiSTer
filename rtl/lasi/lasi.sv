@@ -4,12 +4,13 @@
 // interrupt transaction (IAR[4:0] written to IAR[31:5]).
 //
 // Pages (4 KB, offset bits 15:12): 0 interrupt registers, 4 Harmony audio,
-// 6 SCSI and 7 LAN (rtl/lasi/harmony.sv, the 53C710 and rtl/lasi/i82596.sv,
-// outside this module on the aud_*, scsi_* and lan_* ports), 5 RS-232, 8
-// PS/2, 9 RTC, B clock registers, C PCR/ERRLOG/VER/IORESET/AMR. The units
-// not built yet -- parallel and its DMA (1-3, P-010), floppy (A, D, P-004) -- read 0 and
-// ignore writes (STUBS S-015); so does everything above page D (LASI
-// answers its whole space, Lasi ERS app. A).
+// 6 SCSI, 7 LAN, A the floppy controller and D its DMA registers
+// (rtl/lasi/harmony.sv, the 53C710, rtl/lasi/i82596.sv and
+// rtl/lasi/lasi_fdc.sv, outside this module on the aud_*, scsi_*, lan_* and
+// fdc_* ports), 5 RS-232, 8 PS/2, 9 RTC, B clock registers, C
+// PCR/ERRLOG/VER/IORESET/AMR. The parallel port and its DMA (1-3, P-010)
+// are not built yet: they read 0 and ignore writes (STUBS S-015); so does
+// everything above page D (LASI answers its whole space, Lasi ERS app. A).
 module lasi #(
     parameter int CLK_HZ    = 64_000_000,
     parameter bit SIM_FAST  = 1'b0          // fast UART and PS/2 timing (simulator)
@@ -69,6 +70,12 @@ module lasi #(
     output logic        lan_rst,           // IORESET bit 1 (RST_LAN_L) clear
     input  logic [31:0] lan_rdata,
     input  logic        lan_irq,
+    // the floppy (pages A and D, rtl/lasi/lasi_fdc.sv), the same way
+    output logic        fdc_req,
+    output logic        fdc_pd,            // page D (the DMA registers)
+    output logic        fdc_rst,           // machine reset or IORESET bit 5 (ext) clear
+    input  logic [31:0] fdc_rdata,
+    input  logic        fdc_irq,
     // misc outputs
     output logic [31:0] pcr,
     output logic        artist_rst,       // IORESET bit 8 (RST_ARTIST_L) clear
@@ -166,7 +173,7 @@ module lasi #(
     assign scsi_be = be;
     assign scsi_wdata = wdata;
     assign scsi_rst = !rst_n || !ioreset[0] || (req && we && s_page && addr[11:2] == 10'd0);
-    logic s_pend, a_pend, l_pend;
+    logic s_pend, a_pend, l_pend, f_pend;
 
     // -------------------------------------------------------- Harmony
     wire a_page = in_lasi && page == 4'h4;
@@ -178,6 +185,12 @@ module lasi #(
     assign lan_req = req && l_page;
     assign lan_rst = !ioreset[1];
 
+    // -------------------------------------------------------- the floppy
+    wire f_page = in_lasi && (page == 4'hA || page == 4'hD);
+    assign fdc_req = req && f_page;
+    assign fdc_pd  = page == 4'hD;
+    assign fdc_rst = !rst_n || !ioreset[5];
+
     // -------------------------------------------- interrupt sources (GSC bits)
     logic [31:0] src, src_q;
     logic        ext_q;
@@ -187,6 +200,7 @@ module lasi #(
         src[8]  = lan_irq;
         src[9]  = scsi_irq;
         src[13] = aud_irq;
+        src[20] = fdc_irq;
         src[21] = ext_int && !toc_remap;
         src[26] = cmpintr;
     end
@@ -199,7 +213,9 @@ module lasi #(
         s_pend <= 1'b0;
         a_pend <= 1'b0;
         l_pend <= 1'b0;
+        f_pend <= 1'b0;
         if (s_pend) begin ack <= 1'b1; rdata <= scsi_rdata; end
+        if (f_pend) begin ack <= 1'b1; rdata <= fdc_rdata; end
         if (a_pend) begin ack <= 1'b1; rdata <= aud_rdata; end
         if (l_pend) begin ack <= 1'b1; rdata <= lan_rdata; end
 
@@ -245,7 +261,8 @@ module lasi #(
         if (rst_n && req && s_page) s_pend <= 1'b1;
         if (rst_n && req && a_page) a_pend <= 1'b1;
         if (rst_n && req && l_page) l_pend <= 1'b1;
-        if (rst_n && req && !s_page && !a_page && !l_page) begin
+        if (rst_n && req && f_page) f_pend <= 1'b1;
+        if (rst_n && req && !s_page && !a_page && !l_page && !f_page) begin
             logic [31:0] r;
             r = 32'd0;
             if (in_lasi) case (page)

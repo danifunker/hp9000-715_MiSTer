@@ -26,6 +26,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/lasi/lasi_ps2.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/lasi/ps2_dev.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/lasi/harmony.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/lasi/i82596.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/lasi/lasi_fdc.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/lasi/lasi.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/scsi/ncr53c710.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/scsi/cd_audio.sv
