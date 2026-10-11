@@ -48,9 +48,12 @@ branch `hp9k715-enhancements` (`support/hp9k`). **Build 36 (2026-10-11)**: BLR/B
 **Build 38 (2026-10-11)**: the LASI floppy (`rtl/lasi/lasi_fdc.sv`, a 765A with
 no drive, review 10, STUBS S-028): **HP-UX 11i's installer reaches its main menu**
 on the serial and the HDMI console (`Floppies: 0`); the ROM's floppy self-test
-passes. **Build 39**: recorder event 15 (HP-UX syscalls). The 11i install stalls
-at some "Working..." steps (lan2 driver queries; `itool` polling a pipe at EOF)
-that take seconds on QEMU. Next: system stream `RESUME-20261011-11i-install.md`,
+passes. **Build 39**: recorder event 15 (HP-UX syscalls). **Builds 40-47 (2026-10-11)**: the
+recorder's one-shot/trigger/flow captures found the 11i installer's stalls:
+**cpu-requests #10**, `b,l`'s link register corrupted when an external
+interrupt lands two instructions after the branch (`itool`'s scanner returns
+into itself); the fix is the user's call. Next: system stream
+`RESUME-20261011-11i-install.md` (the TCOE 12/2004 DVD is on the MiSTer),
 then `RESUME-20261010-features.md`; CPU stream `RESUME-20261010-cpu.md`.
 
 ## The user's process

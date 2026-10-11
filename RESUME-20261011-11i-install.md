@@ -1,5 +1,36 @@
 # Resume prompt -- HP-UX 11i's installer stalls on the board (2026-10-11)
 
+## Status (2026-10-11, evening): cause found -- a CPU bug, cpu-requests #10
+
+The stalls are HP-UX 11i's `itool` spinning in its config-file scanner
+`yylook` (text 0x2ee1a0): the function returns into itself at 0x2ee1a4
+because the `rp` its prologue saved was the **branch target + 4** instead of
+`b,l`'s link -- **the link register is corrupted when an external interrupt
+is taken two instructions after the `b,l`** (the recorder's flow trace,
+build 47: `b,l 0x2ee1a0,rp` / `nop` / `stw rp,-14(sp)` retires / trap 4 at
+0x2ee1a4 / the return there / the scanner's `bv r0(rp)` -> 0x2ee1a4).
+Nondeterministic and placement-dependent (builds 39-44 stalled 5/5 at the
+first step, build 45 passed it 2/2 and stalled later); `net_cfg_prep`'s
+SIGILL reboot is the same class (a corrupted return address). The kernel
+is innocent: the file's reads return 6 x 8192 + 0x10cf bytes then 0.
+Written up in `docs/design/cpu-requests.md` #10 with the mechanism
+(`pa_core.sv` 454: `e_seq = e_iaoq_b + 4`, the delay slot's `e_seq` is
+exactly the bad value) -- **the fix is the user's call (no CPU changes
+unless asked)**; a `tests/cpu` vector sweeping the interval timer's phase
+over `b,l; nop; stw rp` would pin the cycle pattern.
+
+The tools that found it (all in build 47, `tools/mister/board.sh trig`):
+`trig N R26 K` (freeze 60000 events after the K-th system call N),
+`trig flow ADDR` (itool's control flow, freeze after the first branch to
+ADDR), events 16-19 (a call's r2/r24/r23, 82596 events, the call's return
+value, control-flow discontinuities), `trace_get.sh`, `trace_sym.py`; the
+recorder's freeze survives HP-UX's reboot. Captures: the scratchpad's
+`keep/bl-link-interrupt/`. The 12/2004 TCOE DVD is on the MiSTer
+(`hpux11i_tcoe_200412.iso`, the user's choice for the real install).
+
+## The original prompt
+
+
 You are continuing the HP 9000/715 MiSTer core in `/home/dani/repos/hp9000-715`
 as the **system stream** (everything outside `rtl/cpu/`). **Goal: install HP-UX
 11i v1 from `hpux11i_oe_cd1.iso` onto the blank `hpux11i.img` (SCSI ID 5) on
