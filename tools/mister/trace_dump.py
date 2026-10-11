@@ -20,6 +20,7 @@ decoded unless --raw:
     12 cache maintenance (FDC/FDCE/PDC/FIC/FICE: physical line, VA)
     13 PS/2 byte (kbd/mouse, > host to device, < device to host)
     14 key event from hps_io (make/break, E0, set-2 code)
+    15 HP-UX system call (r22 = number, r26/r25 = first two arguments)
 The recorder freezes 1024 events after a user-mode trap 8/10/11 (until the
 core is reset), so after a SIGILL the ring ends with what led to it.
 """
@@ -53,6 +54,7 @@ def decode(t, a, addr, d):
     if t == 13: return 'ps2  %s %s %02x' % ('mouse' if a & 2 else 'kbd  ', '<' if a & 1 else '>', d & 0xFF)
     if t == 14: return 'key  %s %s%02x' % ('make ' if d >> 9 & 1 else 'break', 'E0 ' if d >> 8 & 1 else '', d & 0xFF)
     if t == 10: return 'sel  id %d %s' % (a & 7, 'answered' if d & 1 else 'no target')
+    if t == 15: return 'sysc %3d r26 %08x r25 %08x' % (addr, d >> 32, d & 0xFFFFFFFF)
     return 't%d a%02x %08x %016x' % (t, a, addr, d)
 
 

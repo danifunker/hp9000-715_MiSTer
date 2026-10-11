@@ -189,11 +189,14 @@ module hp715 #(
         .powerfail(1'b0), .soft_pwr_n(soft_pwr_n),
         .dbg_retire(dbg_retire), .dbg_nullified(dbg_nullified), .dbg_iaoq_f(dbg_iaoq_f), .dbg_iaoq_b(dbg_iaoq_b),
         .dbg_iasq_f(c_iasq_f), .dbg_insn(dbg_insn), .dbg_trap(dbg_trap), .dbg_trap_vec(dbg_trap_vec),
-        .dbg_gr_we(), .dbg_gr_num0(), .dbg_gr_num1(), .dbg_gr_data0(), .dbg_gr_data1(),
+        .dbg_gr_we(c_gr_we), .dbg_gr_num0(c_gr_num0), .dbg_gr_num1(c_gr_num1), .dbg_gr_data0(c_gr_data0), .dbg_gr_data1(c_gr_data1),
         .dbg_psw(dbg_psw), .dbg_halted(dbg_halted), .dbg_gr(dbg_gr),
         .dbg_cop_valid(c_cop_valid), .dbg_cop_i(c_cop_i), .dbg_cop(c_cop), .dbg_cop_addr(c_cop_addr),
         .dbg_cop_rpn(c_cop_rpn));
     logic [15:0] c_iasq_f;
+    logic [1:0]  c_gr_we;
+    logic [4:0]  c_gr_num0, c_gr_num1;
+    logic [31:0] c_gr_data0, c_gr_data1;
     logic        c_cop_valid, c_cop_i;
     logic [3:0]  c_cop;
     logic [31:0] c_cop_addr;
@@ -385,7 +388,11 @@ module hp715 #(
     // uncached read/write of RAM, the 53C710 or Artist (aux = byte enables, data as
     // read/written), 10 selection (aux = ID, data = 1 answered / 0 nobody),
     // 11 interruption taken (aux = vector, addr = IIAOQ front, data =
-    // {instruction word, IIASQ, PSW[15:0]}), 12 cache maintenance done (aux
+    // {instruction word, IIASQ, PSW[15:0]}), 15 an HP-UX system call (a
+    // user-mode trap 7 at the gateway page's 0xC0000004 -- HP-UX's trap-7
+    // gateway path at CPU revision < 0xC; addr = r22, the call number, data =
+    // {r26, r25}, the first two arguments, from a mirror of the CPU's
+    // register-write taps), 12 cache maintenance done (aux
     // = {I side, 3'b0, operation}, addr = the physical line {RPN, VA[11:0]},
     // data = {VA, 32'd0}; of a run of FDCE or FICE only the first), 13 a
     // byte on a PS/2 port (aux = {port, 1 = device to host}, data = the
@@ -408,6 +415,13 @@ module hp715 #(
     logic [10:0] ev_freeze_cnt;
     logic        ev_freeze_arm, ev_frozen;
     logic [4:0]  ev_cop_q;
+    // r22/r25/r26 as last written (system-call number and arguments, event 15)
+    logic [31:0] sc_r22, sc_r25, sc_r26;
+    logic [1:0]  sc_pend;
+    always_ff @(posedge clk) begin
+        if (c_gr_we[0]) case (c_gr_num0) 5'd22: sc_r22 <= c_gr_data0; 5'd25: sc_r25 <= c_gr_data0; 5'd26: sc_r26 <= c_gr_data0; default: ; endcase
+        if (c_gr_we[1]) case (c_gr_num1) 5'd22: sc_r22 <= c_gr_data1; 5'd25: sc_r25 <= c_gr_data1; 5'd26: sc_r26 <= c_gr_data1; default: ; endcase
+    end
     always_ff @(posedge clk) begin
         logic [11:0]  set;
         logic [111:0] e [12];
@@ -432,6 +446,9 @@ module hp715 #(
         end
         if (sb_sel_done || sb_sel_fail) begin set[6] = 1; e[6] = {8'd10, 5'd0, sb_sel_id, 32'd0, 63'd0, sb_sel_done}; end
         if (dbg_trap) begin set[7] = 1; e[7] = {8'd11, 2'd0, dbg_trap_vec, dbg_iaoq_f, dbg_insn, c_iasq_f, dbg_psw[15:0]}; end
+        // a system call: recorded two cycles after its trap, when the delay slot's r22 write has reached the mirror
+        sc_pend <= {sc_pend[0], dbg_trap && dbg_trap_vec == 6'd7 && dbg_iaoq_f[31:2] == 30'h3000_0001 && dbg_iaoq_f[1:0] != 2'b00};
+        if (sc_pend[1]) begin set[11] = 1; e[11] = {8'd15, 8'd0, sc_r22, sc_r26, sc_r25}; end
         // a whole-cache loop (FDCE/FICE, op 2 on either side) is recorded by its first operation only
         if (c_cop_valid) begin
             ev_cop_q <= {c_cop_i, c_cop};
