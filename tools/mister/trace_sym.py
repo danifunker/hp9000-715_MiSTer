@@ -46,7 +46,7 @@ def main():
     hexa = re.compile(r'\b([0-9a-f]{8})\b')
     for line in open(args[1]):
         line = line.rstrip('\n')
-        if only and not re.search(r'\b(sysc|sysa|trap|key|lan)\b', line):
+        if only and not re.search(r'\b(sysc|sysa|sysr|trap|key|lan)\b', line):
             continue
         m = re.search(r'\bsysc\s+(\d+)', line)
         if m:
