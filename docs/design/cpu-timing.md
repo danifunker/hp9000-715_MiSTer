@@ -563,6 +563,14 @@ bubble after PROBE/LPA/LDSID/LCI/DIAG read before a dependent use, two
 more FPU cycles per operation (the registered operand read and start),
 one more for FCNVXF and FCNVFX.
 
+### 4.12 Whole-machine build 36 (2026-10-11): the BLR/BV reserved-bit check removed
+
+Not a CPU-only fit: the whole design (`system.md` 10, build 36) with `1d17078`
+(cpu-requests #9, two 12-bit comparators gone from `pa_decode`). `pa_cpu`
+13,771 ALMs in the entity report; the design 36,454 (87 %), 127 fewer than
+build 35 (the same seed 2; most of that is fitter noise, the decoder change
+itself is a few ALMs). Every clock met: core +0.389 ns, HDMI +0.221 ns.
+
 ## 5. Open items
 
 - Seed 1 of fit 15's RTL, if one more point of the spread is wanted (seed 3

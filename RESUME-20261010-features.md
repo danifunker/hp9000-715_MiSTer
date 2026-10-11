@@ -35,8 +35,10 @@ Harmony audio, the CD-ROM + CD boot, CD audio after Harmony, LAN (82596).
   8 kHz, and the stock Main (no CD track table). `Aserver` still needs DCE
   `rpcd`, which may run now that there is a network.
 * **CD-ROM** -- works (HP-UX mounts cdfs, checksums right). Booting HP-UX
-  11i's install CD stops in its ISL on `bve (rp)` = cpu-requests #9, waiting
-  for the user's go-ahead. A blank 8 GiB `disks/hpux11i.img` is ready for the
+  11i's install CD stops in its ISL on `bve (rp)` = cpu-requests #9 -- **done
+  2026-10-11 (build 36)**: the INSTALL kernel now boots and panics in
+  `fdc_cmd_exec: FIFO problem`, the floppy stub (S-015/P-004; system.md 10,
+  build 36) -- the next 11i step is a WD37C65 model that satisfies it. A blank 8 GiB `disks/hpux11i.img` is ready for the
   installer.
 * **CD audio** -- works on the board with Main `hp9k715-enhancements`
   (`~/repos/Main_MiSTer`, `support/hp9k`, commits `16072b0`, `0103118`; not

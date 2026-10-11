@@ -28,6 +28,13 @@ shown up in HP-UX 10.20 since build 15. What is left for the CPU:
 
 ### 1. cpu-requests #9 -- BV with reserved bits set (blocks HP-UX 11i media)
 
+**Done 2026-10-11** (`1d17078`, build 36): BLR/BV ignore bits 19:29 and 31 (ACD
+p.5-2); branch suite `bv-rv`/`blr-rv`; all gates pass; on the board the 11i
+INSTALL kernel now runs its I/O probe and panics in `fdc_cmd_exec: FIFO
+problem` -- the floppy stub (S-015/P-004), **the system stream's** (system.md
+10, build 36). No new CPU-ism seen yet; the next one can only show once the
+kernel gets past the floppy. The original request, for the record:
+
 HP-UX 11i v1's install CD (`disks/hpux11i_oe_cd1.iso`, OE March 2003 CD 1;
 also on the board in `/media/fat/games/HP9K715/`) boots its ISL from the ROM
 and stops: ISL reads the PSW (`ssm 0,r22`), sees W = 0 (narrow firmware, every
