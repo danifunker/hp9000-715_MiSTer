@@ -20,6 +20,28 @@ never shows RQM and the driver panics instead of giving up. Do not touch
 `rtl/cpu/` (user rule, 2026-10-09); CPU bugs go in
 `docs/design/cpu-requests.md` with evidence.
 
+## Status (2026-10-11, end of the floppy session)
+
+**Done.** `rtl/lasi/lasi_fdc.sv` (`dd17162`; review `docs/review/10-hpux-fdc.md`,
+STUBS S-028, P-004 superseded): the WD37C65C as a 765A with no drive, LASI's
+FIFO/DMA, IRQ bit 20. Gates: `make -C verilator tb_fdc` PASS; `tests/run-rom.sh`
+PASS; the ROM's floppy self-test passes with fastboot off **at the real CR16 rate**
+(`--turbo` makes Audio, RTC and, through a late audio interrupt, Floppy fail --
+system.md 11 has the checkpoint recipe); build 37 (seed 2) missed 64 MHz by
+0.179 ns on CPU paths, **build 38 (seed 3, `HP9K715.qsf`) meets every clock**,
+36,886 ALMs (88 %; the floppy is 248). Board: HP-UX 10.20 boots to CDE
+(`2/0/10 UNCLAIMED Built-in Floppy Drive`); **11i's installer reaches its main
+menu** (Ignite-UX B.4.2.108, `Floppies: 0`) on the serial console (recipe below)
+and on HDMI: graphics EEPROM `hp715_gfx2.eep` in `.s1`, the ISO in `.s3`,
+`board.sh load`, `board.sh key '\e'` every second until `BOOT_ADMIN>` shows
+(OBS), `board.sh key 'boot scsi.2\r'`, `62\r`, `\r`. Nothing was installed yet;
+`.s3` is back to `hp715audio.cue`.
+
+**Next:** Install HP-UX onto `hpux11i.img` (ID 5) from that menu (hours; the
+CD is one of several -- the OE may ask for CD 2), then boot it from scsi.5;
+anything CPU-shaped goes in `docs/design/cpu-requests.md` (no `rtl/cpu/` changes
+in this stream).
+
 ## Read first
 
 1. `CLAUDE.md` -- state, layout, tools, rules (binding).
