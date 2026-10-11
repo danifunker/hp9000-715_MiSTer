@@ -117,6 +117,7 @@ module hp715 #(
     output logic [23:0] gfx_pal_rgb,
     // debug
     input  logic [7:0]  dbg_ctl,            // simulator trace switches: [0] GSC accesses, [1] I-cache, [2] SCSI, [5] Artist
+    input  logic [63:0] dbg_shot,           // the recorder's one-shot trigger (the OSD status word's bits 127:64, below)
     // debug events for the board's recorder (rtl/mister/trace_ddr3.sv):
     // {type, aux, addr, data}, one per cycle at most
     output logic        dbg_ev_valid,
@@ -415,13 +416,17 @@ module hp715 #(
     //
     // One-shot capture (2026-10-11, the 11i installer's stalls): Pause (hps_io
     // reports it as the extended code 0x77, make; Scroll Lock never arrives --
-    // Main_MiSTer takes it for its joystick emulation) arms a filtered one-shot
-    // run -- only system calls (15, 16), interruptions other than the
-    // routine ones (4, 6, 7, 15, 16, 17, 20, 21), SCSI interrupts (3), keys
-    // (14) and 82596 events (17) are recorded, and after 65536 of them the
-    // recorder freezes. So the ring holds the first ~0.5 s of a loop that
-    // would otherwise overwrite its own start, pressed just before the step
-    // that stalls. Pause again re-arms (the count restarts).
+    // Main_MiSTer takes it for its joystick emulation) or dbg_shot[49] from
+    // reset arms a filtered run -- only system calls (15, 16), interruptions
+    // other than the routine ones (4, 6, 7, 15, 16, 17, 20, 21, 26), SCSI
+    // interrupts (3), keys (14) and 82596 events (17) are recorded. With no
+    // trigger (dbg_shot[15:0] = 0) the recorder freezes after 65536 of them,
+    // so the ring holds the first ~0.5 s after the key. With a trigger it
+    // runs on until the K-th (dbg_shot[47:32]) system call whose number is
+    // dbg_shot[15:0] (and, when dbg_shot[48], whose r26 is dbg_shot[31:16]),
+    // then freezes 8192 events later: the ring holds what led up to it.
+    // Pause re-arms (the counts restart). The OSD status word carries
+    // dbg_shot (HP9K715.sv: status[127:64]; tools/mister/board.sh trig).
     logic        s_dec;
     logic [31:0] s_dsp, s_ins, s_dsps;
     logic [7:0]  s_dstat, s_sstat0;
@@ -429,8 +434,10 @@ module hp715 #(
     logic [32:0] ev_line_q;
     logic [12:0] ev_full;
     logic [111:0] ev_slot [13];
-    logic        ev_shot;              // one-shot mode armed (Scroll Lock)
+    logic        ev_shot;              // one-shot mode armed (Pause / dbg_shot[49])
     logic [16:0] ev_shot_cnt;
+    logic [15:0] ev_trig_k;            // matching system calls seen
+    logic [13:0] ev_post;              // events still to record after the trigger (0: not triggered)
     logic        ev_key_q;
     logic [10:0] ev_freeze_cnt;
     logic        ev_freeze_arm, ev_frozen;
@@ -477,13 +484,6 @@ module hp715 #(
         if (sc_pend[1]) begin set[11] = 1; e[11] = {8'd15, 8'd0, sc_r22, sc_r26, sc_r25}; end
         if (sc_pend[1]) begin set[12] = 1; e[12] = {8'd16, 8'd0, sc_r2, sc_r24, sc_r23}; end
         if (n_dbg_v) begin set[3] = 1; e[3] = {8'd17, n_dbg_aux, n_dbg_addr, n_dbg_data}; end   // over a DMA event: the LAN's own view matters more
-        // the one-shot filter: system calls, the interesting interruptions, SCSI interrupts, keys, the LAN
-        if (ev_shot) begin
-            set[0] = 1'b0; set[1] = 1'b0; set[4] = 1'b0; set[5] = 1'b0; set[6] = 1'b0; set[8] = 1'b0; set[9] = 1'b0;
-            if (!n_dbg_v) set[3] = 1'b0;
-            if (dbg_trap_vec == 6'd4 || dbg_trap_vec == 6'd6 || dbg_trap_vec == 6'd7 || dbg_trap_vec == 6'd15 ||
-                dbg_trap_vec == 6'd16 || dbg_trap_vec == 6'd17 || dbg_trap_vec == 6'd20 || dbg_trap_vec == 6'd21) set[7] = 1'b0;
-        end
         // a whole-cache loop (FDCE/FICE, op 2 on either side) is recorded by its first operation only
         if (c_cop_valid) begin
             ev_cop_q <= {c_cop_i, c_cop};
@@ -491,16 +491,33 @@ module hp715 #(
                 set[8] = 1; e[8] = {8'd12, c_cop_i, 3'd0, c_cop, c_cop_rpn, c_cop_addr[11:0], c_cop_addr, 32'd0};
             end
         end
+        // the one-shot filter: system calls, the interesting interruptions, SCSI interrupts, keys, the LAN
+        if (ev_shot) begin
+            set[0] = 1'b0; set[1] = 1'b0; set[4] = 1'b0; set[5] = 1'b0; set[6] = 1'b0; set[8] = 1'b0; set[9] = 1'b0;
+            if (!n_dbg_v) set[3] = 1'b0;
+            if (dbg_trap_vec == 6'd4 || dbg_trap_vec == 6'd6 || dbg_trap_vec == 6'd7 || dbg_trap_vec == 6'd15 ||
+                dbg_trap_vec == 6'd16 || dbg_trap_vec == 6'd17 || dbg_trap_vec == 6'd20 || dbg_trap_vec == 6'd21 ||
+                dbg_trap_vec == 6'd26) set[7] = 1'b0;
+        end
         if (ev_frozen) set = '0;
         dbg_ev_valid <= 1'b0;
         if (!rst_n) begin
             ev_full <= '0; ev_freeze_arm <= 1'b0; ev_frozen <= 1'b0; ev_freeze_cnt <= '0;
-            ev_shot <= 1'b0; ev_shot_cnt <= '0;
+            ev_shot <= dbg_shot[49]; ev_shot_cnt <= '0; ev_trig_k <= '0; ev_post <= '0;
         end else begin
-            if (shot_key) begin ev_shot <= 1'b1; ev_shot_cnt <= '0; ev_frozen <= 1'b0; ev_freeze_arm <= 1'b0; end
-            else if (ev_shot && !ev_frozen && |set) begin
-                if (ev_shot_cnt == 17'd65535) ev_frozen <= 1'b1;
-                else ev_shot_cnt <= ev_shot_cnt + 17'd1;
+            if (shot_key) begin
+                ev_shot <= 1'b1; ev_shot_cnt <= '0; ev_trig_k <= '0; ev_post <= '0; ev_frozen <= 1'b0; ev_freeze_arm <= 1'b0;
+            end else if (ev_shot && !ev_frozen && |set) begin
+                if (dbg_shot[15:0] == 16'd0) begin                        // no trigger: the first 65536 events
+                    if (ev_shot_cnt == 17'd65535) ev_frozen <= 1'b1;
+                    else ev_shot_cnt <= ev_shot_cnt + 17'd1;
+                end else if (ev_post != 14'd0) begin                      // triggered: 8192 more
+                    if (ev_post == 14'd1) ev_frozen <= 1'b1;
+                    ev_post <= ev_post - 14'd1;
+                end else if (set[11] && sc_r22[15:0] == dbg_shot[15:0] && (!dbg_shot[48] || sc_r26[15:0] == dbg_shot[31:16])) begin
+                    if (ev_trig_k == dbg_shot[47:32]) ev_post <= 14'd8191;
+                    else ev_trig_k <= ev_trig_k + 16'd1;
+                end
             end
             if (dbg_trap && dbg_iaoq_f[1:0] == 2'b11 && !ev_freeze_arm
                 && (dbg_trap_vec == 6'd8 || dbg_trap_vec == 6'd10 || dbg_trap_vec == 6'd11)) begin

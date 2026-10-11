@@ -10,6 +10,12 @@
 #                             path NUL-padded to 1024 bytes, mounted again at
 #                             every core start -- the CONF_STR slots are "SC"):
 #                             slot 0 = disk ID 6, slot 1 = the EEPROM
+#   board.sh trig [SYSC [R26 [K]]]  the recorder's one-shot trigger in the status
+#                             word's bits 127:64 (rtl/hp715.sv dbg_shot, applied
+#                             at the next core load): armed from reset, freeze
+#                             8192 events after the K-th (default 0 = first)
+#                             system call SYSC (number; R26 = its first argument
+#                             to match, '-' = any). No arguments: trigger off
 #   board.sh push RBF         copy a build to $CORE_DIR/HP9K715.rbf (md5-checked)
 #   board.sh load             load_core it (cold start: ROM download, reset)
 #   board.sh console [SECS]   the serial console (/dev/ttyS1 = the core's
@@ -58,6 +64,19 @@ for slot, p in ((0, disk), (1, eep)):
 print('status 0x%032x; s0 %s; s1 %s' % (st, disk, eep))
 PY
     rsh "ls -la /media/fat/config/HP9K715.* $GAMES/"
+    ;;
+trig)
+    rsh "python3 - '${1:-0}' '${2:--}' '${3:-0}'" <<'PY'
+import sys
+t, m, k = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+st = int.from_bytes(open('/media/fat/config/HP9K715.CFG', 'rb').read(16), 'little')
+st &= ~(((1 << 50) - 1) << 64)
+if t:
+    st |= t << 64 | k << 96 | 1 << 113
+    if m != '-': st |= (int(m, 0) & 0xFFFF) << 80 | 1 << 112
+open('/media/fat/config/HP9K715.CFG', 'wb').write(st.to_bytes(16, 'little'))
+print('status 0x%032x: trigger %s' % (st, ('sysc %d r26 %s k %d' % (t, m, k)) if t else 'off'))
+PY
     ;;
 push)
     rbf="$1"

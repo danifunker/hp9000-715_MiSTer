@@ -303,7 +303,7 @@ hp715 #(.CLK_HZ(64_000_000), .HAS_ARTIST(1'b1)) hp715
 	.gfx_r(gfx_r), .gfx_g(gfx_g), .gfx_b(gfx_b), .gfx_hs(gfx_hs), .gfx_vs(gfx_vs), .gfx_de(gfx_de),
 	.gfx_underrun(gfx_underrun),
 	.gfx_pal_wr(gfx_pal_wr), .gfx_pal_addr(gfx_pal_addr), .gfx_pal_rgb(gfx_pal_rgb),
-	.dbg_ctl(8'd0), .dbg_retire(), .dbg_nullified(), .dbg_iaoq_f(), .dbg_iaoq_b(), .dbg_insn(),
+	.dbg_ctl(8'd0), .dbg_shot(status[127:64]), .dbg_retire(), .dbg_nullified(), .dbg_iaoq_f(), .dbg_iaoq_b(), .dbg_insn(),
 	.dbg_trap(), .dbg_trap_vec(), .dbg_psw(), .dbg_halted(), .dbg_buserr(), .dbg_buserr_addr(),
 	.dbg_gr(gr), .dbg_ev_valid(dbg_ev_valid), .dbg_ev(dbg_ev)
 );
