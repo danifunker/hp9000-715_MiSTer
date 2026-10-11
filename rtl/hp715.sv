@@ -413,14 +413,15 @@ module hp715 #(
     // recorder stops until the next reset, so the ring keeps what led up to
     // it (HP-UX's user processes dying of SIGILL on stale text, 2026-10-09).
     //
-    // One-shot capture (2026-10-11, the 11i installer's stalls): Scroll Lock
-    // (set-2 code 0x7E, make) on the hps_io keyboard arms a filtered one-shot
+    // One-shot capture (2026-10-11, the 11i installer's stalls): Pause (hps_io
+    // reports it as the extended code 0x77, make; Scroll Lock never arrives --
+    // Main_MiSTer takes it for its joystick emulation) arms a filtered one-shot
     // run -- only system calls (15, 16), interruptions other than the
     // routine ones (4, 6, 7, 15, 16, 17, 20, 21), SCSI interrupts (3), keys
     // (14) and 82596 events (17) are recorded, and after 65536 of them the
     // recorder freezes. So the ring holds the first ~0.5 s of a loop that
     // would otherwise overwrite its own start, pressed just before the step
-    // that stalls. Scroll Lock again re-arms (the count restarts).
+    // that stalls. Pause again re-arms (the count restarts).
     logic        s_dec;
     logic [31:0] s_dsp, s_ins, s_dsps;
     logic [7:0]  s_dstat, s_sstat0;
@@ -451,7 +452,7 @@ module hp715 #(
         logic         shot_key;
         set = '0;
         for (int i = 0; i < 13; i++) e[i] = '0;
-        shot_key = ps2_key[10] != ev_key_q && ps2_key[9] && !ps2_key[8] && ps2_key[7:0] == 8'h7E;
+        shot_key = ps2_key[10] != ev_key_q && ps2_key[9] && ps2_key[8] && ps2_key[7:0] == 8'h77;
         ev_key_q <= ps2_key[10];
         if (l_ps2_v) begin set[9] = 1; e[9] = {8'd13, 6'd0, l_ps2[9:8], 32'd0, 56'd0, l_ps2[7:0]}; end
         if (ps2_key[10] != ev_key_q) begin set[10] = 1; e[10] = {8'd14, 8'd0, 32'd0, 53'd0, ps2_key}; end

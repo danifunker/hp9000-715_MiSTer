@@ -10,7 +10,7 @@ this drives the graphics console, HP-UX's ITE and X without anyone at the
 board. tools/mister/board.sh `key` and `mouse` wrap it.
 
     kbd.py type TEXT        TEXT with \\r (Enter), \\t, \\b, \\e (Escape) escapes;
-                            {up} {down} {left} {right} {f1}..{f12} {ctrl-x}
+                            {up} {down} {left} {right} {f1}..{f12} {pause} {ctrl-x}
     kbd.py mouse DX DY [BUTTONS]   relative move in steps of at most 10,
                             then BUTTONS (l, r, m: press and release each)
     kbd.py drag DX DY [BUTTON]     press BUTTON (default l), move, release
@@ -44,6 +44,7 @@ NAMED = {'up': 103, 'down': 108, 'left': 105, 'right': 106, 'home': 102, 'end': 
          'pgup': 104, 'pgdn': 109, 'ins': 110, 'del': 111}
 for n in range(1, 11): NAMED['f%d' % n] = 58 + n
 NAMED['f11'], NAMED['f12'] = 87, 88
+NAMED['scroll'], NAMED['pause'] = 70, 119       # Pause arms the core's one-shot recorder (rtl/hp715.sv); Main eats Scroll Lock
 SHIFT, CTRL = 42, 29
 
 
