@@ -430,7 +430,7 @@ module hp715 #(
     // so the ring holds the first ~0.5 s after the key. With a trigger it
     // runs on until the K-th (dbg_shot[47:32]) system call whose number is
     // dbg_shot[15:0] (and, when dbg_shot[48], whose r26 is dbg_shot[31:16]),
-    // then freezes 8192 events later: the ring holds what led up to it.
+    // then freezes 60000 events later (every interruption recorded meanwhile): the ring holds what led up to it and the path after it.
     // Pause re-arms (the counts restart). The OSD status word carries
     // dbg_shot (HP9K715.sv: status[127:64]; tools/mister/board.sh trig).
     logic        s_dec;
@@ -445,7 +445,7 @@ module hp715 #(
     logic        ev_shot;              // one-shot mode armed (Pause / dbg_shot[49])
     logic [16:0] ev_shot_cnt;
     logic [15:0] ev_trig_k;            // matching system calls seen
-    logic [13:0] ev_post;              // events still to record after the trigger (0: not triggered)
+    logic [15:0] ev_post;              // events still to record after the trigger (0: not triggered)
     logic        ev_key_q;
     logic [10:0] ev_freeze_cnt;
     logic        ev_freeze_arm, ev_frozen;
@@ -474,7 +474,7 @@ module hp715 #(
         // control flow in user mode after the trigger: every retired instruction not at the previous one + 4
         if (dbg_retire) begin
             ev_piaoq <= dbg_iaoq_f; ev_pvalid <= 1'b1;
-            if (ev_pvalid && ev_post != 14'd0 && dbg_iaoq_f[1:0] == 2'b11 && dbg_iaoq_f[31:2] != ev_piaoq[31:2] + 30'd1) begin
+            if (ev_pvalid && ev_post != 16'd0 && dbg_iaoq_f[1:0] == 2'b11 && dbg_iaoq_f[31:2] != ev_piaoq[31:2] + 30'd1) begin
                 set[14] = 1; e[14] = {8'd19, 8'd0, ev_piaoq, dbg_iaoq_f, dbg_insn};
             end
         end
@@ -522,10 +522,12 @@ module hp715 #(
         if (ev_shot) begin
             set[0] = 1'b0; set[1] = 1'b0; set[4] = 1'b0; set[5] = 1'b0; set[6] = 1'b0; set[8] = 1'b0; set[9] = 1'b0;
             if (!n_dbg_v) set[3] = 1'b0;
-            // (an external interrupt taken in user mode stays: its IIAOQ samples a spinning process's PC)
-            if ((dbg_trap_vec == 6'd4 && dbg_iaoq_f[1:0] != 2'b11) || dbg_trap_vec == 6'd6 || dbg_trap_vec == 6'd7 || dbg_trap_vec == 6'd15 ||
-                dbg_trap_vec == 6'd16 || dbg_trap_vec == 6'd17 || dbg_trap_vec == 6'd20 || dbg_trap_vec == 6'd21 ||
-                dbg_trap_vec == 6'd26) set[7] = 1'b0;
+            // (an external interrupt taken in user mode stays: its IIAOQ samples a spinning process's PC;
+            // after the trigger every interruption stays)
+            if (ev_post == 16'd0 &&
+                ((dbg_trap_vec == 6'd4 && dbg_iaoq_f[1:0] != 2'b11) || dbg_trap_vec == 6'd6 || dbg_trap_vec == 6'd7 || dbg_trap_vec == 6'd15 ||
+                 dbg_trap_vec == 6'd16 || dbg_trap_vec == 6'd17 || dbg_trap_vec == 6'd20 || dbg_trap_vec == 6'd21 ||
+                 dbg_trap_vec == 6'd26)) set[7] = 1'b0;
         end
         if (ev_frozen) set = '0;
         dbg_ev_valid <= 1'b0;
@@ -541,11 +543,11 @@ module hp715 #(
                 if (dbg_shot[15:0] == 16'd0) begin                        // no trigger: the first 65536 events
                     if (ev_shot_cnt == 17'd65535) ev_frozen <= 1'b1;
                     else ev_shot_cnt <= ev_shot_cnt + 17'd1;
-                end else if (ev_post != 14'd0) begin                      // triggered: 8192 more
-                    if (ev_post == 14'd1) ev_frozen <= 1'b1;
-                    ev_post <= ev_post - 14'd1;
+                end else if (ev_post != 16'd0) begin                      // triggered: 60000 more
+                    if (ev_post == 16'd1) ev_frozen <= 1'b1;
+                    ev_post <= ev_post - 16'd1;
                 end else if (set[11] && sc_r22[15:0] == dbg_shot[15:0] && (!dbg_shot[48] || sc_r26[15:0] == dbg_shot[31:16])) begin
-                    if (ev_trig_k == dbg_shot[47:32]) ev_post <= 14'd8191;
+                    if (ev_trig_k == dbg_shot[47:32]) ev_post <= 16'd59999;
                     else ev_trig_k <= ev_trig_k + 16'd1;
                 end
             end
