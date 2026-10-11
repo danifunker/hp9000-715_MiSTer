@@ -406,8 +406,9 @@ module hp715 #(
     // system call (addr = r2, the caller's return address into libc's stub;
     // data = {r24, r23}, the third and fourth arguments), 17 an 82596 event
     // (aux = the kind, rtl/lasi/i82596.sv dbg_*), 18 a system call's return
-    // (the first RFI after a system call: addr = r28, the value returned;
-    // data = {r22, the error number, 32'd0}). Each
+    // (the first user-mode instruction retired after it -- HP-UX returns by a
+    // privilege-lowering branch, not RFI: addr = r28, the value returned; data
+    // = {r22, the error number, the instruction's IAOQ}). Each
     // source has a one-deep slot; the lowest-numbered full slot goes out
     // each cycle.
     //
@@ -446,8 +447,9 @@ module hp715 #(
     logic [4:0]  ev_cop_q;
     // r22/r25/r26 (and r2/r23/r24) as last written (system-call number and arguments, events 15/16)
     logic [31:0] sc_r22, sc_r25, sc_r26, sc_r2, sc_r23, sc_r24, sc_r28;
-    logic [1:0]  sc_pend, sr_pend;
-    logic        sc_open;              // a system call is in progress (until its RFI)
+    logic [1:0]  sc_pend;
+    logic        sc_open;              // a system call is in progress (until the return to user mode)
+    logic        sc_kern;              // the last retired instruction was at PL 0
     always_ff @(posedge clk) begin
         if (c_gr_we[0]) case (c_gr_num0)
             5'd2: sc_r2 <= c_gr_data0; 5'd22: sc_r22 <= c_gr_data0; 5'd23: sc_r23 <= c_gr_data0;
@@ -464,7 +466,7 @@ module hp715 #(
         logic         shot_key, rfi;
         set = '0;
         for (int i = 0; i < 14; i++) e[i] = '0;
-        rfi = dbg_retire && !dbg_nullified && dbg_insn[31:26] == 6'd0 && (dbg_insn[12:5] == 8'h60 || dbg_insn[12:5] == 8'h65);
+        rfi = dbg_retire && dbg_iaoq_f[1:0] == 2'b11 && sc_kern;             // back in user mode
         shot_key = ps2_key[10] != ev_key_q && ps2_key[9] && ps2_key[8] && ps2_key[7:0] == 8'h77;
         ev_key_q <= ps2_key[10];
         if (l_ps2_v) begin set[9] = 1; e[9] = {8'd13, 6'd0, l_ps2[9:8], 32'd0, 56'd0, l_ps2[7:0]}; end
@@ -489,12 +491,12 @@ module hp715 #(
         sc_pend <= {sc_pend[0], dbg_trap && dbg_trap_vec == 6'd7 && dbg_iaoq_f[31:2] == 30'h3000_0001 && dbg_iaoq_f[1:0] != 2'b00};
         if (sc_pend[1]) begin set[11] = 1; e[11] = {8'd15, 8'd0, sc_r22, sc_r26, sc_r25}; end
         if (sc_pend[1]) begin set[12] = 1; e[12] = {8'd16, 8'd0, sc_r2, sc_r24, sc_r23}; end
-        // its return: the first RFI after it, two cycles later (the restored r28 has reached the mirror)
+        // its return: the first instruction retired in user mode after one retired in the kernel
+        if (dbg_retire) sc_kern <= dbg_iaoq_f[1:0] == 2'b00;
         if (!rst_n) sc_open <= 1'b0;
         else if (sc_pend[1]) sc_open <= 1'b1;
         else if (rfi) sc_open <= 1'b0;
-        sr_pend <= {sr_pend[0], rfi && sc_open};
-        if (sr_pend[1]) begin set[13] = 1; e[13] = {8'd18, 8'd0, sc_r28, sc_r22, 32'd0}; end
+        if (rfi && sc_open) begin set[13] = 1; e[13] = {8'd18, 8'd0, sc_r28, sc_r22, dbg_iaoq_f}; end
         if (n_dbg_v) begin set[3] = 1; e[3] = {8'd17, n_dbg_aux, n_dbg_addr, n_dbg_data}; end   // over a DMA event: the LAN's own view matters more
         // a whole-cache loop (FDCE/FICE, op 2 on either side) is recorded by its first operation only
         if (c_cop_valid) begin

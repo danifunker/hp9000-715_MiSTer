@@ -59,7 +59,7 @@ def decode(t, a, addr, d):
     if t == 10: return 'sel  id %d %s' % (a & 7, 'answered' if d & 1 else 'no target')
     if t == 15: return 'sysc %3d r26 %08x r25 %08x' % (addr, d >> 32, d & 0xFFFFFFFF)
     if t == 16: return 'sysa rp %08x r24 %08x r23 %08x' % (addr, d >> 32, d & 0xFFFFFFFF)
-    if t == 18: return 'sysr ret %08x r22 %08x' % (addr, d >> 32)
+    if t == 18: return 'sysr ret %08x r22 %08x at %08x' % (addr, d >> 32, d & 0xFFFFFFFF)
     if t == 17:
         k = ['?', 'PORT', 'CA', 'CB', 'STAT', 'RX', 'TX', 'RESET'][a] if a < 8 else 'k%d' % a
         if a == 2: return 'lan  CA    scb %08x cmd %04x' % (addr, d & 0xFFFF)
