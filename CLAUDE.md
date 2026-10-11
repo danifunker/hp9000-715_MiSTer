@@ -48,9 +48,10 @@ branch `hp9k715-enhancements` (`support/hp9k`). **Build 36 (2026-10-11)**: BLR/B
 **Build 38 (2026-10-11)**: the LASI floppy (`rtl/lasi/lasi_fdc.sv`, a 765A with
 no drive, review 10, STUBS S-028): **HP-UX 11i's installer reaches its main menu**
 on the serial and the HDMI console (`Floppies: 0`); the ROM's floppy self-test
-passes. Next: system stream -- run the 11i install onto `hpux11i.img` and boot it
-(`RESUME-20261011-floppy.md` "Status"), then `RESUME-20261010-features.md`;
-CPU stream `RESUME-20261010-cpu.md`.
+passes. **Build 39**: recorder event 15 (HP-UX syscalls). The 11i install stalls
+at some "Working..." steps (lan2 driver queries; `itool` polling a pipe at EOF)
+that take seconds on QEMU. Next: system stream `RESUME-20261011-11i-install.md`,
+then `RESUME-20261010-features.md`; CPU stream `RESUME-20261010-cpu.md`.
 
 ## The user's process
 
@@ -92,7 +93,8 @@ CPU stream `RESUME-20261010-cpu.md`.
 | `RESUME-20261009-artist.md` | superseded: root login, the stale-text SIGILL fix (build 15); the Artist plan |
 | `RESUME-20261009-x11.md` | superseded: Artist built (builds 16-17), the PDC console and HP-UX's X login on it |
 | `RESUME-20261010-features.md` | **current, system stream**: VGA timing, Harmony, CD audio, the 82596 LAN, Main's `support/hp9k`; what is left |
-| `RESUME-20261011-floppy.md` | **current, system stream**: the LASI PC floppy for HP-UX 11i -- done in builds 37-38 (its "Status" section); the board recipes for the 11i CD (serial and HDMI) and what is next (the install itself) |
+| `RESUME-20261011-11i-install.md` | **current, system stream (next)**: HP-UX 11i's installer stalls on the board (configuration with DHCP on, environment step with the network on, pre-install disk check) -- timings vs QEMU, the syscall/lan2 evidence, build 39's recorder event 15, the tools, next steps |
+| `RESUME-20261011-floppy.md` | done, system stream: the LASI PC floppy for HP-UX 11i -- done in builds 37-38 (its "Status" section); the board recipes for the 11i CD (serial and HDMI) and what is next (the install itself) |
 | `RESUME-20261010-cpu.md` | **current, CPU stream**: cpu-requests #9 (BV reserved bits, blocks HP-UX 11i media), the area limit, dual issue later |
 | `RESUME-20261009-artist-raster.md` | superseded: build 23 released (Artist's own picture, LUT1/attribute plane, vectors, OBS tool), the window-move stubs to chase, what is left |
 | `RESUME-20261009-artist-x.md` | superseded: CDE on the board (build 18), review 09's X fixes + the timing split in build 20 (to check), the board tools (key/mouse/vram), what is still missing (HDMI check, LUT1/attribute planes, parametric/dashed lines, release) |
