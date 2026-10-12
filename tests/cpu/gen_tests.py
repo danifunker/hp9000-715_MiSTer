@@ -1352,6 +1352,73 @@ def gen_sys(rng):
 
 
 # ---------------------------------------------------------------------------
+# link: cpu-requests #10 (2026-10-11) -- the link register of B,L when an
+# external interrupt lands right after it. Each vector arms the interval
+# timer K cycles ahead (K sweeps the phase), then runs `b,l 1f,rp; nop;
+# 1: stw rp` x 4 into RAM slots preset to the sentinel, with interrupts on.
+# A slot holds the sentinel (the interrupt was taken on that store: the
+# harness's handler resumes after the trapping instruction) or the link;
+# anything else is the bug (HP-UX 11i's itool got branch target + 4).
+# Words: the expected link, the four slots, the interruptions taken, K, rp
+# before (the interrupt on the b,l itself skips it in this harness: the
+# slots then hold that).
+# Not compared against QEMU or the model: tests/cpu/check_link.py.
+# ---------------------------------------------------------------------------
+LINK_WORDS = 8
+LINK_SLOTS = 0x000F0100
+
+
+def gen_link(rng):
+    suite = Suite("link")
+    N = 120
+    VA, PA, PDIR = 0x40001000, LINK_SLOTS & ~0xFFF, 0x00180000     # the slot page, mapped at VA for the walker
+    off = LINK_SLOTS & 0xFFF
+    entry = PDIR | ((VA >> 12) & 0xFF) << 4
+    AR = 0b011_11_00
+    def pdir():
+        w0 = 1 << 31 | ((VA >> 17) & 0x7FFF) << 16
+        w1 = 1 << 31 | AR << 20 | 1 << 28
+        return li(13, entry) + li(14, w0) + ["\tstw\t%r14, 0(%r13)"] + li(14, w1) + ["\tstw\t%r14, 4(%r13)"] + \
+               li(14, (PA >> 12) << 5) + ["\tstw\t%r14, 8(%r13)"] + ["\tstw\t%r0, 12(%r13)"] + \
+               li(13, 0xC0000) + ["\tmtctl\t%r13, %cr28"] + li(13, PDIR | 0xE0) + [diag("MTCPU", x=13, dr=24)] + \
+               li(13, 0x8) + [diag("MTCPU", x=13, dr=25)]
+    def vec(v, walk, miss):
+        k = 6 + v if walk != 1 else 7000 + v
+        lab = "Llink_%d_%d_%d" % (walk, miss, v)
+        base = "0(%sr1, %r14)" if walk else "0(%r14)"
+        st = lambda o: "\tstw\t%%rp, %d(%%sr1, %%r14)" % o if walk else "\tstw\t%%rp, %d(%%r14)" % o
+        b = ["\tcopy\t%rp, %r4"] + li(12, TRAPLOG) + li(14, LINK_SLOTS) + li(5, SENTINEL)
+        b += ["\tstw\t%%r5, %d(%%r14)" % (4 * i) for i in range(4)]
+        if miss: b += ["\tsync", "\tfdc\t%r0(%r14)", "\tsync"]
+        if walk: b += pdir() + li(13, VA) + ["\tpdtlb\t%r0(%sr1, %r13)"] + li(14, VA + off) + ["\tmtsp\t%r0, %sr1"] + \
+                      (["\tssm\t2, %r0", "\tldw\t0(%sr1, %r14), %r0", "\trsm\t2, %r0"] if walk == 2 else [])
+        b += ["\tldil\tL%%%s, %%r16" % lab, "\tldo\tR%%%s(%%r16), %%r16" % lab,
+              "\tldw\t28(%r12), %r17",
+              "\tldi\t-1, %r3", "\tmtctl\t%r3, %cr23",
+              "\tldil\tL%0x80000000, %r3", "\tmtctl\t%r3, %cr15",
+              "\tmfctl\t%cr16, %r13", "\tldo\t%d(%%r13), %%r13" % k, "\tmtctl\t%r13, %cr16"]
+        if walk: b += ["\tssm\t2, %r0"]
+        b += ["\tssm\t1, %r0", "\tb,l\t%s, %%rp" % lab, "\tnop", "%s:" % lab,
+              st(0), st(4), st(8), st(12),
+              "\tnop", "\tnop", "\tnop", "\tnop", "\tnop", "\tnop", "\tnop", "\tnop",
+              "\trsm\t1, %r0"]
+        if walk: b += ["\trsm\t2, %r0", "\tpdtlb\t%r0(%sr1, %r14)"] + li(13, 0x9) + [diag("MTCPU", x=13, dr=25)] + li(14, LINK_SLOTS)
+        b += ["\tmtctl\t%r0, %cr15", "\tldi\t-1, %r3", "\tmtctl\t%r3, %cr23",
+              "\tldw\t28(%r12), %r18", "\tsub\t%r18, %r17, %r18", "\tstw,ma\t%r16, 4(%r9)"]
+        b += ["\tldw\t%d(%%r14), %%r11" % (4 * i) + "\n\tstw,ma\t%r11, 4(%r9)" for i in range(4)]
+        b += ["\tstw,ma\t%r18, 4(%r9)", "\tldi\t%d, %%r11" % k, "\tstw,ma\t%r11, 4(%r9)", "\tstw,ma\t%r4, 4(%r9)",
+              "\tcopy\t%r4, %rp"]
+        return b, {"k": k}
+    for name, walk, miss in (("bl-link-irq", 0, 0), ("bl-link-irq-miss", 0, 1), ("bl-link-irq-virt", 2, 0), ("bl-link-irq-virt-miss", 2, 1),
+                             ("bl-link-irq-walk", 1, 0), ("bl-link-irq-walk-miss", 1, 1)):
+        body, ins = [], []
+        for v in range(N):
+            b, vin = vec(v, walk, miss); body += b; ins.append(vin)
+        suite.add(name, N, LINK_WORDS, body, ins)
+    return suite
+
+
+# ---------------------------------------------------------------------------
 # cache: the PCX-L cache diagnose path and the behaviours the ROM's cache
 # self-tests check (BOOTFLOW.md 4.3/4.4, cpu.md 5.4/5.5): tag and data bits
 # through WDD/SET_TAG/WDT and RDD/RDT (and the I side), parity generation
@@ -1988,13 +2055,14 @@ def gen_tlbx(rng):
 
 GENERATORS = {"alu1": gen_alu1, "alu2": gen_alu2, "shift": gen_shift,
               "mem": gen_mem, "branch": gen_branch, "trap": gen_trap,
-              "fp": gen_fp, "fpedge": gen_fpedge, "max1": gen_max1, "sys": gen_sys, "cache": gen_cache, "tlbx": gen_tlbx}
+              "fp": gen_fp, "fpedge": gen_fpedge, "max1": gen_max1, "sys": gen_sys, "cache": gen_cache, "tlbx": gen_tlbx,
+              "link": gen_link}
 
 
 def main(argv):
     if len(argv) != 3 or argv[1] not in GENERATORS:
         sys.exit(__doc__)
-    rng = random.Random({"alu1": 1, "alu2": 3, "shift": 2, "mem": 4, "branch": 5, "trap": 6, "fp": 7, "fpedge": 8, "max1": 9, "sys": 10, "cache": 11, "tlbx": 12}[argv[1]] * 0x715)
+    rng = random.Random({"alu1": 1, "alu2": 3, "shift": 2, "mem": 4, "branch": 5, "trap": 6, "fp": 7, "fpedge": 8, "max1": 9, "sys": 10, "cache": 11, "tlbx": 12, "link": 13}[argv[1]] * 0x715)
     suite = GENERATORS[argv[1]](rng)
     os.makedirs(argv[2], exist_ok=True)
     suite.write(argv[2])

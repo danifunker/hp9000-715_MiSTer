@@ -52,9 +52,9 @@ passes. **Build 39**: recorder event 15 (HP-UX syscalls). **Builds 40-47 (2026-1
 recorder's one-shot/trigger/flow captures found the 11i installer's stalls:
 **cpu-requests #10**, `b,l`'s link register corrupted when an external
 interrupt lands two instructions after the branch (`itool`'s scanner returns
-into itself); the fix is the user's call. Next: system stream
-`RESUME-20261011-11i-install.md` (the TCOE 12/2004 DVD is on the MiSTer),
-then `RESUME-20261010-features.md`; CPU stream `RESUME-20261010-cpu.md`.
+into itself); the fix is the user's call. **Next: `RESUME-20261011-bl-link.md`** (the user asked for the CPU
+fix: the bug, the evidence, the half-built reproduction, the recorder tools,
+then the TCOE 12/2004 install), then `RESUME-20261010-features.md`.
 
 ## The user's process
 
@@ -96,7 +96,8 @@ then `RESUME-20261010-features.md`; CPU stream `RESUME-20261010-cpu.md`.
 | `RESUME-20261009-artist.md` | superseded: root login, the stale-text SIGILL fix (build 15); the Artist plan |
 | `RESUME-20261009-x11.md` | superseded: Artist built (builds 16-17), the PDC console and HP-UX's X login on it |
 | `RESUME-20261010-features.md` | **current, system stream**: VGA timing, Harmony, CD audio, the 82596 LAN, Main's `support/hp9k`; what is left |
-| `RESUME-20261011-11i-install.md` | **current, system stream (next)**: HP-UX 11i's installer stalls on the board (configuration with DHCP on, environment step with the network on, pre-install disk check) -- timings vs QEMU, the syscall/lan2 evidence, build 39's recorder event 15, the tools, next steps |
+| `RESUME-20261011-bl-link.md` | **current, next**: cpu-requests #10 (`b,l`'s link corrupted by an external interrupt two instructions later -- the 11i installer's stalls): the evidence, the `tests/cpu` `link` suite so far, the recorder's capture modes, then the TCOE install |
+| `RESUME-20261011-11i-install.md` | superseded (its "Status" has how the stalls were traced): HP-UX 11i's installer stalls on the board (configuration with DHCP on, environment step with the network on, pre-install disk check) -- timings vs QEMU, the syscall/lan2 evidence, build 39's recorder event 15, the tools, next steps |
 | `RESUME-20261011-floppy.md` | done, system stream: the LASI PC floppy for HP-UX 11i -- done in builds 37-38 (its "Status" section); the board recipes for the 11i CD (serial and HDMI) and what is next (the install itself) |
 | `RESUME-20261010-cpu.md` | **current, CPU stream**: cpu-requests #9 (BV reserved bits, blocks HP-UX 11i media), the area limit, dual issue later |
 | `RESUME-20261009-artist-raster.md` | superseded: build 23 released (Artist's own picture, LUT1/attribute plane, vectors, OBS tool), the window-move stubs to chase, what is left |
