@@ -62,6 +62,8 @@ def decode(t, a, addr, d):
     if t == 16: return 'sysa rp %08x r24 %08x r23 %08x' % (addr, d >> 32, d & 0xFFFFFFFF)
     if t == 18: return 'sysr ret %08x r22 %08x at %08x' % (addr, d >> 32, d & 0xFFFFFFFF)
     if t == 19: return 'flow %08x -> %08x insn %08x' % (addr, d >> 32, d & 0xFFFFFFFF)
+    if t == 20: return 'mem%s at %08x ea %08x %s %08x' % ('L' if a & 1 else 'S', addr, d >> 32, 'got' if a & 1 else 'put', d & 0xFFFFFFFF)
+    if t == 21: return 'whold %-6s at %08x ea %08x' % (['?', 'dmiss', 'walk', 'replay'][a & 3], addr, d >> 32)
     if t == 17:
         k = ['?', 'PORT', 'CA', 'CB', 'STAT', 'RX', 'TX', 'RESET'][a] if a < 8 else 'k%d' % a
         if a == 2: return 'lan  CA    scb %08x cmd %04x' % (addr, d & 0xFFFF)
