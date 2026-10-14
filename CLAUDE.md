@@ -52,7 +52,7 @@ passes. **Build 39**: recorder event 15 (HP-UX syscalls). **Builds 40-47 (2026-1
 recorder's one-shot/trigger/flow captures found the 11i installer's stalls:
 **cpu-requests #10**, `b,l`'s link register corrupted when an external
 interrupt lands two instructions after the branch (`itool`'s scanner returns
-into itself); the fix is the user's call. **Next: `RESUME-20261011-bl-link.md`** (the user asked for the CPU
+into itself). **Fixed 2026-10-14 (`5cda517`, build 52)**: not the interrupt but the kernel's `rfi` into a *nullified* `b,l,n` whose IIAOQ back is its own target -- the target was fetched twice and the second copy ran as the first's delay slot (`pa_fetch` keeps only the oldest instruction at the slot's address; the `link` suite's RAM groups reproduce it; cputest 13/13, cosim 8/8); the 11i installer passes its first step on the board. **Next: `RESUME-20261011-bl-link.md`** (the user asked for the CPU
 fix: the bug, the evidence, the half-built reproduction, the recorder tools,
 then the TCOE 12/2004 install), then `RESUME-20261010-features.md`.
 

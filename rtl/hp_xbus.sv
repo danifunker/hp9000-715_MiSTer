@@ -8,7 +8,9 @@
 // is the CPU's (a byte write reads back at once, so the ROM's data polling
 // succeeds on its first read), port B the host's (load at start-up, save to
 // the SD card); `ee_dirty` is set by every CPU write and cleared by the host.
-module hp_xbus (
+module hp_xbus #(
+    parameter EE_INIT = ""       // $readmemh file of 2048 words for the EEPROM's initial contents ("" = blank)
+) (
     input  logic        clk,
     input  logic        rst_n,
     input  logic [3:0]  cfg_model,      // board-ID nibble: 7 = 715/64, B = /80, F = /100
@@ -106,5 +108,11 @@ module hp_xbus (
         string f;
         if ($value$plusargs("eeprom_out=%s", f)) $writememh(f, ee);
     end
+`else
+    // the board: the shipped image built in (STUBS S-016), so a machine with
+    // no EEPROM image mounted still boots with the graphics console
+    generate if (EE_INIT != "") begin : g_init
+        initial $readmemh(EE_INIT, ee);
+    end endgenerate
 `endif
 endmodule

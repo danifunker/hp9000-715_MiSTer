@@ -55,7 +55,8 @@ cmd="${1:-}"; shift || true
 case "$cmd" in
 setup)
     ram="${1:-64}"; rd="${2:-0}"
-    case "$ram" in 16) r=0 ;; 32) r=1 ;; 64) r=2 ;; 128) r=3 ;; *) echo "RAM 16/32/64/128" >&2; exit 2 ;; esac
+    # O[5:3] since 2026-10-14: 0 = 32 MB (the default), 1 = 64, 2 = 128, 3 = 16
+    case "$ram" in 32) r=0 ;; 64) r=1 ;; 128) r=2 ;; 16) r=3 ;; *) echo "RAM 16/32/64/128" >&2; exit 2 ;; esac
     rsh "mkdir -p /media/fat/config && python3 - '$r' '$GAMES/$DISK' '$GAMES/$EEP' '$rd'" <<'PY'
 import sys
 r, disk, eep, rd = int(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])

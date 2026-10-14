@@ -69,10 +69,12 @@ localparam CONF_STR = {
 	"SC3,ISO,CD-ROM (ID 2);",
 	"SC1,EEP,Mount EEPROM;",
 	"-;",
+	"O[17:15],Boot mode (on reset),Normal,BOOT_ADMIN,ISL,Single-user,LVM maintenance,Network,CD/DVD;",
 	"O[2:1],Model (on reset),715/64,715/80,715/100;",
-	"O[5:3],RAM (on reset),16MB,32MB,64MB,128MB;",
+	"O[5:3],RAM (on reset),32MB,64MB,128MB,16MB;",
+	"O[11:10],Display,Graphics,Auto,Serial console;",
+	"O[18],EEPROM (no image),Built-in,Blank;",
 	"O[9:8],SDRAM read capture,Edge 3,Edge 2.75,Edge 2.5,Edge 4;",
-	"O[11:10],Display,Auto,Graphics,Serial console;",
 	"O[14:12],Network,eth0,Off,eth1,macvlan,tap0;",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"O[125:123],Scale,V-Integer,Normal,Narrower HV-Integer,Wider HV-Integer,HV-Integer;",
@@ -186,8 +188,8 @@ wire        rom_dl = ioctl_download && ioctl_index[7:0] == 8'd0;
 reg         rom_loaded = 0;
 always @(posedge clk_sys) if (rom_dl) rom_loaded <= 1'b1;
 
-wire sdram_ready, ee_ready;
-wire reset_req = RESET | status[0] | buttons[1] | rom_dl | ~rom_loaded | ~pll_locked | ~sdram_ready | ~ee_ready;
+wire sdram_ready, ee_ready, ee_loaded;
+wire reset_req = RESET | status[0] | buttons[1] | rom_dl | ~rom_loaded | ~pll_locked | ~sdram_ready | ~ee_ready | ee_loaded;
 reg  [15:0] rst_cnt = 16'hFFFF;
 always @(posedge clk_sys)
 	if (reset_req) rst_cnt <= 16'hFFFF;
@@ -195,10 +197,12 @@ always @(posedge clk_sys)
 wire m_reset = rst_cnt != 0;
 
 // model and RAM size, latched while the machine is in reset; RAM no larger
-// than the module (sdram_sz[1:0]: 1 = 32 MB, 2 = 64 MB, 3 = 128 MB)
+// than the module (sdram_sz[1:0]: 1 = 32 MB, 2 = 64 MB, 3 = 128 MB). The RAM
+// option lists 32MB first (the default, 2026-10-14): index 0..3 = 32, 64,
+// 128, 16 MB
 reg  [1:0] cfg_model;
 reg  [3:0] cfg_ram_lg;
-wire [3:0] want_lg = 4'd4 + status[5:3];
+wire [3:0] want_lg = 4'd4 + 4'((status[5:3] + 3'd1) & 3'd3);
 wire [3:0] max_lg  = sdram_sz[1:0] == 2'd3 ? 4'd7 : sdram_sz[1:0] == 2'd2 ? 4'd6 : 4'd5;
 always @(posedge clk_sys) if (m_reset) begin
 	cfg_model  <= status[2:1] == 2'd3 ? 2'd0 : status[2:1];
@@ -272,10 +276,18 @@ wire        nb_req, nb_we, nb_ack;
 wire [12:0] nb_addr;
 wire [63:0] nb_wdata, nb_rdata;
 
-hp715 #(.CLK_HZ(64_000_000), .HAS_ARTIST(1'b1)) hp715
+// the debug recorder (rtl/hp715.sv dbg_ev_*, rtl/mister/trace_ddr3.sv, tools/mister/trace_*)
+// is a debug build's: `set_global_assignment -name VERILOG_MACRO "HP9K715_DEBUG=1"` in the
+// QSF (docs/design/system.md 10, build 49); a release build leaves it out (about 700 ALMs)
+`ifdef HP9K715_DEBUG
+localparam bit DBG_RECORDER = 1'b1;
+`else
+localparam bit DBG_RECORDER = 1'b0;
+`endif
+hp715 #(.CLK_HZ(64_000_000), .HAS_ARTIST(1'b1), .EE_INIT("rtl/mister/hp715_default.hex"), .DBG_RECORDER(DBG_RECORDER)) hp715
 (
 	.clk(clk_sys), .reset(m_reset), .pclk(clk_pix), .prst(prst_pix),
-	.cfg_model(cfg_model), .cfg_ram_lg(cfg_ram_lg), .sim_cr16_mul(4'd0),
+	.cfg_model(cfg_model), .cfg_ram_lg(cfg_ram_lg), .sim_cr16_mul(4'd0), .cfg_boot(status[17:15]),
 	.soft_pwr_n(softoff_cnt == 0), .toc_button(status[6]),
 	.led_latch(leds), .led_strobe(led_strobe), .lasi_pcr(pcr), .audio_l(audio_l), .audio_r(audio_r), .cd_change(img_mounted[3]),
 	.nb_req(nb_req), .nb_we(nb_we), .nb_addr(nb_addr), .nb_wdata(nb_wdata), .nb_ack(nb_ack), .nb_rdata(nb_rdata),
@@ -308,12 +320,16 @@ hp715 #(.CLK_HZ(64_000_000), .HAS_ARTIST(1'b1)) hp715
 	.dbg_gr(gr), .dbg_ev_valid(dbg_ev_valid), .dbg_ev(dbg_ev)
 );
 
-// the debug event ring in DDR3 at 0x3200_0000 (tools/mister/trace_dump.py)
-trace_ddr3 #(.LG_N(16)) trace_ddr3
-(
-	.clk(clk_sys), .rst(m_reset), .ev_valid(dbg_ev_valid), .ev(dbg_ev),
-	.tr_req(tr_req), .tr_idx(tr_idx), .tr_data(tr_data), .tr_ack(tr_ack), .drops()
-);
+// the debug event ring in DDR3 at 0x3200_0000 (tools/mister/trace_dump.py), debug builds only
+generate if (DBG_RECORDER) begin : g_trace
+	trace_ddr3 #(.LG_N(16)) trace_ddr3
+	(
+		.clk(clk_sys), .rst(m_reset), .ev_valid(dbg_ev_valid), .ev(dbg_ev),
+		.tr_req(tr_req), .tr_idx(tr_idx), .tr_data(tr_data), .tr_ack(tr_ack), .drops()
+	);
+end else begin : g_no_trace
+	assign tr_req = 1'b0; assign tr_idx = 16'd0; assign tr_data = 256'd0;
+end endgenerate
 
 ///////////////////////   MEMORY   ///////////////////////////////
 
@@ -423,7 +439,7 @@ generate for (gi = 0; gi < 3; gi = gi + 1) begin : g_sd
 end endgenerate
 eeprom_save #(.CLK_HZ(64_000_000)) eeprom_save
 (
-	.clk(clk_sys), .rst(~pll_locked), .ready(ee_ready), .osd_open(OSD_STATUS),
+	.clk(clk_sys), .rst(~pll_locked), .ready(ee_ready), .loaded(ee_loaded), .blank_if_none(status[18]), .osd_open(OSD_STATUS),
 	.img_mounted(img_mounted[1]), .img_size(img_size),
 	.sd_lba(sd_lba[1]), .sd_blk_cnt(sd_blk_cnt[1]), .sd_rd(sd_rd[1]), .sd_wr(sd_wr[1]), .sd_ack(sd_ack[1]),
 	.sd_buff_addr(sd_buff_addr), .sd_buff_dout(sd_buff_dout), .sd_buff_din(sd_buff_din[1]),
@@ -442,7 +458,7 @@ eeprom_save #(.CLK_HZ(64_000_000)) eeprom_save
 // 640x480 at 60 Hz (25.175); artist.sv's pix_mode names the clock and the
 // state machine below reconfigures the PLL to it. Every pixel goes through
 // LUT0/LUT1 by the attribute plane, the hardware cursor laid over it. OSD
-// "Display": Auto = Artist while its video is on, else the serial console;
+// "Display" (Graphics is the default, 2026-10-14): Auto = Artist while its video is on, else the serial console;
 // Graphics = always Artist; Serial console = never. Auto keeps Artist once
 // its video has been on since the machine's reset: a blanked screen (X's
 // screen saver clears MISC_VIDEO bits 27/25) stays black, as on a 715,
@@ -458,7 +474,7 @@ eeprom_save #(.CLK_HZ(64_000_000)) eeprom_save
 // video_mode).
 reg  gfx_seen = 1'b0;
 always @(posedge clk_sys) gfx_seen <= m_reset ? 1'b0 : gfx_seen | gfx_on;
-wire gfx_show = status[11:10] == 2'd2 ? 1'b0 : status[11:10] == 2'd1 ? 1'b1 : gfx_on | gfx_seen;
+wire gfx_show = status[11:10] == 2'd2 ? 1'b0 : status[11:10] == 2'd0 ? 1'b1 : gfx_on | gfx_seen;   // 0 Graphics, 1 Auto, 2 serial
 // the clock the shown picture needs (0 = 108.181 MHz, the console's too)
 reg  [2:0] pix_want = 3'd0;
 always @(posedge clk_sys) pix_want <= gfx_show ? gfx_pix_mode : 3'd0;

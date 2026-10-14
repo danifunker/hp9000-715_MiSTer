@@ -109,8 +109,16 @@ module mioc
     // ------------------------------------------------------------ registers
     logic [31:0] r_control, r_status, r_mtcv, r_wrt_chk, r_err0, r_err1, r_rd_chk, r_derradd;
     logic [31:0] r_flexid;
-    logic [31:0] r_comp [16];
-    logic [31:0] r_mask [16];
+    // the 16 memory-block comparators and masks: the bits the decode uses
+    // (comparator 31:23, mask 28:22, 2026-10-14) are flops; the whole words
+    // are kept for read-back in a 32 x 32 MLAB (word {mask, n}), read a cycle
+    // after S_IDEC (S_ICREG); an entry not written since reset reads its
+    // reset value (comparator 0, mask 0x0040_0000 = disabled)
+    logic [8:0]  c_hi [16];
+    logic [6:0]  m_hi [16];
+    logic [15:0] c_wr, m_wr;                // written since reset
+    (* ramstyle = "MLAB" *) logic [31:0] cm_ram [32];
+    logic [31:0] cm_q;
     wire ecc_on = r_mtcv[26];               // MTCV bit 5 (PA numbering)
     wire slen   = r_control[12];            // MIOC_CONTROL bit 19
     wire pgape  = r_control[14];            // bit 17
@@ -138,8 +146,8 @@ module mioc
         r = '0; found = 1'b0;
         for (int n = 0; n < 16; n++) begin
             logic [8:0] m;
-            m = {3'b000, r_mask[n][28:23]};
-            if (!found && !r_mask[n][22] && (((a[31:23] ^ r_comp[n][31:23]) & ~m) == 9'd0)) begin
+            m = {3'b000, m_hi[n][6:1]};
+            if (!found && !m_hi[n][0] && (((a[31:23] ^ c_hi[n]) & ~m) == 9'd0)) begin
                 found = 1'b1;
                 r.hit = 1'b1;
                 if (n == 2) begin
@@ -212,7 +220,7 @@ module mioc
         S_IDLE,
         S_LDEC, S_LWCOLL, S_LWPT, S_LWRAM, S_LWCHK, S_LRRAM, S_LRDEC,
         S_IDEC, S_IRAMRD, S_IMERGE, S_IRAMWR, S_ICHKWR, S_IRAMBURST,
-        S_IROM, S_IROMOUT, S_IGSC, S_IGSCW, S_ICHKRD, S_IRESP, S_IGAP
+        S_IROM, S_IROMOUT, S_IGSC, S_IGSCW, S_ICHKRD, S_ICREG, S_IRESP, S_IGAP
     } st_e;
     st_e st;
 
@@ -252,7 +260,7 @@ module mioc
     logic [1:0]  f1_beat;
 
 
-    // MIOC register read
+    // MIOC register read (the comparators and masks come from cm_ram, S_ICREG)
     function automatic logic [31:0] mioc_rd(input logic [11:0] off);
         logic [31:0] r;
         r = 32'd0;
@@ -265,11 +273,27 @@ module mioc
             12'h0D4: r = r_err1;
             12'h0D8: r = r_rd_chk;
             12'h0E0: r = r_derradd;
-            default:
-                if (off[11:7] == 5'b00010) r = off[6] ? r_mask[off[5:2]] : r_comp[off[5:2]];
+            default: ;
         endcase
         return r;
     endfunction
+    wire u_is_cm = u_addr[11:7] == 5'b00010;          // 0x100-0x17F: comparators, masks
+    wire u_cm_written = u_addr[6] ? m_wr[u_addr[5:2]] : c_wr[u_addr[5:2]];
+    wire [31:0] u_cm_reset = u_addr[6] ? 32'h0040_0000 : 32'd0;
+
+    // the comparator/mask word store: read continuously at u_addr (valid the
+    // cycle after u_addr is loaded, i.e. during S_ICREG), written in S_IDEC
+    logic        cm_we;
+    logic [4:0]  cm_wa;
+    logic [31:0] cm_wd;
+    always_ff @(posedge clk) begin
+        if (cm_we) cm_ram[cm_wa] <= cm_wd;
+        cm_q <= cm_ram[u_addr[6:2]];
+    end
+
+    // one block decoder for both ports (S_LDEC and S_IDEC never coincide)
+    blk_t dec_blk;
+    assign dec_blk = blk_decode(st == S_LDEC ? l_addr : u_addr);
 
     wire [31:0] u_word = u_addr[2] ? u_wdata[31:0] : u_wdata[63:32];
 
@@ -285,6 +309,7 @@ module mioc
         eir_set <= 1'b0; toc_req <= 1'b0; bcast_reset <= 1'b0;
         lasi_eir_ack <= 1'b0; lasi_eir_err <= 1'b0;
         pw_en <= 1'b0;
+        cm_we <= 1'b0;
         dbg_buserr <= 1'b0;
         if (rom_inval) rb_valid <= 1'b0;
         st_set = 7'd0; st_clr = 7'd0; ea_we = 1'b0; ea_val = 32'd0;
@@ -293,7 +318,8 @@ module mioc
             st <= S_IDLE;
             r_control <= 32'd0; r_status <= 32'd0; r_mtcv <= 32'd0; r_wrt_chk <= 32'd0;
             r_err0 <= 32'd0; r_err1 <= 32'd0; r_rd_chk <= 32'd0; r_derradd <= 32'd0; r_flexid <= 32'd0;
-            for (int n = 0; n < 16; n++) begin r_comp[n] <= 32'd0; r_mask[n] <= 32'h0040_0000; end
+            for (int n = 0; n < 16; n++) begin c_hi[n] <= 9'd0; m_hi[n] <= 7'b0000001; end
+            c_wr <= 16'd0; m_wr <= 16'd0;
             ram_req <= 1'b0; chk_req <= 1'b0; rom_req <= 1'b0;
             mem_wready <= 1'b0; rb_valid <= 1'b0; f1_v <= 1'b0;
             last_fill_line <= 23'd0;
@@ -348,7 +374,7 @@ module mioc
 
             // ------------------------------------------------- line port
             S_LDEC: begin
-                l_blk <= blk_decode(l_addr);
+                l_blk <= dec_blk;
                 if (l_we) begin st <= S_LWCOLL; mem_wready <= 1'b1; end
                 else st <= S_LRDEC;            // RAM fill, or the no-RAM answers
                 cnt <= 3'd0;
@@ -430,7 +456,7 @@ module mioc
                 cls_e c;
                 c = io_class(u_addr);
                 u_cls <= c;
-                u_blk <= blk_decode(u_addr);
+                u_blk <= dec_blk;
                 cnt <= 3'd0;
                 tmo <= 22'd0;
                 u_hi_pending <= u_be[7:4] != 4'd0 || u_be == 8'd0;
@@ -476,12 +502,15 @@ module mioc
                                 12'h0C4: r_wrt_chk <= u_word;
                                 12'h0D0: r_err0 <= u_word;
                                 default:
-                                    if (u_addr[11:7] == 5'b00010) begin
-                                        if (u_addr[6]) r_mask[u_addr[5:2]] <= u_word;
-                                        else           r_comp[u_addr[5:2]] <= u_word;
+                                    if (u_is_cm) begin
+                                        cm_we <= 1'b1; cm_wa <= u_addr[6:2]; cm_wd <= u_word;
+                                        if (u_addr[6]) begin m_hi[u_addr[5:2]] <= u_word[28:22]; m_wr[u_addr[5:2]] <= 1'b1; end
+                                        else           begin c_hi[u_addr[5:2]] <= u_word[31:23]; c_wr[u_addr[5:2]] <= 1'b1; end
                                     end
                             endcase
                             st <= S_IRESP;
+                        end else if (u_is_cm) begin
+                            st <= S_ICREG;             // cm_q is valid next cycle
                         end else if ((u_addr[11:0] & 12'hFFC) == 12'h0DC) begin
                             st <= S_ICHKRD;
                             chk_req <= 1'b1; chk_we <= 1'b0; chk_addr <= last_fill_line; chk_be <= 4'hF;
@@ -575,6 +604,10 @@ module mioc
             S_ICHKWR: if (chk_ack) begin chk_req <= 1'b0; st <= S_IRESP; end
             S_ICHKRD: if (chk_ack) begin
                 chk_req <= 1'b0; u_rdata <= {2{chk_rdata}}; st <= S_IRESP;
+            end
+            S_ICREG: begin
+                u_rdata <= {2{u_cm_written ? cm_q : u_cm_reset}};
+                st <= S_IRESP;
             end
 
             // boot ROM: fill the line buffer, streaming the beats of a burst

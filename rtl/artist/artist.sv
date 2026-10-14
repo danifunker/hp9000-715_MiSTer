@@ -246,8 +246,8 @@ module artist (
     logic [3:0]  e_rop;
     logic        e_transp, e_maskena, e_expand, e_rmw, e_get32;
     logic [4:0]  e_srcj;                  // an Otc32 source's bit plane (BA J field; 0 = OR of the plane mask)
-    logic        e_font;                  // a font-engine write: the second row takes e_pat2
-    logic [31:0] e_pat2;
+    logic        e_font;                  // a font-engine write: the second row takes {e_pat2, 16'd0}
+    logic [15:0] e_pat2;
     logic [4:0]  f_row;                   // the font engine's row counter (0x100AA0 / 0x1008A0)
     // vectors (09 5.4), one pixel per span: 0x100E44/E04 from DST to a point (with / without
     // the end pixel), 0x100C40 a point; X's clipped lines start at DST with the terms in
@@ -258,13 +258,15 @@ module artist (
     logic [31:0] r80c;                    // the count register (bits 31:16): 0x10080C, 0x100CCC, 0x100ECC
     logic        pat_mode;                // a dashed vector is open: 0x100CCC draws its next dash
     logic        a_clr;                   // the attribute plane is to be cleared (after a reset)
-    // an operation's operands, captured by G_DEC for E_LAUNCH
-    logic        lq_put, lq_fill, lq_move, lq_font, lq_line, lq_incl, lq_lto, lq_dash, lq_cont;
-    logic [31:0] lq_d, lq_dxy, lq_wh, lq_sxy, lq_xfer, lq_end;
-    logic [15:0] lq_n;
+    // an operation's operands, captured by G_DEC for E_LAUNCH. Only what the
+    // registers do not hold by then: G_DEC updates DST/LEN/TRANSFER_DATA/0x80C
+    // in the same cycle, so E_LAUNCH reads lenxy, srcxy, xfer, r80c and the
+    // GSC data (g_wdata/g_be, stable until the next request lands) directly;
+    // lq_dxy is DST before a vector's end point replaced it
+    logic        lq_put, lq_fill, lq_move, lq_font, lq_line, lq_incl, lq_lto, lq_dash, lq_cont, lq_end_len;
+    logic [31:0] lq_dxy;
     logic [4:0]  lq_frow;
     logic [21:0] lq_xy;
-    logic [3:0]  lq_be;
     logic [15:0] l_x, l_y;                // the next pixel (two's complement)
     logic [15:0] l_adx, l_ady;            // |dx|, |dy|
     logic signed [17:0] l_e, l_inc, l_dec;  // error term; its step on the major axis alone / with the minor one
@@ -283,7 +285,7 @@ module artist (
     // VRAM reads
     logic [18:0] rd_base;
     logic [8:0]  rd_n, rd_req, rd_got;
-    logic [63:0] rw [5];                  // a CPU read's words
+    logic [63:0] ar [4];                  // a CPU read's words, aligned to its first pixel (byte 0 = pixel x0)
     // the write pipeline: line-buffer read (step wi) -> compute -> FIFO -> bursts
     logic [8:0]  wi;                      // step 0 primes the source pair, step k+1 makes word k
     logic        p1_v, p1_prime;
@@ -411,12 +413,16 @@ module artist (
         end
     end
 
-    // a CPU read's result from the words in rw
+    // a CPU read: the VRAM words are aligned as they arrive -- aligned word k
+    // = {word k+1, word k} >> 8 * (x0 mod 8), byte i of the whole = pixel x0 + i
+    function automatic logic [63:0] align(input logic [63:0] hi, input logic [63:0] lo, input logic [2:0] off);
+        logic [127:0] w;
+        w = {hi, lo} >> (8 * off);
+        return w[63:0];
+    endfunction
     always_comb begin
-        logic [319:0] p;
         logic [255:0] q;
-        p = {rw[4], rw[3], rw[2], rw[1], rw[0]};
-        q = 256'(p >> (8 * e_x0[2:0]));
+        q = {ar[3], ar[2], ar[1], ar[0]};
         get_data = 32'd0;
         if (e_get32)
             for (int i = 0; i < 32; i++)
@@ -474,17 +480,15 @@ module artist (
 
     always_ff @(posedge clk) begin
         // operations G_DEC launches, set up after the engine's case below
-        logic        lp_put, lp_fill, lp_move, lp_font, lp_line, lp_incl, lp_lto, lp_dash, lp_cont;
-        logic [31:0] lp_d, lp_dxy, lp_wh, lp_sxy, lp_xfer, lp_end;
-        logic [15:0] lp_n;
+        logic        lp_put, lp_fill, lp_move, lp_font, lp_line, lp_incl, lp_lto, lp_dash, lp_cont, lp_end_len;
+        logic [31:0] lp_dxy;
         logic [4:0]  lp_frow;
         logic [21:0] lp_xy;
-        logic [3:0]  lp_be;
         lp_put = 1'b0; lp_fill = 1'b0; lp_move = 1'b0;
-        lp_font = 1'b0; lp_line = 1'b0; lp_incl = 1'b0; lp_frow = 5'd0; lp_end = 32'd0; lp_xfer = xfer;
-        lp_lto = 1'b0; lp_dash = 1'b0; lp_cont = 1'b0; lp_n = 16'd0;
-        lp_d = g_wdata; lp_be = g_be; lp_xy = 22'd0;
-        lp_dxy = dstxy; lp_wh = lenxy; lp_sxy = srcxy;
+        lp_font = 1'b0; lp_line = 1'b0; lp_incl = 1'b0; lp_frow = 5'd0; lp_end_len = 1'b0;
+        lp_lto = 1'b0; lp_dash = 1'b0; lp_cont = 1'b0;
+        lp_xy = 22'd0;
+        lp_dxy = dstxy;
 
         ack <= 1'b0; err <= 1'b0;
         st_we <= 1'b0; stg_we <= 1'b0; lb_we <= 1'b0; pal_wr <= 1'b0; cb_we <= 1'b0;
@@ -542,7 +546,7 @@ module artist (
                         rd_base <= {g_src_xy[20:11], g_src_xy[10:3]};
                         rd_n <= 9'(x1[10:3] - g_src_xy[10:3]) + 9'd1;
                         rd_req <= 9'd0; rd_got <= 9'd0;
-                        for (int k = 0; k < 5; k++) rw[k] <= 64'd0;
+                        for (int k = 0; k < 4; k++) ar[k] <= 64'd0;
                         e_st <= E_RDG;
                         g_st <= G_GET;
                     end
@@ -583,8 +587,8 @@ module artist (
                         24'h10080C: r80c <= bmerge(r80c, g_wdata, g_be);
                         24'h100820: xfer <= bmerge(xfer, g_wdata, g_be);
                         24'h100A00: begin lp_dxy = bmerge(dstxy, g_wdata, g_be); dstxy <= lp_dxy; lp_fill = 1'b1; pat_mode <= 1'b0; end
-                        24'h100A04: begin lp_wh = bmerge(lenxy, g_wdata, g_be); lenxy <= lp_wh; lp_fill = 1'b1; end
-                        24'h100A20: begin xfer <= bmerge(xfer, g_wdata, g_be); lp_xfer = bmerge(xfer, g_wdata, g_be); lp_fill = 1'b1; end
+                        24'h100A04: begin lenxy <= bmerge(lenxy, g_wdata, g_be); lp_fill = 1'b1; end
+                        24'h100A20: begin xfer <= bmerge(xfer, g_wdata, g_be); lp_fill = 1'b1; end
                         24'h100AA0, 24'h1008A0: begin
                             // the font engine (09 2.3): two 16-pixel rows a word at DST,
                             // rows >= LEN h dropped, then DST x += LEN w; AA0 restarts the rows
@@ -598,22 +602,21 @@ module artist (
                         24'h100E44, 24'h100E04, 24'h100C40: begin
                             // a vector from DST to this point (E44 with, E04 without the end
                             // pixel); C40 plots the point (X's software vector emulator); DST := it
-                            lp_line = 1'b1; lp_lto = 1'b1; lp_end = bmerge(32'd0, g_wdata, g_be);
+                            lp_line = 1'b1; lp_lto = 1'b1;
                             lp_incl = g_offw != 24'h100E04;
-                            if (g_offw == 24'h100C40) lp_dxy = lp_end;
-                            dstxy <= lp_end; pat_mode <= 1'b0;
+                            if (g_offw == 24'h100C40) lp_dxy = bmerge(32'd0, g_wdata, g_be);
+                            dstxy <= bmerge(32'd0, g_wdata, g_be); pat_mode <= 1'b0;
                         end
                         24'h100EC4: begin
                             // a dashed polyline's next vertex: its first dash, 0x10080C pixels
-                            lp_line = 1'b1; lp_lto = 1'b1; lp_dash = 1'b1; lp_end = bmerge(32'd0, g_wdata, g_be);
-                            lp_n = r80c[31:16];
-                            dstxy <= lp_end; pat_mode <= 1'b1;
+                            lp_line = 1'b1; lp_lto = 1'b1; lp_dash = 1'b1;
+                            dstxy <= bmerge(32'd0, g_wdata, g_be); pat_mode <= 1'b1;
                         end
                         24'h100ECC: begin
                             // a dashed segment from DST to LEN: its first dash
                             logic [31:0] v;
                             v = bmerge(r80c, g_wdata, g_be); r80c <= v;
-                            lp_line = 1'b1; lp_lto = 1'b1; lp_dash = 1'b1; lp_end = lenxy; lp_n = v[31:16];
+                            lp_line = 1'b1; lp_lto = 1'b1; lp_dash = 1'b1; lp_end_len = 1'b1;
                             pat_mode <= 1'b1;
                         end
                         24'h100CCC: begin
@@ -621,10 +624,10 @@ module artist (
                             // with the terms in LEN and SRC (X's clipped lines)
                             logic [31:0] v;
                             v = bmerge(r80c, g_wdata, g_be); r80c <= v;
-                            lp_line = 1'b1; lp_cont = pat_mode; lp_n = v[31:16];
+                            lp_line = 1'b1; lp_cont = pat_mode;
                         end
                         24'h100B00: begin lp_dxy = bmerge(dstxy, g_wdata, g_be); dstxy <= lp_dxy; lp_move = 1'b1; pat_mode <= 1'b0; end
-                        24'h100B04: begin lp_wh = bmerge(lenxy, g_wdata, g_be); lenxy <= lp_wh; lp_move = 1'b1; end
+                        24'h100B04: begin lenxy <= bmerge(lenxy, g_wdata, g_be); lp_move = 1'b1; end
                         24'h118000: begin dst_ba <= bmerge(dst_ba, g_wdata, g_be); src_ba <= bmerge(src_ba, g_wdata, g_be); end
                         24'h118004: dst_ba <= bmerge(dst_ba, g_wdata, g_be);
                         24'h118008: src_ba <= bmerge(src_ba, g_wdata, g_be);
@@ -732,7 +735,10 @@ module artist (
                 if (vr_req && vr_ack) begin vr_req <= 1'b0; rd_req <= rd_req + 9'(vr_len); end
                 if (vr_rvalid) begin
                     lb_we <= e_st != E_RDG; lb_sel <= e_st == E_RDD; lb_wa <= rd_got[7:0]; lb_wd <= vr_rdata;
-                    if (e_st == E_RDG && rd_got < 9'd5) rw[rd_got[2:0]] <= vr_rdata;
+                    if (e_st == E_RDG) begin
+                        if (rd_got != 9'd0 && rd_got < 9'd5) ar[2'(rd_got - 9'd1)] <= align(vr_rdata, prev, e_x0[2:0]);
+                        prev <= vr_rdata;
+                    end
                     got = rd_got + 9'd1;
                     rd_got <= got;
                 end
@@ -745,7 +751,10 @@ module artist (
                     end else e_st <= E_WR;
                 end
             end
-            E_GET: e_st <= E_IDLE;              // get_data is ready; G_GET answers
+            E_GET: begin                        // the last word's aligned word; G_GET answers once E_IDLE
+                if (rd_n < 9'd5) ar[2'(rd_n - 9'd1)] <= align(64'd0, prev, e_x0[2:0]);
+                e_st <= E_IDLE;
+            end
             E_LAUNCH: e_st <= E_IDLE;           // the launch blocks below choose the next state
             // a vector's terms (the launch latched |dx|, |dy| and the signs): the major
             // axis, the error term -- 2*minor - major to an end point, SRC[15:0] as loaded --
@@ -832,7 +841,7 @@ module artist (
             end
             E_NEXT: begin
                 e_rows <= e_rows - 11'd1;
-                if (e_font) e_pat <= e_pat2;
+                if (e_font) e_pat <= {e_pat2, 16'd0};
                 e_y  <= e_mirror ? e_mirror_y : e_up ? e_y - 11'd1 : e_y + 11'd1;
                 e_sy <= e_up ? e_sy - 11'd1 : e_sy + 11'd1;
                 e_st <= E_ROW;
@@ -864,9 +873,8 @@ module artist (
             // their operands now, set them up next cycle (E_LAUNCH; split for timing)
             if (lp_put || lp_fill || lp_move || lp_font || lp_line) begin
                 lq_put <= lp_put; lq_fill <= lp_fill; lq_move <= lp_move; lq_font <= lp_font; lq_line <= lp_line;
-                lq_incl <= lp_incl; lq_lto <= lp_lto; lq_dash <= lp_dash; lq_cont <= lp_cont; lq_n <= lp_n;
-                lq_d <= lp_d; lq_dxy <= lp_dxy; lq_wh <= lp_wh; lq_sxy <= lp_sxy;
-                lq_xfer <= lp_xfer; lq_end <= lp_end; lq_frow <= lp_frow; lq_xy <= lp_xy; lq_be <= lp_be;
+                lq_incl <= lp_incl; lq_lto <= lp_lto; lq_dash <= lp_dash; lq_cont <= lp_cont; lq_end_len <= lp_end_len;
+                lq_dxy <= lp_dxy; lq_frow <= lp_frow; lq_xy <= lp_xy;
                 e_st <= E_LAUNCH;
             end
             // ============================================== launches (E_LAUNCH)
@@ -888,12 +896,12 @@ module artist (
                 if ((ba_buf(dst_ba) == 4'd6 || ba_buf(dst_ba) == 4'd7) && lq_xy[21:11] < 11'd64 && lq_xy[10:6] == 5'd0) begin
                     // the cursor bitmaps: 32 pixels of a row (x 0 or 32), 1 = set
                     cb_we <= 1'b1; cb_msk <= ba_buf(dst_ba) == 4'd7; cb_half <= lq_xy[5]; cb_row <= lq_xy[16:11];
-                    cb_data <= lq_d;
+                    cb_data <= g_wdata;
                 end else if (ba_buf(dst_ba) == 4'd15) begin
                     // colour-map staging: one entry per word
-                    stg_we <= 1'b1; stg_wa <= lq_xy[8:0]; stg_wd <= lq_d[23:0];
+                    stg_we <= 1'b1; stg_wa <= lq_xy[8:0]; stg_wd <= g_wdata[23:0];
 `ifdef SIMULATION
-                    if (dbg_trace) $display("artist: stage %0d = %06x", lq_xy[10:0], lq_d[23:0]);
+                    if (dbg_trace) $display("artist: stage %0d = %06x", lq_xy[10:0], g_wdata[23:0]);
 `endif
                 end else if (ba_image(dst_ba) && lq_xy[21:11] < 11'd1024) begin
                     n = ba_otc(dst_ba) == 4'd5 ? 12'd32 : 12'd4;
@@ -901,7 +909,7 @@ module artist (
                     e_x0 <= {1'b0, lq_xy[10:0]};
                     e_xend <= {1'b0, lq_xy[10:0]} + n;
                     e_y <= lq_xy[21:11]; e_rows <= 11'd1;
-                    e_pat <= lq_d; e_be <= lq_be;
+                    e_pat <= g_wdata; e_be <= g_be;
                     // the STI's private state (STUBS S-023, artist.md 1): a store
                     // in its access mode to x 1536..1679 of row 384 or 776 goes
                     // to both rows, so the copy a mode change moves to is valid
@@ -917,54 +925,54 @@ module artist (
                     e_st <= E_ROW;
 `ifdef SIMULATION
                     if (dbg_trace) $display("artist: put  %0d,%0d ba %08x d %08x be %x ibo %08x pm %02x fg %02x bg %02x mask %08x",
-                                        lq_xy[10:0], lq_xy[21:11], dst_ba, lq_d, lq_be, ibo, pmask[7:0], fg[7:0], bg[7:0], binc_mask);
+                                        lq_xy[10:0], lq_xy[21:11], dst_ba, g_wdata, g_be, ibo, pmask[7:0], fg[7:0], bg[7:0], binc_mask);
 `endif
                 end
             end
             if (e_st == E_LAUNCH && (lq_fill || lq_move) && ctl_plane == 32'd0 && ba_image(dst_ba) &&
-                lq_dxy[31:16] < 16'd2048 && lq_dxy[15:0] < 16'd1024 && lq_wh[31:16] != 16'd0 && lq_wh[15:0] != 16'd0 &&
-                (lq_fill || (lq_sxy[31:16] < 16'd2048 && lq_sxy[15:0] < 16'd1024))) begin
-                // rectangle fill / block move at lq_dxy (x<<16 | y), size lq_wh (w<<16 | h), clipped to the VRAM
+                lq_dxy[31:16] < 16'd2048 && lq_dxy[15:0] < 16'd1024 && lenxy[31:16] != 16'd0 && lenxy[15:0] != 16'd0 &&
+                (lq_fill || (srcxy[31:16] < 16'd2048 && srcxy[15:0] < 16'd1024))) begin
+                // rectangle fill / block move at lq_dxy (x<<16 | y), size lenxy (w<<16 | h), clipped to the VRAM
                 logic [16:0] w, h;
-                w = {1'b0, lq_wh[31:16]}; h = {1'b0, lq_wh[15:0]};
+                w = {1'b0, lenxy[31:16]}; h = {1'b0, lenxy[15:0]};
                 if (w > 17'd2048 - {1'b0, lq_dxy[31:16]}) w = 17'd2048 - {1'b0, lq_dxy[31:16]};
                 if (h > 17'd1024 - {1'b0, lq_dxy[15:0]}) h = 17'd1024 - {1'b0, lq_dxy[15:0]};
                 if (lq_move) begin
-                    if (w > 17'd2048 - {1'b0, lq_sxy[31:16]}) w = 17'd2048 - {1'b0, lq_sxy[31:16]};
-                    if (h > 17'd1024 - {1'b0, lq_sxy[15:0]}) h = 17'd1024 - {1'b0, lq_sxy[15:0]};
+                    if (w > 17'd2048 - {1'b0, srcxy[31:16]}) w = 17'd2048 - {1'b0, srcxy[31:16]};
+                    if (h > 17'd1024 - {1'b0, srcxy[15:0]}) h = 17'd1024 - {1'b0, srcxy[15:0]};
                 end
                 e_x0 <= lq_dxy[27:16]; e_xend <= lq_dxy[27:16] + w[11:0];
                 e_rows <= h[10:0];
                 e_y <= lq_dxy[10:0];
                 if (lq_fill) begin
-                    e_kind <= K_SOLID; e_pat <= lq_xfer;
+                    e_kind <= K_SOLID; e_pat <= xfer;
                     // with 0x100080 = 0x7D (polygon spans) or 0x08 (pattern rows) a fill
                     // moves DST down by its height (09 5.1; QEMU knew 0x7D)
-                    if (r100080 == 32'h7D || r100080 == 32'h08) dstxy <= {lq_dxy[31:16], lq_dxy[15:0] + lq_wh[15:0]};
+                    if (r100080 == 32'h7D || r100080 == 32'h08) dstxy <= {lq_dxy[31:16], lq_dxy[15:0] + lenxy[15:0]};
                 end
                 else begin
                     e_kind <= K_MOVE;
                     e_expand <= ba_ots(dst_ba) == 3'd6;
-                    e_sx <= lq_sxy[27:16];
+                    e_sx <= srcxy[27:16];
                     // overlapping rows: copy bottom-up when moving down
-                    e_up <= lq_dxy[15:0] > lq_sxy[15:0];
-                    e_y  <= lq_dxy[15:0] > lq_sxy[15:0] ? 11'(lq_dxy[15:0] + h[15:0] - 16'd1) : lq_dxy[10:0];
-                    e_sy <= lq_dxy[15:0] > lq_sxy[15:0] ? 11'(lq_sxy[15:0] + h[15:0] - 16'd1) : lq_sxy[10:0];
+                    e_up <= lq_dxy[15:0] > srcxy[15:0];
+                    e_y  <= lq_dxy[15:0] > srcxy[15:0] ? 11'(lq_dxy[15:0] + h[15:0] - 16'd1) : lq_dxy[10:0];
+                    e_sy <= lq_dxy[15:0] > srcxy[15:0] ? 11'(srcxy[15:0] + h[15:0] - 16'd1) : srcxy[10:0];
                 end
                 e_st <= E_ROW;
 `ifdef SIMULATION
                 if (dbg_trace) $display("artist: %s %0d,%0d -> %0d,%0d %0dx%0d ibo %08x pm %02x fg %02x bg %02x ba %08x/%08x",
-                                    lq_fill ? "fill" : "move", lq_sxy[31:16], lq_sxy[15:0], lq_dxy[31:16], lq_dxy[15:0],
+                                    lq_fill ? "fill" : "move", srcxy[31:16], srcxy[15:0], lq_dxy[31:16], lq_dxy[15:0],
                                     w, h, ibo, pmask[7:0], fg[7:0], bg[7:0], src_ba, dst_ba);
 `endif
             end
             if (e_st == E_LAUNCH && lq_fill && ctl_plane != 32'd0 && ba_buf(dst_ba) == 4'd13 &&
-                lq_dxy[31:16] < 16'd2048 && lq_dxy[15:0] < 16'd1024 && lq_wh[31:16] != 16'd0 && lq_wh[15:0] != 16'd0) begin
+                lq_dxy[31:16] < 16'd2048 && lq_dxy[15:0] < 16'd1024 && lenxy[31:16] != 16'd0 && lenxy[15:0] != 16'd0) begin
                 // a fill of the attribute plane (X's nglePolyPaintAttr, Linux's SETUP_ATTR_ACCESS):
                 // the pixels' LUT bit := CONTROL_PLANE bit 24 (0x01000102 LUT1, 0x102 LUT0; review 09 4.2)
                 logic [16:0] w, h;
                 logic [11:0] xe;
-                w = {1'b0, lq_wh[31:16]}; h = {1'b0, lq_wh[15:0]};
+                w = {1'b0, lenxy[31:16]}; h = {1'b0, lenxy[15:0]};
                 if (w > 17'd2048 - {1'b0, lq_dxy[31:16]}) w = 17'd2048 - {1'b0, lq_dxy[31:16]};
                 if (h > 17'd1024 - {1'b0, lq_dxy[15:0]}) h = 17'd1024 - {1'b0, lq_dxy[15:0]};
                 xe = lq_dxy[27:16] + w[11:0];
@@ -972,7 +980,7 @@ module artist (
                 e_x0 <= lq_dxy[27:16]; e_xend <= xe; e_y <= lq_dxy[10:0]; e_rows <= h[10:0];
                 // whole words need no read first
                 e_rmw <= lq_dxy[21:16] != 6'd0 || xe[5:0] != 6'd0;
-                if (r100080 == 32'h7D || r100080 == 32'h08) dstxy <= {lq_dxy[31:16], lq_dxy[15:0] + lq_wh[15:0]};
+                if (r100080 == 32'h7D || r100080 == 32'h08) dstxy <= {lq_dxy[31:16], lq_dxy[15:0] + lenxy[15:0]};
                 e_st <= E_ROW;
 `ifdef SIMULATION
                 if (dbg_trace) $display("artist: attr %0d,%0d %0dx%0d := LUT%0d", lq_dxy[31:16], lq_dxy[15:0], w, h, ctl_plane[24]);
@@ -986,36 +994,38 @@ module artist (
                 n = 12'd16;
                 if ({1'b0, lq_dxy[26:16]} + n > 12'd2048) n = 12'd2048 - {1'b0, lq_dxy[26:16]};
                 e_kind <= K_BITS; e_font <= 1'b1; e_maskena <= 1'b0; e_be <= 4'b1100;
-                e_pat <= {lq_d[31:16], 16'd0}; e_pat2 <= {lq_d[15:0], 16'd0};
+                e_pat <= {g_wdata[31:16], 16'd0}; e_pat2 <= g_wdata[15:0];
                 e_x0 <= {1'b0, lq_dxy[26:16]}; e_xend <= {1'b0, lq_dxy[26:16]} + n;
                 e_y <= y[10:0];
                 e_rows <= y >= 16'd1024 ? 11'd0 :
-                          {11'd0, lq_frow} + 16'd1 < lq_wh[15:0] && y < 16'd1023 ? 11'd2 :
-                          {11'd0, lq_frow} < lq_wh[15:0] ? 11'd1 : 11'd0;
+                          {11'd0, lq_frow} + 16'd1 < lenxy[15:0] && y < 16'd1023 ? 11'd2 :
+                          {11'd0, lq_frow} < lenxy[15:0] ? 11'd1 : 11'd0;
                 e_st <= E_ROW;
             end
             if (e_st == E_LAUNCH && lq_line) begin
                 // a vector: its deltas now, its terms in E_LSET, then a pixel at a time (E_LINE)
                 e_kind <= K_SOLID; e_line <= 1'b1; e_rows <= 11'd0;
-                l_n <= lq_n; l_lto <= lq_lto; l_incl <= lq_incl; l_dash <= lq_dash;
+                l_n <= r80c[31:16]; l_lto <= lq_lto; l_incl <= lq_incl; l_dash <= lq_dash;
                 if (lq_cont) begin
                     // the next dash: the colour bit flips, the vector goes on where it stopped
                     l_ph <= !l_ph;
                     e_st <= ctl_plane == 32'd0 && ba_image(dst_ba) ? E_LINE : E_IDLE;
                 end else begin
                     logic [15:0] dx, dy;
-                    dx = lq_lto ? lq_end[31:16] - lq_dxy[31:16] : lq_wh[31:16];
-                    dy = lq_lto ? lq_end[15:0] - lq_dxy[15:0] : lq_wh[15:0];
+                    logic [31:0] lend;
+                    lend = lq_end_len ? lenxy : dstxy;
+                    dx = lq_lto ? lend[31:16] - lq_dxy[31:16] : lenxy[31:16];
+                    dy = lq_lto ? lend[15:0] - lq_dxy[15:0] : lenxy[15:0];
                     l_x <= lq_dxy[31:16]; l_y <= lq_dxy[15:0];
                     l_sx <= dx[15]; l_sy <= dy[15];
                     l_adx <= dx[15] ? 16'(-dx) : dx;
                     l_ady <= dy[15] ? 16'(-dy) : dy;
-                    l_src <= lq_sxy; l_ph <= lq_xfer[31];
+                    l_src <= srcxy; l_ph <= xfer[31];
                     e_st <= E_LSET;
                 end
 `ifdef SIMULATION
                 if (dbg_trace) $display("artist: line %s %0d,%0d %s %08x n %0d", lq_cont ? "dash" : lq_lto ? "to" : "terms",
-                                        lq_dxy[31:16], lq_dxy[15:0], lq_lto ? "->" : "len", lq_lto ? lq_end : lq_wh, lq_n);
+                                        lq_dxy[31:16], lq_dxy[15:0], lq_lto ? "->" : "len", lq_lto ? (lq_end_len ? lenxy : dstxy) : lenxy, r80c[31:16]);
 `endif
             end
         end

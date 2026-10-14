@@ -87,9 +87,12 @@ module ncr53c710 #(
     logic        bad_par_q;                    // forcing bad parity onto the bus last cycle
     logic        target_mode;
     // diagnostic DMA FIFO: 4 lanes x 16 bytes (+ parity)
-    logic [8:0]  dff [4][16];
+    // diagnostic DMA FIFO: 4 lanes x 16 bytes (+ parity) in one 64 x 9 MLAB,
+    // word {lane, slot}; one write (CTEST6), one read (the selected lane's bottom)
+    (* ramstyle = "MLAB" *) logic [8:0] dff [64];
     logic [4:0]  dff_n [4];
     logic [3:0]  dff_rd [4], dff_wr [4];
+    wire  [8:0]  dff_q = dff[{ctest4[1:0], dff_rd[ctest4[1:0]]}];
     logic        dfp_latch;
     logic [6:0]  dfifo_cnt;                    // byte-offset counter
 
@@ -132,7 +135,7 @@ module ncr53c710 #(
             6'h14: return ctest0;   6'h15: return ctest1;
             6'h16: return ctest2;   6'h17: return 8'h00;                   // CTEST3: SCSI FIFO (empty)
             6'h18: return ctest4;   6'h19: return ctest5;
-            6'h1A: return dff[ctest4[1:0]][dff_rd[ctest4[1:0]]][7:0];      // CTEST6: the FIFO lane's bottom byte
+            6'h1A: return dff_q[7:0];                                      // CTEST6: the FIFO lane's bottom byte
             6'h1B: return ctest7;
             6'h1C: return temp[7:0]; 6'h1D: return temp[15:8]; 6'h1E: return temp[23:16]; 6'h1F: return temp[31:24];
             6'h20: return {1'b0, dfifo_cnt};
@@ -176,10 +179,12 @@ module ncr53c710 #(
     typedef enum logic [1:0] { D_IDLE, D_BUSY } dst_e;
     dst_e dmst;
     logic        d_go, d_done, d_err;      // pulse in, pulse out
-    logic        d_we;
+    // the engine's request: address (d_addr keeps its low bits for the
+    // indirect fetch), write, byte enables and data are the dma_* port's
+    // registers themselves -- they hold while the request is out; the
+    // response is read from dma_rdata, which the MIOC holds until the next
     logic [31:0] d_addr;
-    logic [7:0]  d_be;
-    logic [63:0] d_wdata, d_rdata;
+    assign dma_addr = {d_addr[31:3], 3'd0};
 
 
     wire [7:0] reg_imm = ins0[15:8];
@@ -199,12 +204,9 @@ module ncr53c710 #(
         d_done <= 1'b0; d_err <= 1'b0;
         if (rst || srst) begin dmst <= D_IDLE; dma_req <= 1'b0; end
         else case (dmst)
-            D_IDLE: if (d_go) begin
-                dma_req <= 1'b1; dma_we <= d_we; dma_addr <= {d_addr[31:3], 3'd0}; dma_be <= d_be;
-                dma_wdata <= d_wdata; dmst <= D_BUSY;
-            end
+            D_IDLE: if (d_go) begin dma_req <= 1'b1; dmst <= D_BUSY; end
             default: if (dma_ack) begin
-                dma_req <= 1'b0; d_rdata <= dma_rdata; d_done <= 1'b1; d_err <= dma_err; dmst <= D_IDLE;
+                dma_req <= 1'b0; d_done <= 1'b1; d_err <= dma_err; dmst <= D_IDLE;
             end
         endcase
     end
@@ -289,7 +291,7 @@ module ncr53c710 #(
                                 logic [1:0] l;
                                 l = ctest4[1:0];
                                 if (dff_n[l] != 5'd16) begin
-                                    dff[l][dff_wr[l]] <= {ctest7[3], v};
+                                    dff[{l, dff_wr[l]}] <= {ctest7[3], v};
                                     dff_wr[l] <= dff_wr[l] + 4'd1; dff_n[l] <= dff_n[l] + 5'd1;
                                 end
                             end
@@ -326,7 +328,7 @@ module ncr53c710 #(
             if (pop_rd) begin
                 logic [1:0] l;
                 l = ctest4[1:0];
-                dfp_latch <= dff[l][dff_rd[l]][8];
+                dfp_latch <= dff_q[8];
                 if (dff_n[l] != 5'd0) begin dff_rd[l] <= dff_rd[l] + 4'd1; dff_n[l] <= dff_n[l] - 5'd1; end
             end
             if (sb_req) latched_phase <= sb_phase;
@@ -348,15 +350,15 @@ module ncr53c710 #(
                 // fetch the instruction: 2 words (3 for a memory move)
                 E_FETCH: begin
                     if (d_idle && !wb_valid) begin
-                        d_go <= 1'b1; d_we <= 1'b0; d_addr <= dsp; d_be <= 8'hFF;
+                        d_go <= 1'b1; dma_we <= 1'b0; d_addr <= dsp; dma_be <= 8'hFF;
                     end else if (wb_valid && d_idle) begin
-                        d_go <= 1'b1; d_we <= 1'b1; d_addr <= {wb_addr, 3'd0}; d_be <= wb_be; d_wdata <= wb_data;
+                        d_go <= 1'b1; dma_we <= 1'b1; d_addr <= {wb_addr, 3'd0}; dma_be <= wb_be; dma_wdata <= wb_data;
                         wb_valid <= 1'b0;
                         est <= E_FLUSH; fl_next <= 1'b1;                // write back, then fetch again
                     end
                     if (d_done) begin
                         logic [31:0] w;
-                        w = dsp[2] ? d_rdata[31:0] : d_rdata[63:32];
+                        w = dsp[2] ? dma_rdata[31:0] : dma_rdata[63:32];
                         if (d_err) begin set_ds[5] = 1'b1; est <= E_IDLE; end
                         else begin
                             case (fcnt)
@@ -378,7 +380,7 @@ module ncr53c710 #(
                             if (target_mode || !ins0[27]) begin set_ds[0] = 1'b1; est <= E_IDLE; end   // target / reserved
                             else if (ins0[28] || ins0[29]) begin
                                 // table indirect (DSA + offset) or indirect: fetch count/address
-                                d_go <= 1'b1; d_we <= 1'b0; d_be <= 8'hFF;
+                                d_go <= 1'b1; dma_we <= 1'b0; dma_be <= 8'hFF;
                                 d_addr <= ins0[28] ? dsa + sext24(dsps[23:0]) : dsps;
                                 fcnt <= 3'd0; est <= E_IND;
                             end else if (dbc == 24'd0) begin set_ds[0] = 1'b1; est <= E_IDLE; end
@@ -427,7 +429,7 @@ module ncr53c710 #(
                                 3'b000: begin                               // SELECT
                                     if (ins0[25]) begin
                                         // table indirect: ID and SXFER from DSA + offset
-                                        d_go <= 1'b1; d_we <= 1'b0; d_be <= 8'hFF;
+                                        d_go <= 1'b1; dma_we <= 1'b0; dma_be <= 8'hFF;
                                         d_addr <= dsa + sext24(ins0[23:0]); fcnt <= 3'd0; est <= E_IND;
                                     end else begin
                                         sdid <= ins0[23:16]; est <= E_SEL;
@@ -467,7 +469,7 @@ module ncr53c710 #(
                 // the indirect fetches: block move {count, address} / select {ID, SXFER}
                 E_IND: if (d_done) begin
                     logic [31:0] w;
-                    w = d_addr[2] ? d_rdata[31:0] : d_rdata[63:32];
+                    w = d_addr[2] ? dma_rdata[31:0] : dma_rdata[63:32];
                     if (d_err) begin set_ds[5] = 1'b1; est <= E_IDLE; end
                     else if (ins0[31:30] == 2'b01) begin
                         sdid <= w[23:16]; sxfer <= w[15:8]; est <= E_SEL;
@@ -497,7 +499,7 @@ module ncr53c710 #(
                 E_BM_BYTE: begin
                     if (wb_valid && wb_addr != dnad[31:3]) begin
                         if (d_idle) begin
-                            d_go <= 1'b1; d_we <= 1'b1; d_addr <= {wb_addr, 3'd0}; d_be <= wb_be; d_wdata <= wb_data;
+                            d_go <= 1'b1; dma_we <= 1'b1; d_addr <= {wb_addr, 3'd0}; dma_be <= wb_be; dma_wdata <= wb_data;
                             wb_valid <= 1'b0;
                         end
                     end else if (d_idle) begin
@@ -523,14 +525,14 @@ module ncr53c710 #(
                 E_BM_RD: begin
                     if (rc_valid && rc_addr == dnad[31:3]) est <= E_BM_GIVE;
                     else if (wb_valid && d_idle) begin
-                        d_go <= 1'b1; d_we <= 1'b1; d_addr <= {wb_addr, 3'd0}; d_be <= wb_be; d_wdata <= wb_data;
+                        d_go <= 1'b1; dma_we <= 1'b1; d_addr <= {wb_addr, 3'd0}; dma_be <= wb_be; dma_wdata <= wb_data;
                         wb_valid <= 1'b0;
                     end else if (d_idle && !wb_valid) begin
-                        d_go <= 1'b1; d_we <= 1'b0; d_addr <= dnad; d_be <= 8'hFF;
+                        d_go <= 1'b1; dma_we <= 1'b0; d_addr <= dnad; dma_be <= 8'hFF;
                     end
-                    if (d_done && !d_we) begin
+                    if (d_done && !dma_we) begin
                         if (d_err) begin set_ds[5] = 1'b1; est <= E_IDLE; end
-                        else begin rc_valid <= 1'b1; rc_addr <= dnad[31:3]; rc_data <= d_rdata; est <= E_BM_GIVE; end
+                        else begin rc_valid <= 1'b1; rc_addr <= dnad[31:3]; rc_data <= dma_rdata; est <= E_BM_GIVE; end
                     end
                 end
                 E_BM_GIVE: begin
@@ -613,14 +615,14 @@ module ncr53c710 #(
                         rc_addr <= dnad[31:3]; rc_valid <= 1'b1; est <= E_MM_WR;
                     end else if (rc_valid && rc_addr == dnad[31:3]) est <= E_MM_WR;
                     else if (wb_valid && d_idle) begin
-                        d_go <= 1'b1; d_we <= 1'b1; d_addr <= {wb_addr, 3'd0}; d_be <= wb_be; d_wdata <= wb_data;
+                        d_go <= 1'b1; dma_we <= 1'b1; d_addr <= {wb_addr, 3'd0}; dma_be <= wb_be; dma_wdata <= wb_data;
                         wb_valid <= 1'b0;
                     end else if (d_idle && !wb_valid) begin
-                        d_go <= 1'b1; d_we <= 1'b0; d_addr <= dnad; d_be <= 8'hFF;
+                        d_go <= 1'b1; dma_we <= 1'b0; d_addr <= dnad; dma_be <= 8'hFF;
                     end
-                    if (d_done && !d_we) begin
+                    if (d_done && !dma_we) begin
                         if (d_err) begin set_ds[5] = 1'b1; est <= E_IDLE; end
-                        else begin rc_valid <= 1'b1; rc_addr <= dnad[31:3]; rc_data <= d_rdata; est <= E_MM_WR; end
+                        else begin rc_valid <= 1'b1; rc_addr <= dnad[31:3]; rc_data <= dma_rdata; est <= E_MM_WR; end
                     end
                 end
                 E_MM_WR: begin
@@ -639,7 +641,7 @@ module ncr53c710 #(
                         est <= (dbc == 24'd1) ? E_FLUSH : E_MM_RD; fl_next <= 1'b1;
                     end else if (wb_valid && wb_addr != temp[31:3]) begin
                         if (d_idle) begin
-                            d_go <= 1'b1; d_we <= 1'b1; d_addr <= {wb_addr, 3'd0}; d_be <= wb_be; d_wdata <= wb_data;
+                            d_go <= 1'b1; dma_we <= 1'b1; d_addr <= {wb_addr, 3'd0}; dma_be <= wb_be; dma_wdata <= wb_data;
                             wb_valid <= 1'b0;
                         end
                     end else if (d_idle) begin
@@ -656,7 +658,7 @@ module ncr53c710 #(
                 // or the halt with the interrupt already raised
                 E_FLUSH: begin
                     if (wb_valid && d_idle) begin
-                        d_go <= 1'b1; d_we <= 1'b1; d_addr <= {wb_addr, 3'd0}; d_be <= wb_be; d_wdata <= wb_data;
+                        d_go <= 1'b1; dma_we <= 1'b1; d_addr <= {wb_addr, 3'd0}; dma_be <= wb_be; dma_wdata <= wb_data;
                         wb_valid <= 1'b0;
                     end else if (!wb_valid && d_idle) begin
                         rc_valid <= 1'b0;

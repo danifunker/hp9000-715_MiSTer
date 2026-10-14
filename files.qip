@@ -35,6 +35,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/artist/artist.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/artist/artist_video.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/wax_stub.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/rom_loader.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/boot_seq.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/hp715.sv
 # MiSTer side
 set_global_assignment -name VERILOG_FILE rtl/pll_video.v

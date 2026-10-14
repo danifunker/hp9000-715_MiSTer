@@ -9,7 +9,7 @@
 //  small video generator that shows the eight front-panel LEDs.
 //  sim_main.cpp (GUI) and romsim/tb_rom.cpp (headless) both drive it.
 //
-//  sim_status: [1:0] model (0 = 715/64, 1 = /80, 2 = /100),
+//  sim_status: [12:10] the boot mode (rtl/boot_seq.sv), [1:0] model (0 = 715/64, 1 = /80, 2 = /100),
 //              [5:2] RAM = 2^n MB (0 = the default, 16 MB; at most RAM_LG_MAX)
 //              [9:6] CR16 speed-up (0 = real rate): shortens the ROM's
 //                    delays; selftest1's timer test needs the real rate
@@ -182,7 +182,7 @@ end
 // the VRAM), so its pixel clock is the machine's
 hp715 #(.CLK_HZ(64_000_000), .SIM_FAST(1'b1), .HAS_ARTIST(1'b1)) u_hp715 (
 	.clk(clk_sys), .reset(m_reset), .pclk(clk_sys), .prst(m_reset),
-	.cfg_model(sim_status[1:0]), .cfg_ram_lg(ram_lg), .sim_cr16_mul(sim_status[9:6]),
+	.cfg_model(sim_status[1:0]), .cfg_ram_lg(ram_lg), .sim_cr16_mul(sim_status[9:6]), .cfg_boot(sim_status[12:10]),
 	.soft_pwr_n(!soft_power_off), .toc_button(toc_button),
 	.led_latch(leds), .led_strobe(led_strobe), .lasi_pcr(pcr), .audio_l(), .audio_r(), .cd_change(1'b0),
 	.nb_req(nb_req), .nb_we(nb_we), .nb_addr(nb_addr), .nb_wdata(nb_wdata), .nb_ack(nb_ack), .nb_rdata(nb_rdata),

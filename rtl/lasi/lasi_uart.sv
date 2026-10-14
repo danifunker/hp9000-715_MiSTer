@@ -30,7 +30,10 @@ module lasi_uart #(
     output logic [7:0] tap_byte,
     input  logic       inj_strobe,
     input  logic [7:0] inj_byte,
-    output logic       inj_full      // RX FIFO full: the injector waits
+    output logic       inj_full,
+    // for the boot sequencer: an LSR/RBR read with nothing received; an RBR
+    // read with data; nothing received
+    output logic       con_poll, con_take, con_empty, con_tx      // RX FIFO full: the injector waits
 );
     // ------------------------------------------------------------ registers
     logic [7:0] ier, lcr, mcr, scr, dll, dlm;
@@ -168,6 +171,13 @@ module lasi_uart #(
     wire rd_lsr = sel && !we && ra == 3'd5;
     wire rd_msr = sel && !we && ra == 3'd6;
     wire wr_thr = sel && we && ra == 3'd0 && !dlab;
+    // a poll = an MSR read with nothing received: the ROM's RS-232 IODC reads
+    // the MSR in its input routine only (its output routine polls the LSR and
+    // drains the receiver of anything but XOFF before every character)
+    assign con_poll  = rd_msr && !rx_avail;
+    assign con_take  = rd_rbr && rx_avail;
+    assign con_empty = !rx_avail;
+    assign con_tx    = wr_thr;
 
     always_ff @(posedge clk) begin
         rxd_s1 <= rxd; rxd_s2 <= rxd_s1;

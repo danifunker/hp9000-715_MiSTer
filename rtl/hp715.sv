@@ -6,7 +6,9 @@
 module hp715 #(
     parameter int CLK_HZ     = 64_000_000,  // clk's frequency (CR16 runs at the board's rate whatever it is)
     parameter bit SIM_FAST   = 1'b0,        // fast UART/PS/2 character timing (simulator)
-    parameter bit HAS_ARTIST = 1'b0
+    parameter bit HAS_ARTIST = 1'b0,
+    parameter     EE_INIT    = "",          // the EEPROM's initial contents ($readmemh; "" = blank), rtl/hp_xbus.sv
+    parameter bit DBG_RECORDER = 1'b1       // the debug event recorder (dbg_ev_*; 0: left out, about 700 ALMs less)
 ) (
     input  logic        clk,
     input  logic        reset,              // power-on, the MiSTer reset, a ROM download
@@ -16,6 +18,7 @@ module hp715 #(
     input  logic [1:0]  cfg_model,          // 0 = 715/64, 1 = 715/80, 2 = 715/100
     input  logic [3:0]  cfg_ram_lg,         // 2^n MB of RAM, 3..8
     input  logic [3:0]  sim_cr16_mul,       // simulator only: CR16 counts n x faster (0 = real rate; tie 0 on the board)
+    input  logic [2:0]  cfg_boot,           // boot mode after reset (rtl/boot_seq.sv): 0 normal, 1 BOOT_ADMIN, 2 ISL, 3 single-user, 4 LVM, 5 LAN, 6 CD
     // front panel
     input  logic        soft_pwr_n,         // 0 while "soft power off" is requested
     input  logic        toc_button,
@@ -193,7 +196,10 @@ module hp715 #(
         .dbg_gr_we(c_gr_we), .dbg_gr_num0(c_gr_num0), .dbg_gr_num1(c_gr_num1), .dbg_gr_data0(c_gr_data0), .dbg_gr_data1(c_gr_data1),
         .dbg_psw(dbg_psw), .dbg_halted(dbg_halted), .dbg_gr(dbg_gr),
         .dbg_cop_valid(c_cop_valid), .dbg_cop_i(c_cop_i), .dbg_cop(c_cop), .dbg_cop_addr(c_cop_addr),
-        .dbg_cop_rpn(c_cop_rpn));
+        .dbg_cop_rpn(c_cop_rpn),
+        .dbg_ea(c_ea), .dbg_stdata(c_stdata), .dbg_wev(c_wev), .dbg_wev_iaoq(c_wev_iaoq), .dbg_wev_ea(c_wev_ea));
+    logic [31:0] c_ea, c_stdata, c_wev_iaoq, c_wev_ea;
+    logic [1:0]  c_wev;
     logic [15:0] c_iasq_f;
     logic [1:0]  c_gr_we;
     logic [4:0]  c_gr_num0, c_gr_num1;
@@ -273,7 +279,7 @@ module hp715 #(
     logic [31:0] x_rdata, l_rdata, w_rdata;
     logic        artist_rst;
 
-    hp_xbus u_xbus (
+    hp_xbus #(.EE_INIT(EE_INIT)) u_xbus (
         .clk(clk), .rst_n(rst_n), .cfg_model(model_id),
         .req(gsc_req && gsc_dev == 2'd0), .we(gsc_we), .addr(gsc_addr), .be(gsc_be), .wdata(gsc_wdata),
         .ack(x_ack), .rdata(x_rdata), .led_latch(led_latch), .led_strobe(led_strobe),
@@ -287,7 +293,11 @@ module hp715 #(
         .eir_req(l_eir_req), .eir_addr(l_eir_addr), .eir_data(l_eir_data), .eir_ack(l_eir_ack), .eir_err(l_eir_err),
         .ext_int(toc_button), .ext_toc(ext_toc),
         .uart_txd(uart_txd), .uart_rxd(uart_rxd), .uart_tap_strobe(uart_tap_strobe), .uart_tap_byte(uart_tap_byte),
-        .uart_inj_strobe(uart_inj_strobe), .uart_inj_byte(uart_inj_byte), .uart_inj_full(uart_inj_full),
+        .uart_inj_strobe(uart_inj_strobe || bs_uart_strobe), .uart_inj_byte(bs_uart_strobe ? bs_uart_byte : uart_inj_byte),
+        .uart_inj_full(uart_inj_full),
+        .con_uart_poll(bs_uart_poll), .con_uart_take(bs_uart_take), .con_uart_empty(bs_uart_empty), .con_uart_tx(bs_uart_tx),
+        .con_kbd_poll(bs_kbd_poll), .con_kbd_take(bs_kbd_take), .con_kbd_idle(bs_kbd_idle), .con_kbd_tx(bs_kbd_tx),
+        .key_inj_valid(bs_key_valid), .key_inj_down(bs_key_down), .key_inj_code(bs_key_code),
         .kbd_present(1'b1), .mouse_present(1'b1), .ps2_key(ps2_key), .ps2_mouse(ps2_mouse),
         .rtc_set(rtc_set), .rtc_value(rtc_value),
         .scsi_req(s_req), .scsi_we(s_we), .scsi_addr(s_addr), .scsi_be(s_be), .scsi_wdata(s_wdata),
@@ -298,6 +308,18 @@ module hp715 #(
         .pcr(lasi_pcr), .artist_rst(artist_rst), .dbg_ps2_valid(l_ps2_v), .dbg_ps2(l_ps2));
     logic        l_ps2_v;
     logic [9:0]  l_ps2;
+
+    // the boot-mode sequencer (OSD "Boot mode"; STUBS S-029)
+    logic        bs_uart_poll, bs_uart_take, bs_uart_empty, bs_uart_tx, bs_uart_strobe, bs_kbd_tx;
+    logic [7:0]  bs_uart_byte;
+    logic        bs_kbd_poll, bs_kbd_take, bs_kbd_idle, bs_key_valid, bs_key_down;
+    logic [7:0]  bs_key_code;
+    boot_seq #(.CLK_HZ(CLK_HZ), .SIM_FAST(SIM_FAST)) u_boot (
+        .clk(clk), .rst_n(rst_n), .mode(cfg_boot), .chassis(~led_latch), .ms_mul(sim_cr16_mul),
+        .uart_poll(bs_uart_poll), .uart_take(bs_uart_take), .uart_rx_empty(bs_uart_empty), .uart_tx(bs_uart_tx),
+        .uart_inj_strobe(bs_uart_strobe), .uart_inj_byte(bs_uart_byte), .uart_inj_full(uart_inj_full),
+        .kbd_poll(bs_kbd_poll), .kbd_take(bs_kbd_take), .kbd_idle(bs_kbd_idle), .kbd_tx(bs_kbd_tx),
+        .key_valid(bs_key_valid), .key_down(bs_key_down), .key_code(bs_key_code), .active());
 
     // ------------------------------------------------------------ SCSI
     logic        s_req, s_we, s_rst, s_irq;
@@ -440,10 +462,11 @@ module hp715 #(
     logic        s_dec;
     logic [31:0] s_dsp, s_ins, s_dsps;
     logic [7:0]  s_dstat, s_sstat0;
+    generate if (DBG_RECORDER) begin : g_rec
     logic        ev_ack_q, ev_irq_q, ev_dec_q;
     logic [32:0] ev_line_q;
-    logic [14:0] ev_full;
-    logic [111:0] ev_slot [15];
+    logic [16:0] ev_full;
+    logic [111:0] ev_slot [17];
     logic [31:0] ev_piaoq;             // the last retired instruction's IAOQ
     logic        ev_pvalid;
     logic        ev_shot;              // one-shot mode armed (Pause / dbg_shot[49])
@@ -470,13 +493,13 @@ module hp715 #(
             5'd28: sc_r28 <= c_gr_data1; default: ; endcase
     end
     always_ff @(posedge clk) begin
-        logic [14:0]  set;
-        logic [111:0] e [15];
+        logic [16:0]  set;
+        logic [111:0] e [17];
         logic         shot_key, rfi, flow_mode, flow_hit;
         logic [31:0]  flow_tgt;
         flow_tgt = {dbg_shot[31:16], dbg_shot[47:32]};
         set = '0;
-        for (int i = 0; i < 15; i++) e[i] = '0;
+        for (int i = 0; i < 17; i++) e[i] = '0;
         // control flow in user mode after the trigger (or, in the flow-trigger mode, from the start, outside
         // the shared libraries): every retired instruction not at the previous one + 4
         flow_mode = dbg_shot[15:0] == 16'hFFFE;
@@ -521,6 +544,13 @@ module hp715 #(
         else if (sc_pend[1]) sc_open <= 1'b1;
         else if (rfi) sc_open <= 1'b0;
         if (rfi && sc_open) begin set[13] = 1; e[13] = {8'd18, 8'd0, sc_r28, sc_r22, dbg_iaoq_f}; end
+        // cpu-requests #10: user-mode loads/stores of rp with base sp (LDW/LDWM/STW/STWM): the EA and the
+        // datum (a load's GR write, a store's data); W-hold events (D-cache miss, walk, replay) in user mode
+        if (dbg_retire && !dbg_nullified && dbg_iaoq_f[1:0] == 2'b11 && dbg_insn[25:21] == 5'd30 && dbg_insn[20:16] == 5'd2 &&
+            (dbg_insn[31:26] == 6'h12 || dbg_insn[31:26] == 6'h13 || dbg_insn[31:26] == 6'h1A || dbg_insn[31:26] == 6'h1B)) begin
+            set[15] = 1; e[15] = {8'd20, 7'd0, !dbg_insn[29], dbg_iaoq_f, c_ea, dbg_insn[29] ? c_stdata : c_gr_data0};
+        end
+        if (c_wev != 2'd0 && c_wev_iaoq[1:0] == 2'b11) begin set[16] = 1; e[16] = {8'd21, 6'd0, c_wev, c_wev_iaoq, c_wev_ea, 32'd0}; end
         if (n_dbg_v) begin set[3] = 1; e[3] = {8'd17, n_dbg_aux, n_dbg_addr, n_dbg_data}; end   // over a DMA event: the LAN's own view matters more
         // a whole-cache loop (FDCE/FICE, op 2 on either side) is recorded by its first operation only
         if (c_cop_valid) begin
@@ -575,15 +605,21 @@ module hp715 #(
         if (!reset) begin
             logic sent;
             sent = 1'b0;
-            for (int i = 0; i < 15; i++) begin
+            for (int i = 0; i < 17; i++) begin
                 if (ev_full[i] && !sent) begin
                     dbg_ev_valid <= 1'b1; dbg_ev <= ev_slot[i]; sent = 1'b1;
                     ev_full[i] <= 1'b0;
                 end
             end
-            for (int i = 0; i < 15; i++) if (set[i]) begin ev_full[i] <= 1'b1; ev_slot[i] <= e[i]; end
+            for (int i = 0; i < 17; i++) if (set[i]) begin ev_full[i] <= 1'b1; ev_slot[i] <= e[i]; end
         end
     end
+    end else begin : g_no_rec
+        // no recorder: the event port is quiet and the blocks' debug outputs
+        // (the 53C710's, the 82596's, the CPU's register-write taps) are unused
+        assign dbg_ev_valid = 1'b0;
+        assign dbg_ev = 112'd0;
+    end endgenerate
 
     scsi_targets u_targets (
         .clk(clk), .rst(!rst_n),

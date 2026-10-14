@@ -76,6 +76,12 @@ module lasi #(
     output logic        fdc_rst,           // machine reset or IORESET bit 5 (ext) clear
     input  logic [31:0] fdc_rdata,
     input  logic        fdc_irq,
+    // the boot sequencer (rtl/boot_seq.sv): console polls / takes on the UART
+    // and PS/2 port 0, key events typed into the keyboard model
+    output logic        con_uart_poll, con_uart_take, con_uart_empty, con_uart_tx,
+    output logic        con_kbd_poll, con_kbd_take, con_kbd_idle, con_kbd_tx,
+    input  logic        key_inj_valid, key_inj_down,
+    input  logic [7:0]  key_inj_code,
     // misc outputs
     output logic [31:0] pcr,
     output logic        artist_rst,       // IORESET bit 8 (RST_ARTIST_L) clear
@@ -120,7 +126,8 @@ module lasi #(
         .clk(clk), .rst(rst_uart_l || u_rst_pulse), .sel(u_sel), .we(we), .ra({addr[2], lane}),
         .wdata(wbyte), .rdata(u_rdata), .irq(u_irq), .txd(uart_txd), .rxd(uart_rxd),
         .tap_strobe(uart_tap_strobe), .tap_byte(uart_tap_byte),
-        .inj_strobe(uart_inj_strobe), .inj_byte(uart_inj_byte), .inj_full(uart_inj_full));
+        .inj_strobe(uart_inj_strobe), .inj_byte(uart_inj_byte), .inj_full(uart_inj_full),
+        .con_poll(con_uart_poll), .con_take(con_uart_take), .con_empty(con_uart_empty), .con_tx(con_uart_tx));
 
     // --------------------------------------------------------------- PS/2
     logic [7:0] k_rdata, m_rdata;
@@ -132,17 +139,23 @@ module lasi #(
     lasi_ps2 #(.ID(4'd0), .BYTE_CLKS(UNITS_CLK), .LPB_CLKS(SIM_FAST ? 64 : CLK_HZ / 181_818)) u_kbd (
         .clk(clk), .rst(rst_kbd_l), .sel(req && p_is && !addr[8]), .we(we), .ra(addr[3:2]), .wdata(wbyte),
         .rdata(k_rdata), .cmpintr(cmpintr), .irq_line(k_line), .dev_present(kbd_present),
-        .dev_tx_valid(k_txv), .dev_tx_byte(k_txb), .dev_rx_valid(k_rxv), .dev_rx_byte(k_rxb), .dev_rx_ready(k_rxr));
+        .dev_tx_valid(k_txv), .dev_tx_byte(k_txb), .dev_rx_valid(k_rxv), .dev_rx_byte(k_rxb), .dev_rx_ready(k_rxr),
+        .con_poll(con_kbd_poll), .con_take(con_kbd_take), .con_empty(k_pempty), .con_tx(con_kbd_tx));
     lasi_ps2 #(.ID(4'd1), .BYTE_CLKS(UNITS_CLK), .LPB_CLKS(SIM_FAST ? 64 : CLK_HZ / 181_818)) u_mouse (
         .clk(clk), .rst(rst_kbd_l), .sel(req && p_is && addr[8]), .we(we), .ra(addr[3:2]), .wdata(wbyte),
         .rdata(m_rdata), .cmpintr(cmpintr), .irq_line(m_line), .dev_present(mouse_present),
-        .dev_tx_valid(m_txv), .dev_tx_byte(m_txb), .dev_rx_valid(m_rxv), .dev_rx_byte(m_rxb), .dev_rx_ready(m_rxr));
+        .dev_tx_valid(m_txv), .dev_tx_byte(m_txb), .dev_rx_valid(m_rxv), .dev_rx_byte(m_rxb), .dev_rx_ready(m_rxr),
+        .con_poll(), .con_take(), .con_empty(), .con_tx());
+    logic k_pempty, k_qempty;
+    assign con_kbd_idle = k_pempty && k_qempty;
     ps2_dev #(.MOUSE(1'b0), .BYTE_CLKS(UNITS_CLK), .RESET_CLKS(UNITS_CLK * 10)) u_kbd_dev (
         .clk(clk), .rst(!rst_n), .tx_valid(k_txv), .tx_byte(k_txb), .rx_valid(k_rxv), .rx_byte(k_rxb),
-        .rx_ready(k_rxr), .ps2_key(ps2_key), .ps2_mouse(ps2_mouse));
+        .rx_ready(k_rxr), .ps2_key(ps2_key), .ps2_mouse(ps2_mouse),
+        .inj_valid(key_inj_valid), .inj_down(key_inj_down), .inj_code(key_inj_code), .q_empty(k_qempty));
     ps2_dev #(.MOUSE(1'b1), .BYTE_CLKS(UNITS_CLK), .RESET_CLKS(UNITS_CLK * 10)) u_mouse_dev (
         .clk(clk), .rst(!rst_n), .tx_valid(m_txv), .tx_byte(m_txb), .rx_valid(m_rxv), .rx_byte(m_rxb),
-        .rx_ready(m_rxr), .ps2_key(ps2_key), .ps2_mouse(ps2_mouse));
+        .rx_ready(m_rxr), .ps2_key(ps2_key), .ps2_mouse(ps2_mouse),
+        .inj_valid(1'b0), .inj_down(1'b0), .inj_code(8'd0), .q_empty());
 
     always_comb begin
         dbg_ps2_valid = 1'b1;

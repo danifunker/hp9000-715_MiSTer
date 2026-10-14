@@ -16,6 +16,8 @@ module eeprom_save #(
     input  logic        clk,
     input  logic        rst,             // PLL not locked
     output logic        ready,
+    output logic        loaded,          // an image has just been loaded (the machine is reset so the ROM reads it)
+    input  logic        blank_if_none,   // OSD: with no image mounted, erase the built-in image (manufacturing mode)
     input  logic        osd_open,
     // hps_io block device (one slot)
     input  logic        img_mounted,
@@ -38,7 +40,7 @@ module eeprom_save #(
     output logic        ee_dirty_clr
 );
     localparam int MS = CLK_HZ / 1000;
-    typedef enum logic [2:0] { P_IDLE, P_LOAD, P_LOAD_DAT, P_SAVE, P_SAVE_DAT } st_e;
+    typedef enum logic [2:0] { P_IDLE, P_LOAD, P_LOAD_DAT, P_SAVE, P_SAVE_DAT, P_BLANK } st_e;
     st_e st;
     logic        ena;              // an image is mounted
     logic        mnt_q, osd_q, ack_q;
@@ -60,7 +62,7 @@ module eeprom_save #(
     assign sd_buff_din = {h[7:0], h[15:8]};
 
     always_ff @(posedge clk) begin
-        ee_hwe <= 1'b0; ee_dirty_clr <= 1'b0;
+        ee_hwe <= 1'b0; ee_dirty_clr <= 1'b0; loaded <= 1'b0;
         ms <= 1'b0;
         if (ms_div == MS - 1) begin ms_div <= 0; ms <= 1'b1; end else ms_div <= ms_div + 1;
         if (rst) begin
@@ -81,6 +83,7 @@ module eeprom_save #(
                     if (img_mounted && !mnt_q) begin
                         ena <= img_size != 0;
                         if (img_size != 0) begin st <= P_LOAD; sd_rd <= 1'b1; end
+                        else if (blank_if_none) begin st <= P_BLANK; wr_addr <= 11'd0; end
                         else ready <= 1'b1;
                     end else if (ena && ee_dirty && ((osd_open && !osd_q) || (ms && settle == 12'd1))) begin
                         st <= P_SAVE; sd_wr <= 1'b1; ee_dirty_clr <= 1'b1; settle <= 12'd0;
@@ -96,7 +99,13 @@ module eeprom_save #(
                             ee_hwdata <= {upper, sd_buff_dout[7:0], sd_buff_dout[15:8]};
                         end
                     end
-                    if (!sd_ack && ack_q) begin st <= P_IDLE; ready <= 1'b1; ee_dirty_clr <= 1'b1; end
+                    if (!sd_ack && ack_q) begin st <= P_IDLE; ready <= 1'b1; ee_dirty_clr <= 1'b1; loaded <= 1'b1; end
+                end
+                // no image and "Blank": erase the built-in image, a word a cycle
+                P_BLANK: begin
+                    ee_hwe <= 1'b1; ee_hwdata <= 32'hFFFF_FFFF;
+                    wr_addr <= wr_addr + 11'd1;
+                    if (wr_addr == 11'd2047) begin st <= P_IDLE; ready <= 1'b1; ee_dirty_clr <= 1'b1; end
                 end
                 P_SAVE: if (sd_ack) begin sd_wr <= 1'b0; st <= P_SAVE_DAT; end
                 P_SAVE_DAT: if (!sd_ack && ack_q) st <= P_IDLE;

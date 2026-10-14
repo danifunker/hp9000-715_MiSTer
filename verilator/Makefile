@@ -37,7 +37,7 @@ V_OPT = --x-assign fast --x-initial fast --noassert --unroll-count 256
 MACHINE_RTL = $(RTL)/mioc_ecc.sv $(RTL)/mioc.sv $(RTL)/hp_xbus.sv $(RTL)/lasi/lasi_uart.sv \
 	$(RTL)/lasi/lasi_ps2.sv $(RTL)/lasi/ps2_dev.sv $(RTL)/lasi/harmony.sv $(RTL)/lasi/i82596.sv $(RTL)/lasi/lasi_fdc.sv $(RTL)/lasi/lasi.sv $(RTL)/wax_stub.sv \
 	$(RTL)/scsi/ncr53c710.sv $(RTL)/scsi/cd_audio.sv $(RTL)/scsi/scsi_targets.sv $(RTL)/artist/artist.sv $(RTL)/artist/artist_video.sv \
-	$(RTL)/rom_loader.sv $(RTL)/hp715.sv
+	$(RTL)/rom_loader.sv $(RTL)/boot_seq.sv $(RTL)/hp715.sv
 V_SRC = $(CPU_PIPE_RTL) $(MACHINE_RTL) sim.v
 
 C_SRC = \

@@ -1,5 +1,48 @@
 # Resume prompt -- cpu-requests #10: `b,l`'s link register corrupted by an external interrupt (2026-10-11)
 
+## Status (2026-10-14): the CPU bug is found and fixed; the install is next
+
+**Fixed in `5cda517`** (CPU stream, the user's go-ahead): the interrupt was a
+marker, not the cause. Build 51's recorder (new events 20/21: the link store's
+datum, the W holds) caught the onset on the board: the external interrupt was
+taken on the **nullified** `b,l,n` at 0x2ed400 (the delay slot of 0x2ed3fc's
+`b,l,n 0x2ee0dc`), so the kernel's `rfi` returned to IIAOQ = {0x2ed400,
+0x2ee0dc} with PSW.N = 1. D predicted the refetched branch taken (its target
+is 0x2ee0dc = the queue's back), the fetch unit fetched the back (the slot)
+and then the target -- the same word -- and when E nullified the branch (a
+misprediction, redirect to the slot's successor) **both copies matched the
+slot's address and were kept**: 0x2ee0dc retired twice, the second copy as
+the first's delay slot with the first copy's target (0x2ee1a0) as its IAOQ
+back, hence the link 0x2ee1a4. `pa_fetch` now keeps only the oldest
+instruction at the slot's address (D's, else F2's, else F1's; new core output
+`redir_slot_in_d`); cpu.md 6.2, cpu-requests #10 (Done). Reproduced in the
+`link` suite's `bl-link-irq-ram*` groups (the sequence planted at a RAM page
+boundary, warmed into the I-cache, the harness handler returning to the
+trapping instruction like a kernel's `rfi` -- trap-log words +36/+40 in
+`src/ivt.S`; the CR16 steps are coarser than a cycle, so a 0/1-nop pad is
+swept too); the suite is in `tests/run-cputest.sh` (13/13 with the QEMU
+references regenerated -- the handler's growth moved the ROM's addresses;
+QEMU 11.1.1 rebuilt in the session scratchpad `keep/qemu/`), cosim 8/8.
+
+**Build 52** (the fix, the recorder still on) on the board: the installer's
+configuration step passes (stalled 5/5 on builds 39-44); the flow trigger at
+0x2ee1a4 fires on a *legitimate* flow (the kernel's return from an ITLB miss
+at 0x2ee1a4), so `inst11i_repro_flow.sh` reports FROZEN there -- not a stall
+(`scratch/ring52a.txt`: every link store/reload correct). The wizard was
+walked on by hand (see system.md 10, builds 51-52).
+
+**Next**: (1) a release build without `HP9K715_DEBUG` (the QSF line is
+uncommented in the tree -- comment it again) once the install is proven;
+(2) the TCOE 12/2004 install on the HDMI console with the PS/2 keyboard
+(`inst11i_boot.sh`, `board.sh key`, OBS), `.s2` = `hpux11i.img`, then boot
+`scsi.5` and give the user the image; (3) restore the user's slots (`.s0`
+hpux1020.img, `.s1` hp715_release.eep, `.s2`/`.s3` empty -- the board's
+`HP9K715.*.pre-link` backups) and the RAM to their defaults; (4) the
+uncommitted tree holds another stream's builds 49-50 work (OSD boot modes):
+only the CPU-stream files were committed. `tools/mister/ring_link.py` filters
+a ring around yylook's visits; `tools/mister/trace_dump.py` decodes events
+20/21.
+
 You are continuing the HP 9000/715 MiSTer core in `/home/dani/repos/hp9000-715`.
 **Goal: find and fix the CPU bug that makes HP-UX 11i's installer stall, then
 install HP-UX 11i v1 (the 12/2004 TCOE DVD, `hpux11i_tcoe_200412.iso` on the

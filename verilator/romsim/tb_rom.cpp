@@ -9,7 +9,7 @@
 //                    [--then AFTER STR ...] (more typing, each after AFTER appears; AFTER = @CYCLE: at
 //                    that cycle instead) [--ps2] (typing goes to the PS/2 keyboard as set-2 key
 //                    events, US layout, for a console on graphics) [--serial-log FILE]
-//                    [--model 0|1|2] [--ram-lg N] [--leds] [--buserr]
+//                    [--model 0|1|2] [--ram-lg N] [--boot N (the OSD boot mode, rtl/boot_seq.sv)] [--leds] [--buserr]
 //                    [--trace N] [--trace-from CYCLE] [--traps] [--stamp] [--sample N] [--gsctrace] [--scsitrace] [--miotrace] [--evtrace]
 //                    [--turbo N [--turbo-after CYCLE] [--turbo-until CYCLE]]  (CR16 N x faster from
 //                    --turbo-after, default 30M, until --turbo-until -- an OS needs the real rate:
@@ -269,7 +269,7 @@ int main(int argc, char** argv) {
 	bool show_leds = false, show_buserr = false, show_traps = false, stamp = false;
 	unsigned long long sample = 0; uint64_t save_at = 0;
 	unsigned long long wtrace_a = 0, wtrace_b = 0;
-	unsigned trace_flags = 0, turbo = 0;
+	unsigned trace_flags = 0, turbo = 0, boot_mode = 0;
 	uint64_t turbo_after = 30000000, turbo_until = ~0ull, flags_from = 0;
 	const char* save_file = nullptr;
 	std::string save_on;
@@ -317,6 +317,7 @@ int main(int argc, char** argv) {
 		else if (a == "--ps2") ps2 = true;
 		else if (a == "--flags-from") flags_from = strtoull(next(), 0, 0);
 		else if (a == "--turbo") turbo = atoi(next());
+		else if (a == "--boot") boot_mode = atoi(next());
 		else if (a == "--turbo-after") turbo_after = strtoull(next(), 0, 0);
 		else if (a == "--turbo-until") turbo_until = strtoull(next(), 0, 0);
 		else if (a == "--save-at") { save_at = strtoull(next(), 0, 0); save_file = next(); }
@@ -367,7 +368,7 @@ int main(int argc, char** argv) {
 
 	top = new Vemu;
 	top->reset = 1;
-	top->sim_status = (model & 3) | ((ram_lg & 15) << 2);
+	top->sim_status = (model & 3) | ((ram_lg & 15) << 2) | ((boot_mode & 7) << 10);
 	top->ps2_key = 0; top->ps2_mouse = 0;
 	top->uart_rx_strobe = 0; top->toc_button = 0; top->soft_power_off = 0;
 	top->img_present = 0;
@@ -453,7 +454,7 @@ int main(int argc, char** argv) {
 			wtrace_line(t);
 			if (t == wtrace_b) dump_tlb(t);
 		}
-		top->sim_status = (model & 3) | ((ram_lg & 15) << 2) | (t >= turbo_after && t < turbo_until ? (turbo & 15) << 6 : 0);
+		top->sim_status = (model & 3) | ((ram_lg & 15) << 2) | ((boot_mode & 7) << 10) | (t >= turbo_after && t < turbo_until ? (turbo & 15) << 6 : 0);
 		if (flags_from && t == flags_from) top->sim_trace = trace_flags;
 		auto save = [&]() {
 			VerilatedSave os;

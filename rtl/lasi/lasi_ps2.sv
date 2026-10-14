@@ -30,7 +30,10 @@ module lasi_ps2 #(
     output logic [7:0] dev_tx_byte,
     input  logic       dev_rx_valid,
     input  logic [7:0] dev_rx_byte,
-    output logic       dev_rx_ready
+    output logic       dev_rx_ready,
+    // for the boot sequencer (rtl/boot_seq.sv): a status or data read with the
+    // FIFO empty; a data read with data; the FIFO is empty
+    output logic       con_poll, con_take, con_empty, con_tx
 );
     logic [7:0]  ctrl;
     logic [7:0]  fifo [4];
@@ -62,6 +65,10 @@ module lasi_ps2 #(
 
     wire rd_data = sel && !we && ra == 2'd1;
     wire wr_data = sel && we && ra == 2'd1;
+    assign con_poll  = sel && !we && (ra == 2'd1 || ra == 2'd3) && f_n == 3'd0;
+    assign con_take  = rd_data && f_n != 3'd0;
+    assign con_empty = f_n == 3'd0 && !txing;
+    assign con_tx    = wr_data;
 
     always_ff @(posedge clk) begin
         dev_tx_valid <= 1'b0;

@@ -29,7 +29,12 @@ module ps2_dev #(
     input  logic        rx_ready,
     // hps_io
     input  logic [10:0] ps2_key,
-    input  logic [24:0] ps2_mouse
+    input  logic [24:0] ps2_mouse,
+    // a key event from the boot sequencer (rtl/boot_seq.sv), as a ps2_key one
+    input  logic        inj_valid,
+    input  logic        inj_down,
+    input  logic [7:0]  inj_code,           // set-2 code, not extended
+    output logic        q_empty             // nothing queued
 );
     // response queue
     logic [7:0] q [16];
@@ -44,6 +49,7 @@ module ps2_dev #(
     logic [19:0] bat;            // reset countdown, then AA (00)
 
     assign rx_valid = q_n != 5'd0 && gap == 20'd0;
+    assign q_empty  = q_n == 5'd0;
     assign rx_byte  = q[q_rd];
 
     // a set-2 key (E0 prefix or not) as its set-3 code; 0 = none
@@ -70,7 +76,11 @@ module ps2_dev #(
             default: return k;    // letters, digits, punctuation, Space, Tab, Enter, BS, shifts, keypad digits
         endcase
     endfunction
-    wire [7:0] k3 = set3(ps2_key[8], ps2_key[7:0]);
+    // the key event being queued: hps_io's, or the sequencer's
+    wire        kv_ext  = inj_valid ? 1'b0 : ps2_key[8];
+    wire        kv_down = inj_valid ? inj_down : ps2_key[9];
+    wire [7:0]  kv_code = inj_valid ? inj_code : ps2_key[7:0];
+    wire [7:0] k3 = set3(kv_ext, kv_code);
 
     // enqueue up to three bytes this cycle
     logic [7:0] e0, e1, e2;
@@ -97,19 +107,19 @@ module ps2_dev #(
                 8'hEB: begin en = 2'd1; e0 = 8'hFA; end                       // read data (mouse)
                 default: begin en = 2'd1; e0 = 8'hFA; end
             endcase
-        end else if (scanning && !MOUSE && ps2_key[10] != key_t) begin
-            // a key from hps_io, in the selected set
+        end else if (scanning && !MOUSE && (inj_valid || ps2_key[10] != key_t)) begin
+            // a key from hps_io (or the boot sequencer), in the selected set
             if (set == 2'd3) begin
                 if (k3 != 8'h00) begin
-                    en = ps2_key[9] ? 2'd1 : 2'd2;
-                    e0 = ps2_key[9] ? k3 : 8'hF0; e1 = k3;
+                    en = kv_down ? 2'd1 : 2'd2;
+                    e0 = kv_down ? k3 : 8'hF0; e1 = k3;
                 end
-            end else if (ps2_key[8]) begin
-                en = ps2_key[9] ? 2'd2 : 2'd3;
-                e0 = 8'hE0; e1 = ps2_key[9] ? ps2_key[7:0] : 8'hF0; e2 = ps2_key[7:0];
+            end else if (kv_ext) begin
+                en = kv_down ? 2'd2 : 2'd3;
+                e0 = 8'hE0; e1 = kv_down ? kv_code : 8'hF0; e2 = kv_code;
             end else begin
-                en = ps2_key[9] ? 2'd1 : 2'd2;
-                e0 = ps2_key[9] ? ps2_key[7:0] : 8'hF0; e1 = ps2_key[7:0];
+                en = kv_down ? 2'd1 : 2'd2;
+                e0 = kv_down ? kv_code : 8'hF0; e1 = kv_code;
             end
         end else if (scanning && MOUSE && ps2_mouse[24] != mouse_t) begin
             en = 2'd3; e0 = ps2_mouse[7:0] | 8'h08;
@@ -130,7 +140,7 @@ module ps2_dev #(
             else if (gap != 20'd0) gap <= gap - 20'd1;
 
             if (!tx_valid) begin
-                if (!MOUSE) key_t <= ps2_key[10];
+                if (!MOUSE && !inj_valid) key_t <= ps2_key[10];
                 else mouse_t <= ps2_mouse[24];
             end
             room = 5'd16 - q_n;
