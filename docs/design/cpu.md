@@ -1053,6 +1053,18 @@ single-phase classic pipeline with the same hazard profile (1-cycle load-use,
   (T, T + 4); if it is not fetched yet, only pc_b <- T. This one rule covers
   branches in delay slots (ACD fig 4-4, ROM 0x41081/0x41082), RFI (state <-
   (IIAOQ front, IIAOQ back)) and interruptions (state <- (vector, vector + 4)).
+  The slot is found by its address (X's iaoq_b) among D, F2 and F1, and it is
+  the **oldest** one at that address: a younger instruction at the same
+  address is a refetch of it and is killed with everything else younger than
+  the slot. Two copies exist when a branch's target is its own slot's address,
+  which an RFI into a nullified branch produces (IIAOQ = {the nullified
+  branch, its target}): D predicts it taken, so the fetch of the back (the
+  slot) is followed by the fetch of the target, the same word; when E
+  nullifies the branch (a misprediction: not taken) and redirects to the
+  slot's successor, both matched the slot and the second copy ran as the
+  first's delay slot with the first copy's target as its iaoq_b -- a B,L
+  there linked to target + 4 (HP-UX 11i's installer, cpu-requests #10,
+  2026-10-14; the `link` suite's RAM groups reproduce it).
 * **Static prediction** (as the real chip, ERS s.4.3/s.5.3.7): in D,
   PC-relative conditional branches with negative displacement and BL/GATE
   redirect fetch to the target; forward conditional branches fall through.

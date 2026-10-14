@@ -55,6 +55,7 @@ module pa_core
     output logic        redir_new_space,
     output logic [31:0] redir_slot_e, redir_slot_d,   // E's / D's branch delay-slot address
     output logic        redir_from_e,
+    output logic        redir_slot_in_d,   // E's redirect with its delay slot held in D
 
     // TLB (pa_tlb)
     output logic [15:0] tlb_lk_space,   // the next lookup tag (E's address or the I-LAB's request)
@@ -159,6 +160,11 @@ module pa_core
     output logic [1:0]  dbg_gr_we,
     output logic [4:0]  dbg_gr_num0, dbg_gr_num1,
     output logic [31:0] dbg_gr_data0, dbg_gr_data1,
+    // cpu-requests #10 (board recorder): the retired instruction's EA and store
+    // datum; W-hold events (1 D-cache miss, 2 walk, 3 replay) with their IAOQ/EA
+    output logic [31:0] dbg_ea, dbg_stdata,
+    output logic [1:0]  dbg_wev,
+    output logic [31:0] dbg_wev_iaoq, dbg_wev_ea,
     output logic [31:0] dbg_psw,
     output logic        dbg_halted,
     output logic        dbg_fp_stall,   // D held an FP instruction this cycle only because of the FPU (S-012)
@@ -626,6 +632,7 @@ module pa_core
     assign redir_slot_e   = e_iaoq_b;
     assign redir_slot_d   = d_iaoq_b;
     assign redir_from_e   = e_redir;
+    assign redir_slot_in_d = e_redir && d_valid;
 
     // ================================================================ M stage
     // TLB lookup: the instruction in M when it translates, else the fetch unit's refill
@@ -1207,8 +1214,11 @@ module pa_core
             dbg_retire <= 0; dbg_nullified <= 0; dbg_trap <= 0; dbg_trap_vec <= 0; dbg_iaoq_f <= 0;
             dbg_iaoq_b <= 0; dbg_iasq_f <= 0; dbg_insn <= 0; dbg_halted <= 0;
             dbg_gr_we <= 0; dbg_gr_num0 <= 0; dbg_gr_num1 <= 0; dbg_gr_data0 <= 0; dbg_gr_data1 <= 0;
+            dbg_ea <= 0; dbg_stdata <= 0; dbg_wev <= 0; dbg_wev_iaoq <= 0; dbg_wev_ea <= 0;
         end else begin
             dbg_retire <= 1'b0; dbg_nullified <= 1'b0; dbg_trap <= 1'b0; dbg_halted <= 1'b0;
+            dbg_wev <= (w_valid && wst == W_RUN && w_walk_go) ? 2'd2 : (w_cmem_go && !w_chit) ? 2'd1 : w_replay ? 2'd3 : 2'd0;
+            dbg_wev_iaoq <= w_iaoq_f; dbg_wev_ea <= w_ea;
             dbg_gr_we <= {we1, we0}; dbg_gr_num0 <= wa0; dbg_gr_num1 <= wa1;
             dbg_gr_data0 <= wd0; dbg_gr_data1 <= wd1;
 
@@ -1242,9 +1252,11 @@ module pa_core
                 if (w_wfail_trap && w_cr28_we) tr[4] <= w_cr28_val;
                 dbg_trap <= 1'b1; dbg_trap_vec <= w_vec;
                 dbg_iaoq_f <= w_iaoq_f; dbg_iaoq_b <= w_iaoq_b; dbg_iasq_f <= w_iasq_f; dbg_insn <= w_insn;
+                dbg_ea <= w_ea; dbg_stdata <= w_stdata;
             end else if (w_commit) begin
                 dbg_retire <= 1'b1; dbg_nullified <= w_nul;
                 dbg_iaoq_f <= w_iaoq_f; dbg_iaoq_b <= w_iaoq_b; dbg_iasq_f <= w_iasq_f; dbg_insn <= w_insn;
+                dbg_ea <= w_ea; dbg_stdata <= w_stdata;
                 psw <= psw_next;
                 g4_pend <= 1'b0;
                 if (!w_nul) begin

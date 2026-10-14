@@ -65,6 +65,7 @@ module pa_fetch (
     // parallel with the E-stage branch decision (cpu-timing.md 4.3 cut F)
     input  logic [31:0] redir_slot_e, redir_slot_d,
     input  logic        redir_from_e,
+    input  logic        redir_slot_in_d,    // E's redirect: the core holds the slot in D (nothing here is it)
     // F2 -> D
     output logic        f2_valid,
     output logic [31:0] f2_insn,
@@ -185,6 +186,7 @@ module pa_fetch (
     wire sl_nf = redir_from_e ? sl_nf_e : sl_nf_d;
     wire n_f2_slot = adv_f2 ? sl_f1 : sl_f2;
     logic n_f1_slot;                                 // issue ? sl_nf : sl_f1, set below
+    logic slot_found;                                // the redirect's slot already kept (D, then F2)
 
     always_comb begin
         n_f1_valid = f1_valid; n_f1_iaoq_f = f1_iaoq_f; n_f1_iaoq_b = f1_iaoq_b;
@@ -206,6 +208,7 @@ module pa_fetch (
         end
         issue = !f1_valid || f1_consumed;
         n_f1_slot = issue ? sl_nf : sl_f1;
+        slot_found = 1'b0;
         if (issue) begin
             n_f1_valid = 1'b1;
             n_f1_iaoq_f = nf; n_f1_iaoq_b = nb; n_f1_iasq_f = nsf; n_f1_iasq_b = nsb;
@@ -218,12 +221,24 @@ module pa_fetch (
             n_nf = redir_target; n_nb = redir_back;
             n_nsf = redir_space; n_nsb = redir_back_space;
         end else if (redir) begin
-            if (n_f2_valid && n_f2_slot) begin
+            // The slot is the *oldest* instruction at that address: D's if the core
+            // holds it there, else F2's, else F1's. A younger one at the same address
+            // is a refetch of it and dies with everything else younger than the slot.
+            // That happens when a branch's target is its own delay slot's address: an
+            // RFI into a nullified branch whose IIAOQ back is its target (HP-UX 11i's
+            // itool, cpu-requests #10) -- D predicts the branch taken, the fetch of the
+            // back (the slot) is followed by the target's (the same word), and when E
+            // nullifies the branch and redirects to the slot's successor, both copies
+            // matched the slot: the second ran as the first's delay slot, with the first
+            // copy's branch target as its IAOQ back, and B,L linked to target + 4.
+            slot_found = redir_slot_in_d;
+            if (n_f2_valid && n_f2_slot && !slot_found) begin
                 n_f2_iaoq_b = redir_target;
                 if (redir_new_space) n_f2_iasq_b = redir_space;
+                slot_found = 1'b1;
             end else
                 n_f2_valid = 1'b0;
-            if (n_f1_valid && n_f1_slot) begin
+            if (n_f1_valid && n_f1_slot && !slot_found) begin
                 n_f1_iaoq_b = redir_target;
                 if (redir_new_space) n_f1_iasq_b = redir_space;
             end else

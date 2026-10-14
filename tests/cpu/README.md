@@ -18,6 +18,7 @@ and the logs are compared on the host.
 | `src/link.ld` | memory map (below) |
 | `run_qemu.py` | runs one ROM on QEMU and captures the log |
 | `model.py` | independent reference model (alu1, alu2, shift, max1; the FPU edge cases of fpedge) |
+| `check_link.py` | the `link` suite's checker (no reference log): every link-register slot must hold the sentinel or the link |
 | `compare.py` | checks a log against the model or against another log |
 | `build/` | generated: `gen_<suite>.{S,c,json}`, `<suite>.elf`, `<suite>.bin` |
 | `ref/qemu/<suite>.log` | QEMU 11.1.1 `-M 715` logs |
@@ -361,3 +362,23 @@ These are gaps in the vectors, not in the model:
   it belongs to the trap suite.
 - The DCOR/IDCOR presets give only C/B all-0 or all-1. Mixed C/B patterns,
   the normal BCD case, are not exercised.
+
+## The link suite (cpu-requests #10)
+
+`gen_link` reproduces the link-register corruption HP-UX 11i's installer hit
+on the board (2026-10-11..14): an external interrupt taken on a *nullified*
+`b,l,n` whose IIAOQ back is its own target (the delay slot of a taken
+`b,l,n` to the same address), the kernel's `rfi` back into it, and a `b,l`
+at that target. Each vector arms the interval timer K cycles ahead and
+checks what four `stw rp` stores after the `b,l` put in RAM (the sentinel,
+the link, or -- the bug -- the branch target + 4). The groups sweep K over
+the itool shapes in the ROM (uncached), in virtual mode through a page
+entry and through the hardware walker, and -- the ones that reproduce it --
+with the sequence planted in RAM at a page boundary (`bl-link-irq-ram*`:
+the nullified branch is the last word of one page, its target the first of
+the next, the code warmed into the I-cache first, as on the board). The
+harness's handler returns to the trapping instruction like an OS kernel's
+`rfi` when trap-log word +36 is set (`src/ivt.S`), and flushes the I-cache
+line at +40 first if set. The timer's steps are coarser than a core cycle,
+so the RAM groups also pad the arming with 0/1 nops; two of the 48 vectors
+of each RAM group land the interrupt on the nullified branch.

@@ -1370,50 +1370,143 @@ LINK_SLOTS = 0x000F0100
 
 def gen_link(rng):
     suite = Suite("link")
-    N = 120
-    VA, PA, PDIR = 0x40001000, LINK_SLOTS & ~0xFFF, 0x00180000     # the slot page, mapped at VA for the walker
+    AR_RWX = 0b011_11_00
+    SYNC = "\tsync"
+    PA = LINK_SLOTS & ~0xFFF
+    VA = 0x40000000 | (PA & 0x1FFFF)         # same cache colour as PA (cpu.md 2.7)
     off = LINK_SLOTS & 0xFFF
+    PDIR = 0x00180000
     entry = PDIR | ((VA >> 12) & 0xFF) << 4
-    AR = 0b011_11_00
+    def dr8(v):
+        return li(13, v) + [diag("MTCPU", x=13, dr=8)]
+    def block_insert(n, va, mask7, pa, prot):
+        return dr8(0x2041 | n << 1) + li(13, va | mask7 << 12) + li(14, (pa >> 12) << 5) + \
+               ["\tidtlba\t%r14, (%sr1, %r13)"] + li(14, prot) + ["\tidtlbp\t%r14, (%sr1, %r13)"] + dr8(0x2000)
+    def page_insert(va, pa, prot):
+        return li(13, va) + li(14, (pa >> 12) << 5) + ["\tidtlba\t%r14, (%sr1, %r13)"] + \
+               li(14, prot) + ["\tidtlbp\t%r14, (%sr1, %r13)"]
+    def page_purge(va):
+        return li(13, va) + ["\tpdtlb\t%r0(%sr1, %r13)"]
+    def to_psw(l, psw):
+        return ["\tmtctl\t%r0, %cr17", "\tmtctl\t%r0, %cr17", "\tldil\tL%%%s, %%r13" % l, "\tldo\tR%%%s(%%r13), %%r13" % l,
+                "\tmtctl\t%r13, %cr18", "\tldo\t4(%r13), %r13", "\tmtctl\t%r13, %cr18"] + li(13, psw) + \
+               ["\tmtctl\t%r13, %cr22", "\trfi", "\tnop", "%s:" % l]
+    # as the tlbx suite: SR1 = 0, PID check and D off, DR0 hashing off, the 64 page
+    # entries' power-on locks cleared, block entries for the ROM and low RAM
+    suite.setup = ["\tmtsp\t%r0, %sr1", "\trsm\t6, %r0"] + \
+                  li(13, 0x03FF0000) + [diag("MTCPU", x=13, dr=0)] + \
+                  li(15, 0x40) + li(14, 0x7F000000) + ["\tldi\t64, %r16",
+                   "1:", diag("MTCPU", x=15, dr=8), "\tidtlba\t%r0, (%sr1, %r14)",
+                   "\tldo\t0x1000(%r14), %r14", "\tldo\t0x80(%r15), %r15",
+                   "\taddib,>\t-1, %r16, 1b", "\tnop"] + \
+                  block_insert(0, 0xF0000000, 0b1111100, 0xF0000000, tlb_prot(AR_RWX)) + \
+                  block_insert(1, 0x00000000, 0b1111100, 0x00000000, tlb_prot(AR_RWX)) + \
+                  dr8(0x2000)
     def pdir():
         w0 = 1 << 31 | ((VA >> 17) & 0x7FFF) << 16
-        w1 = 1 << 31 | AR << 20 | 1 << 28
+        w1 = 1 << 31 | AR_RWX << 20 | 1 << 28
         return li(13, entry) + li(14, w0) + ["\tstw\t%r14, 0(%r13)"] + li(14, w1) + ["\tstw\t%r14, 4(%r13)"] + \
                li(14, (PA >> 12) << 5) + ["\tstw\t%r14, 8(%r13)"] + ["\tstw\t%r0, 12(%r13)"] + \
                li(13, 0xC0000) + ["\tmtctl\t%r13, %cr28"] + li(13, PDIR | 0xE0) + [diag("MTCPU", x=13, dr=24)] + \
                li(13, 0x8) + [diag("MTCPU", x=13, dr=25)]
-    def vec(v, walk, miss):
-        k = 6 + v if walk != 1 else 7000 + v
-        lab = "Llink_%d_%d_%d" % (walk, miss, v)
-        base = "0(%sr1, %r14)" if walk else "0(%r14)"
+    # walk: 0 real mode, 2 virtual mode (C = D = 1 by RFI) through a page entry
+    # inserted by hand, 1 virtual mode with the entry purged so the store's DTLB
+    # miss runs the hardware walker (PDIR entry) and replays the store
+    def vec(v, walk, miss, pre=0, ifl=0, ldb=0, front=1, ram=0):
+        k = 6 + v if not ram else 20 + v // 2       # ram: around the nullified b,l,n; v % 2 nops of pad (CR16 steps > 1 cycle)
+        lab = "Llink_%d_%d_%d_%d_%d_%d_%d" % (walk, miss, pre, ifl, ldb, ram, v)
+        if ram:
+            # the sequence planted in RAM so it runs from the I-cache as itool does: the
+            # template below (in ROM, never executed there) is copied to the end of a RAM
+            # page (the nullified second b,l,n is the page's last instruction) with its
+            # target p at the start of the next page; in virtual mode (C = D = 1, the RAM
+            # block entry) the RFI's I-LAB invalidation makes both refetches refill it, as
+            # the board's onset had (cpu-requests #10): an interrupt on the nullified b,l,n,
+            # the kernel-style return into it, D predicting it, its target fetched twice.
+            # r15 = the return address, r14 = the slots
+            dest = 0x00100000 + (v + 16 * miss) * 0x2000 + 0x1000 - 16
+            blob = ["\tb\t%s_skip" % lab, "\tnop", "\t.balign\t32", "\t.skip\t16", "%s_tpl:" % lab, "\tssm\t1, %r0",
+                    "\tb,l,n\t%s_p, %%r0" % lab, "\tb,l,n\t%s_p, %%r0" % lab, "\tbreak\t0, 7", "%s_p:" % lab,
+                    "\tb,l\t%s_t, %%rp" % lab, "\tnop", "\tnop", "\t.balign\t32", "%s_t:" % lab,
+                    "\tstw\t%rp, 0(%sr1, %r14)", "\tstw\t%rp, 4(%sr1, %r14)", "\tstw\t%rp, 8(%sr1, %r14)", "\tstw\t%rp, 12(%sr1, %r14)",
+                    "\tnop", "\tnop", "\tnop", "\tnop", "\trsm\t1, %r0", "\tbv\t%r0(%r15)", "\tnop", "%s_skip:" % lab]
+            NW = 24
+            b = ["\tcopy\t%rp, %r4"] + li(12, TRAPLOG) + li(14, LINK_SLOTS) + li(5, SENTINEL)
+            b += ["\tstw\t%%r5, %d(%%r14)" % (4 * i) for i in range(4)]
+            if miss: b += [SYNC, "\tfdc\t%r0(%r14)", SYNC]
+            b += ["\tldil\tL%%%s_tpl, %%r13" % lab, "\tldo\tR%%%s_tpl(%%r13), %%r13" % lab] + li(11, dest)
+            b += ["\tldw\t%d(%%r13), %%r3\n\tstw\t%%r3, %d(%%r11)" % (4 * i, 4 * i) for i in range(NW)]
+            b += ["\tfdc\t%r0(%r11)\n\tldo\t32(%r11), %r11" for i in range(4)] + [SYNC]
+            b += li(16, dest + 16 + 8) + ["\tldw\t28(%r12), %r17",
+                  "\tldi\t1, %r11", "\tstw\t%r11, 36(%r12)"] + (li(11, dest + 16) + ["\tstw\t%r11, 40(%r12)"] if miss else []) + [
+                  "\tldi\t-1, %r3", "\tmtctl\t%r3, %cr23", "\tmtctl\t%r0, %cr15"] + \
+                 to_psw(lab + "_v", PSW_INIT | 0x00040002) + \
+                 li(13, dest) + ["\tldil\tL%%%s_ret0, %%r15" % lab, "\tldo\tR%%%s_ret0(%%r15), %%r15" % lab,
+                  "\tbv\t%r0(%r13)", "\tnop", "%s_ret0:" % lab] + \
+                 ["\tstw\t%%r5, %d(%%sr1, %%r14)" % (4 * i) for i in range(4)] + \
+                 ["\tldil\tL%%%s_ret, %%r15" % lab, "\tldo\tR%%%s_ret(%%r15), %%r15" % lab,
+                  "\tldil\tL%0x80000000, %r3", "\tmtctl\t%r3, %cr15",
+                  "\tmfctl\t%cr16, %r11", "\tldo\t%d(%%r11), %%r11" % k, "\tmtctl\t%r11, %cr16"] + ["\tnop"] * (v % 2) + \
+                 ["\tbv\t%r0(%r13)", "\tnop", "%s_ret:" % lab] + to_psw(lab + "_r", PSW_INIT)
+            b += ["\tstw\t%r0, 36(%r12)", "\tstw\t%r0, 40(%r12)", "\tmtctl\t%r0, %cr15", "\tldi\t-1, %r3", "\tmtctl\t%r3, %cr23",
+                  "\tldw\t28(%r12), %r18", "\tsub\t%r18, %r17, %r18", "\tstw,ma\t%r16, 4(%r9)"]
+            b += ["\tldw\t%d(%%r14), %%r11" % (4 * i) + "\n\tstw,ma\t%r11, 4(%r9)" for i in range(4)]
+            b += ["\tstw,ma\t%r18, 4(%r9)", "\tldw\t20(%r12), %r11", "\tstw,ma\t%r11, 4(%r9)", "\tstw,ma\t%r4, 4(%r9)",
+                  "\tcopy\t%r4, %rp"]
+            return blob + b, {"k": k}
         st = lambda o: "\tstw\t%%rp, %d(%%sr1, %%r14)" % o if walk else "\tstw\t%%rp, %d(%%r14)" % o
         b = ["\tcopy\t%rp, %r4"] + li(12, TRAPLOG) + li(14, LINK_SLOTS) + li(5, SENTINEL)
         b += ["\tstw\t%%r5, %d(%%r14)" % (4 * i) for i in range(4)]
-        if miss: b += ["\tsync", "\tfdc\t%r0(%r14)", "\tsync"]
-        if walk: b += pdir() + li(13, VA) + ["\tpdtlb\t%r0(%sr1, %r13)"] + li(14, VA + off) + ["\tmtsp\t%r0, %sr1"] + \
-                      (["\tssm\t2, %r0", "\tldw\t0(%sr1, %r14), %r0", "\trsm\t2, %r0"] if walk == 2 else [])
+        if miss: b += [SYNC, "\tfdc\t%r0(%r14)", SYNC]
+        if walk == 2: b += page_insert(VA, PA, tlb_prot(AR_RWX))
+        if walk == 1: b += pdir() + page_purge(VA)
+        if walk: b += li(14, VA + off) + to_psw(lab + "_v", PSW_INIT | 0x00040002)
         b += ["\tldil\tL%%%s, %%r16" % lab, "\tldo\tR%%%s(%%r16), %%r16" % lab,
-              "\tldw\t28(%r12), %r17",
-              "\tldi\t-1, %r3", "\tmtctl\t%r3, %cr23",
+              "\tldw\t28(%r12), %r17"]
+        if front: b += ["\tldi\t1, %r11", "\tstw\t%r11, 36(%r12)"]     # the handler returns to the front (kernel-style)
+        b += ["\tldi\t-1, %r3", "\tmtctl\t%r3, %cr23",
               "\tldil\tL%0x80000000, %r3", "\tmtctl\t%r3, %cr15",
               "\tmfctl\t%cr16, %r13", "\tldo\t%d(%%r13), %%r13" % k, "\tmtctl\t%r13, %cr16"]
-        if walk: b += ["\tssm\t2, %r0"]
-        b += ["\tssm\t1, %r0", "\tb,l\t%s, %%rp" % lab, "\tnop", "%s:" % lab,
+        # the itool shapes (cpu-requests #10): ifl = the target line (32-byte aligned,
+        # as 0x2ee1a0 is) flushed from the I-cache so the b,l's target misses;
+        # pre = 1: the b,l is reached by `b,l,n X,r0` whose delay slot is another
+        # `b,l,n X,r0` (itool 0x2ed3fc/0x2ed400) -- a nullified branch in E keeps D
+        # from predicting the b,l, which then resolves in E; pre = 2: entered at the
+        # second b,l,n (its slot nullified); ldb: `ldw -20(sp),r19` right before
+        if ifl: b += ["\tldil\tL%%%s_t, %%r15" % lab, "\tldo\tR%%%s_t(%%r15), %%r15" % lab, SYNC, "\tfic\t%r0(%sr0, %r15)", SYNC]
+        b += ["\tssm\t1, %r0"]
+        if pre == 1: b += ["\tb,l,n\t%s_p, %%r0" % lab, "\tb,l,n\t%s_p, %%r0" % lab, "\tbreak\t0, 7"]
+        if pre == 2: b += ["\tb\t%s_q" % lab, "\tnop", "\tbreak\t0, 7", "%s_q:" % lab, "\tb,l,n\t%s_p, %%r0" % lab, "\tbreak\t0, 7"]
+        if pre: b += ["%s_p:" % lab]
+        if ldb: b += ["\tldw\t-20(%sp), %r19"]
+        b += ["\tb,l\t%s_t, %%rp" % lab, "\tnop", "%s:" % lab, "\t.balign\t32", "%s_t:" % lab,
               st(0), st(4), st(8), st(12),
               "\tnop", "\tnop", "\tnop", "\tnop", "\tnop", "\tnop", "\tnop", "\tnop",
               "\trsm\t1, %r0"]
-        if walk: b += ["\trsm\t2, %r0", "\tpdtlb\t%r0(%sr1, %r14)"] + li(13, 0x9) + [diag("MTCPU", x=13, dr=25)] + li(14, LINK_SLOTS)
-        b += ["\tmtctl\t%r0, %cr15", "\tldi\t-1, %r3", "\tmtctl\t%r3, %cr23",
+        if walk: b += to_psw(lab + "_r", PSW_INIT) + page_purge(VA) + li(14, LINK_SLOTS)
+        if walk == 1: b += li(13, 0x9) + [diag("MTCPU", x=13, dr=25)]
+        b += ["\tstw\t%r0, 36(%r12)", "\tmtctl\t%r0, %cr15", "\tldi\t-1, %r3", "\tmtctl\t%r3, %cr23",
               "\tldw\t28(%r12), %r18", "\tsub\t%r18, %r17, %r18", "\tstw,ma\t%r16, 4(%r9)"]
         b += ["\tldw\t%d(%%r14), %%r11" % (4 * i) + "\n\tstw,ma\t%r11, 4(%r9)" for i in range(4)]
-        b += ["\tstw,ma\t%r18, 4(%r9)", "\tldi\t%d, %%r11" % k, "\tstw,ma\t%r11, 4(%r9)", "\tstw,ma\t%r4, 4(%r9)",
+        b += ["\tstw,ma\t%r18, 4(%r9)", "\tldw\t20(%r12), %r11", "\tstw,ma\t%r11, 4(%r9)", "\tstw,ma\t%r4, 4(%r9)",
               "\tcopy\t%r4, %rp"]
         return b, {"k": k}
-    for name, walk, miss in (("bl-link-irq", 0, 0), ("bl-link-irq-miss", 0, 1), ("bl-link-irq-virt", 2, 0), ("bl-link-irq-virt-miss", 2, 1),
-                             ("bl-link-irq-walk", 1, 0), ("bl-link-irq-walk-miss", 1, 1)):
+    groups = [("bl-link-irq", 0, 0, 0, 0, 0), ("bl-link-irq-miss", 0, 1, 0, 0, 0)]
+    for pre in (1, 2):
+        for ifl in (0, 1):
+            for miss in (0, 1):
+                groups.append(("bl-link-irq-pre%d%s%s" % (pre, "-ifl" if ifl else "", "-miss" if miss else ""), 0, miss, pre, ifl, 1))
+    groups.append(("bl-link-irq-ifl", 0, 0, 0, 1, 1))
+    for walk, wn in ((2, "virt"), (1, "walk")):
+        for pre in (0, 1):
+            for miss in (0, 1):
+                groups.append(("bl-link-irq-%s%s%s" % (wn, "-pre1" if pre else "", "-miss" if miss else ""), walk, miss, pre, 0, 1))
+    groups = [("bl-link-irq-ram", 0, 0, 1, 0, 1, 1), ("bl-link-irq-ram-miss", 0, 1, 1, 0, 1, 1)] + [g + (0,) for g in groups]
+    for name, walk, miss, pre, ifl, ldb, ram in groups:
         body, ins = [], []
+        N = 48 if ram else 16                                      # the ROM's 256 KB
         for v in range(N):
-            b, vin = vec(v, walk, miss); body += b; ins.append(vin)
+            b, vin = vec(v, walk, miss, pre, ifl, ldb, 1, ram); body += b; ins.append(vin)
         suite.add(name, N, LINK_WORDS, body, ins)
     return suite
 

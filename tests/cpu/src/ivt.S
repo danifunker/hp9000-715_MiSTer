@@ -11,6 +11,9 @@
  *   +32 escape address: if non-zero, resume there instead (and clear it);
  *       for traps the next instruction would take again (a fetch from an
  *       unmapped or non-executable page)
+ *   +36 non-zero: an external interrupt returns to the trapping instruction
+ *       (queue = front, back), as an OS kernel's RFI does
+ *   +40 non-zero: an I-cache line (address) flushed before that return
  *
  * The handler works only in the shadowed registers (r1, r8, r9, r16, r17,
  * r24, r25), deliberately clobbers them, and returns with RFIR, so every
@@ -66,6 +69,23 @@ trap_common:
 	ldi	-1, %r24
 	mtctl	%r24, %cr23
 1:
+	/* +36 non-zero: an external interrupt resumes at the trapping
+	 * instruction, queue = (front, back), as an OS kernel's RFI does
+	 * (cpu-requests #10, the link suite) */
+	ldw	36(%r8), %r24
+	comib,=,n	0, %r24, 1f
+	comib,<>,n	4, %r1, 1f
+	/* +40 non-zero: an I-cache line to flush before the return (what the
+	 * kernel's own code does to the user's lines) */
+	ldw	40(%r8), %r24
+	comib,=,n	0, %r24, 2f
+	fic	%r0(%sr0, %r24)
+	sync
+2:
+	mtctl	%r16, %cr18
+	b	3f
+	mtctl	%r17, %cr18
+1:
 	/* resume after the trapping insn: queue = (back, back + 4), or at the
 	 * escape address a test left at +32 */
 	ldw	32(%r8), %r24
@@ -76,6 +96,7 @@ trap_common:
 	mtctl	%r17, %cr18
 	ldo	4(%r17), %r17
 	mtctl	%r17, %cr18
+3:
 	mfctl	%cr17, %r16
 	mtctl	%r0, %cr17
 	mfctl	%cr17, %r17
