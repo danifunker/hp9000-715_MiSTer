@@ -6,7 +6,7 @@ PA-7100LC CPU, the LASI I/O chip (SCSI, Ethernet, serial, parallel, PS/2,
 audio) and the built-in 8-plane Artist graphics, with the aim of running
 HP's own boot ROM and HP-UX.
 
-**Status (build 25, 2026-10-09, alpha):** HP's boot ROM passes its self-tests, boots
+**Status (build 53, 2026-10-14, alpha):** HP's boot ROM passes its self-tests, boots
 from SCSI, and **HP-UX 10.20 boots to the CDE desktop on the MiSTer** with the
 built-in Artist graphics at 1280x1024: the boot console, the X login and CDE
 (windows, menus, proportional and terminal fonts, xclock, oclock, private
@@ -15,13 +15,22 @@ colour maps), PS/2 keyboard and mouse with the hardware cursor (tried at 32 and
 "Display" says so). Design notes are in [`docs/design/`](docs/design/), the
 build log in [`docs/design/system.md`](docs/design/system.md) section 10.
 
+**Build 53 (2026-10-14)** over build 25: Artist at the monitor's own timing,
+Harmony audio and CD audio, the 82596 LAN (HP-UX's `lan`), the LASI floppy
+controller (no drive), BLR/BV reserved bits, and the CPU fix for HP-UX 11i's
+installer stalls (a redirect into a nullified branch fetched its target twice,
+`docs/design/cpu-requests.md` #10): **HP-UX 11i v1's install media boots and
+its installer runs.** OSD: "Boot mode (on reset)" (BOOT_ADMIN, ISL,
+single-user, LVM maintenance, LAN, CD), "EEPROM (no image)" Built-in / Blank,
+graphics console by default, RAM default 32 MB.
+
 ## Running it on a MiSTer
 
 The files in [`release/`](release/):
 
 | file | goes to | what |
 |---|---|---|
-| `HP9K715.rbf` | `/media/fat/_Unstable/` (or `_Computer/`) | the core, Quartus build 25: 64 MHz |
+| `HP9K715.rbf` | `/media/fat/_Unstable/` (or `_Computer/`) | the core, Quartus build 53 (2026-10-14; `HP9K715_20261014.rbf` is the same file, `HP9K715_20261011.rbf` build 36): 64 MHz |
 | `boot0.rom` | `/media/fat/games/HP9K715/` | HP's PDC 1.6 boot ROM for the 715/64, 258,728 bytes ([`roms/README.md`](roms/README.md): HP firmware patch PF_C7X50016, image IMAGE1A's payload). Loaded by the framework at core start; the loader patches one word ([`docs/STUBS.md`](docs/STUBS.md) S-011) |
 | `hp715.eep` | `/media/fat/games/HP9K715/` | the EEPROM image (8 KB, `tools/eeprom/mkrelease.sh`): manufacturing and chassis codes off, **console on the graphics** (monitor type 1, 1280x1024), PS/2 keyboard, primary path scsi.6, autoboot and autosearch on. **The same image is built into the core**, so nothing needs mounting to boot; mount it in the OSD's "Mount EEPROM" slot only to keep the firmware's changes (boot paths, monitor type, `lanaddress`): it is written back, and mounting it resets the machine so the ROM reads it. For the RS-232 console instead: `CONSOLE=rs232 tools/eeprom/mkrelease.sh`, or `path console rs232` at `BOOT_ADMIN>` |
 
