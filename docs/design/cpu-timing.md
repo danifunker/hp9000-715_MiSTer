@@ -625,7 +625,49 @@ The suite: 864,899 -> 815,673 cycles (-6 %; -17 % over fit 15). Every
 loop's taken branch is one cycle cheaper; the branch suite (every form,
 nullification, delay-slot branches) passes unchanged.
 
-## 7. Open items
+## 7. Fit 18 (2026-10-15): closing the timing of fits 16-17
+
+The whole-core fit of fits 16-17 (build 54, seed 4) missed the core clock by
+0.440 ns (TNS -2.263, 62.25 MHz; 36,233 ALMs). The twelve worst paths were
+two families (`quartus_sta` `report_timing -npaths 12`):
+
+1. `w_valid` -> `w_walking_tlb` -> `tlb_op_space` mux -> `pa_tlb` `n_tag` ->
+   the 64-entry compare chain -> `n_sel` -> the OR tree -> `pg_hit` (-0.44 ..
+   -0.23 ns, 12 LUT levels, 15.4 ns of data delay). Not new: the path of
+   builds 37 and 48, placement-dependent. The CAM compares an operation's
+   tag in the cycle the W stage requests it (`op_accept`), so the request and
+   the tag mux -- both decoded from `w_valid`/`wst` -- sit in front of the
+   compare. **Cut**: `tlb_op_req`, `tlb_op_space` and `tlb_op_off` go to the
+   TLB from registers (`*_r`, one cycle late); an operation (a walker insert,
+   a TLB instruction) starts one cycle later while W holds. `op_accept` and
+   `n_tag`'s select are then registers in, compare out.
+2. D's target select -> `pa_icache`'s data RAM address (-0.24 .. -0.20 ns):
+   fit 17's immediate issue took `redir_target` from D's adder
+   (`d_iaoq_f + 8 + disp`). **Cut**: the PC-relative target is added from
+   F2's registers (`f2_target`, the displacement from the opcode: 17-bit for
+   major 3A, 12-bit otherwise) and registered into D (`d_target_r`); D's
+   prediction and `e_target` use the register. Identical cycle counts.
+
+Fit 55 = fit 17 + cut 2; the TLB cut (1) is in the tree for the fit after it
+if 55 still misses on that family. perf unchanged; tlbx +0.4 % cycles.
+
+## 8. Fits 19+ (2026-10-15): the last tenth of a nanosecond
+
+Fit 55 (= 17 + the F2 adder): core -0.036 ns, 36,612 ALMs; the TLB family
+gone from the top twelve, the worst now `w_vec`/`w_walk_go` -> `adv` ->
+the E operand select -> the ALU (physical synthesis retimes `e_fb_sel`
+forward). Fit 56 (+ the registered TLB operation): -0.105 ns on one path
+with the next at +0.012: `w_insn[29]` -> the FPU's store-data select
+(`insn[31:26] == 0B`, FSTD or FSTW) -> `dc_st_data` -> the store-to-load
+forward into M's `m_rdata` -> the M -> D bypass `m_fw_rt` -> `e_gra`
+(retimed into the ALU's operand mux) -> `opa_sh`, 15.07 ns of data delay,
+2.2 ns of it one route. **Cut**: the FPU takes the store's size from the
+core's decoded control word (`st_dbl` = `w_c.size == 3`) instead of
+decoding the opcode on the store-data path; the FR index is still
+`insn[4:0]`. fp/fpedge/mem pass. Fit 57 = 56 + this cut (seed 4), then
+seeds 1-3 if it still misses (builds 58-60).
+
+## 9. Open items
 
 - Seed 1 of fit 15's RTL, if one more point of the spread is wanted (seed 3
   gave 69.3 MHz, +1.19 ns).

@@ -31,6 +31,7 @@ module pa_fpunit
     input  logic        rst_n,
     input  logic        issue,          // an FP operation commits this cycle
     input  logic [31:0] insn,           // the instruction in W (operations, loads, stores)
+    input  logic        st_dbl,         // the store in W is a doubleword (the core's decoded size: no opcode decode on the store-data path, fit 19)
     input  logic        ld_we,          // an FP load commits: write insn's target
     input  logic [63:0] ld_data,        // the doubleword (FLDD) or the word in [31:0] (FLDW)
     input  logic        st_commit,      // an FP store commits (FSTD fr0 clears T)
@@ -168,7 +169,7 @@ module pa_fpunit
     // ---------------------------------------------------------------- store source
     always_comb begin
         rd_s_n = insn[4:0];
-        st_data = (insn[31:26] == 6'h0B) ? rd_s : {32'd0, insn[6] ? rd_s[31:0] : rd_s[63:32]};
+        st_data = st_dbl ? rd_s : {32'd0, insn[6] ? rd_s[31:0] : rd_s[63:32]};
     end
 
     // ---------------------------------------------------------------- engine

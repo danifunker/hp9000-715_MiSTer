@@ -77,6 +77,7 @@ module pa_core
     output logic [31:0] fp_insn,
     output logic        fp_ld_we,
     output logic [63:0] fp_ld_data,
+    output logic        fp_st_dbl,          // the store in W is FSTD (w_c.size): the FPU's store-data select without an opcode decode
     output logic        fp_st_commit,
     input  logic [63:0] fp_st_data,
     input  logic        fp_busy,
@@ -371,8 +372,14 @@ module pa_core
 
     // static prediction
     wire e_is_branch = e_valid && e_c.fu == FU_BRANCH;
-    wire [31:0] d_target_pc = d_iaoq_f + 32'd8 + dc.disp;
-    wire [31:0] d_target = (dc.br == BR_GATE) ? {d_target_pc[31:2], 2'b00} : d_target_pc;   // GATE: PL 0 (C = 0)
+    // the PC-relative target is added a stage early, from F2's registers, and
+    // registered into D (`d_target_r`): D's prediction then redirects the fetch
+    // from a register, which the I-cache's address register can take in the same
+    // cycle (fit 18, cpu-timing.md). BE/BLE/BV/BLR targets come from E's operands.
+    wire [31:0] f2_disp   = (f2_insn[31:26] == 6'h3A) ? br_disp17(f2_insn) : br_disp12(f2_insn);
+    wire [31:0] f2_target = f2_iaoq_f + 32'd8 + f2_disp;
+    logic [31:0] d_target_r;
+    wire [31:0] d_target = (dc.br == BR_GATE) ? {d_target_r[31:2], 2'b00} : d_target_r;   // GATE: PL 0 (C = 0)
     wire d_pred = d_valid && dc.fu == FU_BRANCH && !dc.illegal && !e_is_branch &&
                   ((dc.br == BR_COND && dc.disp[31]) || dc.br == BR_BL || dc.br == BR_GATE);
     wire d_redir = d_pred && adv_d;
@@ -839,7 +846,16 @@ module pa_core
     wire w_walking_tlb = w_valid && (wst == W_WALK_A || wst == W_WALK_P);
     assign dc_op_req  = (w_in_op && w_op_isd && !dc_op_done) || (w_walking_rd && !dc_op_done);
     assign ic_op_req  = w_in_op && w_op_eng == 2'd1 && !ic_op_done;
-    assign tlb_op_req = (w_in_op && w_op_eng == 2'd2 && !tlb_op_done) || (w_walking_tlb && !tlb_op_done);
+    // the request, space and offset go to the TLB a cycle late, from registers:
+    // the CAM compares the operation's tag in the cycle it accepts it, and
+    // `w_walking_tlb` (w_valid, wst) in front of the 72-entry compare and its OR
+    // tree was the core clock's worst path (fit 18, cpu-timing.md). The
+    // operation starts one cycle later; W holds meanwhile
+    wire tlb_op_req_c = (w_in_op && w_op_eng == 2'd2 && !tlb_op_done) || (w_walking_tlb && !tlb_op_done);
+    logic        tlb_op_req_r;
+    logic [15:0] tlb_op_space_r;
+    logic [31:0] tlb_op_off_r;
+    assign tlb_op_req = tlb_op_req_r;
     always_comb begin
         dc_op = DC_MISS;
         if (w_walking_rd) dc_op = DC_RD2;
@@ -883,8 +899,14 @@ module pa_core
     // TLB operations: the instruction's own (VA from E, GR[r]) or the walker's inserts
     wire [31:0] pdir_w0 = dc_op_rd2[127:96], pdir_w1 = dc_op_rd2[95:64], pdir_w2 = dc_op_rd2[63:32], pdir_w3 = dc_op_rd2[31:0];
     wire w_walk_i = w_trap == TRAP_ITLB;                        // walking for a fetch miss
-    assign tlb_op_space = w_walking_tlb ? (w_walk_i ? w_iasq_f : w_space) : w_space;
-    assign tlb_op_off   = w_walking_tlb ? (w_walk_i ? w_iaoq_f : w_ea) : w_ea;
+    wire [15:0] tlb_op_space_c = w_walking_tlb ? (w_walk_i ? w_iasq_f : w_space) : w_space;
+    wire [31:0] tlb_op_off_c   = w_walking_tlb ? (w_walk_i ? w_iaoq_f : w_ea) : w_ea;
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin tlb_op_req_r <= 1'b0; tlb_op_space_r <= 16'd0; tlb_op_off_r <= 32'd0; end
+        else begin tlb_op_req_r <= tlb_op_req_c; tlb_op_space_r <= tlb_op_space_c; tlb_op_off_r <= tlb_op_off_c; end
+    end
+    assign tlb_op_space = tlb_op_space_r;
+    assign tlb_op_off   = tlb_op_off_r;
     assign tlb_op_gr    = (wst == W_WALK_A) ? pdir_w2 : (wst == W_WALK_P) ? pdir_w1 : w_result;
     always_comb begin
         if (wst == W_WALK_A) tlb_op = TLB_INS_A;
@@ -929,6 +951,7 @@ module pa_core
     // ---- FP unit interface (sec. 6.11): everything happens at W commit, in order
     assign fp_issue     = w_commit && !w_nul && w_c.fu == FU_FP;
     assign fp_insn      = w_insn;
+    assign fp_st_dbl    = w_c.size == 2'd3;
     assign fp_ld_we     = w_commit && !w_nul && w_c.fpm && w_c.fu == FU_LOAD;
     assign fp_ld_data   = w_ld;
     assign fp_st_commit = w_commit && !w_nul && w_c.fpm && w_c.fu == FU_STORE;
@@ -1027,7 +1050,7 @@ module pa_core
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             d_valid <= 1'b0; e_valid <= 1'b0; m_valid <= 1'b0; w_valid <= 1'b0; m_need <= 1'b0;
-            d_ferr <= 0; d_fperr <= 0; e_fperr <= 0; m_fperr <= 0; w_fperr <= 0; d_insn <= 0; d_iaoq_f <= 0; d_iaoq_b <= 0; d_iasq_f <= 0; d_iasq_b <= 0;
+            d_ferr <= 0; d_fperr <= 0; e_fperr <= 0; m_fperr <= 0; w_fperr <= 0; d_insn <= 0; d_iaoq_f <= 0; d_iaoq_b <= 0; d_iasq_f <= 0; d_iasq_b <= 0; d_target_r <= 0;
             e_nul <= 0; e_err <= 0; e_pred <= 0; e_bflag <= 0; e_insn <= 0; e_iaoq_f <= 0; e_iaoq_b <= 0; e_bp_ld_a <= 0; e_bp_ld_b <= 0;
             e_iasq_f <= 0; e_iasq_b <= 0; e_gra <= 0; e_grb <= 0; e_target <= 0; e_c <= '0;
             e_fa_sel <= 0; e_fb_sel <= 0; e_cb_sel <= 0; e_v_sel <= 0; e_sar_sel <= 0; e_bp_ld <= 0; e_sar_r <= 0;
@@ -1109,7 +1132,7 @@ module pa_core
                     d_valid <= f2_valid;
                     d_insn <= f2_insn; d_ferr <= f2_err; d_fperr <= f2_perr;
                     d_itlb <= f2_itlb; d_imp <= f2_imp; d_type <= f2_type;
-                    d_iaoq_f <= f2_iaoq_f; d_iasq_f <= f2_iasq_f;
+                    d_iaoq_f <= f2_iaoq_f; d_iasq_f <= f2_iasq_f; d_target_r <= f2_target;
                     d_iaoq_b <= d_redir ? d_target : f2_iaoq_b;   // the F2 instruction is D's delay slot
                     d_iasq_b <= f2_iasq_b;
                     if (e_redir) begin

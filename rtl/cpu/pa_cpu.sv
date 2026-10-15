@@ -93,6 +93,7 @@ module pa_cpu
     logic        it_req, it_ack, it_hit;
     logic        fp_issue, fp_ld_we, fp_st_commit, fp_busy, fp_t;
     logic [31:0] fp_insn, fpsr;
+    logic        fp_st_dbl;
     logic [63:0] fp_ld_data, fp_st_data;
     logic [31:0] dr8;
     logic [3:0]  it_xok;
@@ -189,7 +190,7 @@ module pa_cpu
         .tlb_lk_d(tlb_lk_d), .tlb_lk_b(tlb_lk_b), .tlb_lk_u(tlb_lk_u),
         .tlb_op_req(tlb_op_req), .tlb_op(tlb_op), .tlb_op_space(tlb_op_space), .tlb_op_off(tlb_op_off),
         .tlb_op_gr(tlb_op_gr), .tlb_op_done(tlb_op_done), .tlb_op_cam(tlb_op_cam),
-        .fp_issue(fp_issue), .fp_insn(fp_insn), .fp_ld_we(fp_ld_we), .fp_ld_data(fp_ld_data),
+        .fp_issue(fp_issue), .fp_insn(fp_insn), .fp_st_dbl(fp_st_dbl), .fp_ld_we(fp_ld_we), .fp_ld_data(fp_ld_data),
         .fp_st_commit(fp_st_commit), .fp_st_data(fp_st_data), .fp_busy(fp_busy), .fp_t(fp_t), .fpsr(fpsr),
         .it_req(it_req), .it_space(it_space), .it_vpn(it_vpn), .it_ack(it_ack), .it_hit(it_hit), .it_rpn(it_rpn),
         .it_xok(it_xok), .it_type(it_type),
@@ -233,7 +234,7 @@ module pa_cpu
 
     pa_fpunit u_fpu (
         .clk(clk), .rst_n(rst_n),
-        .issue(fp_issue), .insn(fp_insn), .ld_we(fp_ld_we), .ld_data(fp_ld_data),
+        .issue(fp_issue), .insn(fp_insn), .st_dbl(fp_st_dbl), .ld_we(fp_ld_we), .ld_data(fp_ld_data),
         .st_commit(fp_st_commit), .st_data(fp_st_data), .busy(fp_busy), .fpsr_t(fp_t), .fpsr_o(fpsr));
 
     pa_biu u_biu (
