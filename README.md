@@ -98,10 +98,11 @@ branch `hp9k-family` of
 `/media/fat/MiSTer` with it). With a stock Main_MiSTer HP-UX's clock is off
 by your zone offset (STUBS S-022) and there is no network.
 
-Known limitations of this build: the analog VGA output carries Artist's picture at 64 MHz pixels
-(1280x1024 at 44.7 Hz, which most CRTs will not take); the CPU issues one
-instruction a clock (the real PA-7100LC can pair two), so it is somewhat
-slower than a 715/64; only HP-UX 10.20 has been tried so far. The full list
+Known limitations of this build: the CPU issues one instruction a clock
+(the real PA-7100LC can pair two), so it is somewhat slower than a 715/64;
+an HP-UX install from CD/DVD is slow (the SCSI/SD path); HP-UX 10.20 and
+11i v1 (11.11) have been tried, Linux, the BSDs and NeXTSTEP not yet. The
+full list
 is in [`docs/STUBS.md`](docs/STUBS.md). The core needs no Main_MiSTer
 changes, except that HP-UX's clock is off by your time-zone offset with a
 stock Main (above).
