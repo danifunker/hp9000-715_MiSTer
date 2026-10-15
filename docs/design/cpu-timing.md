@@ -571,7 +571,61 @@ Not a CPU-only fit: the whole design (`system.md` 10, build 36) with `1d17078`
 build 35 (the same seed 2; most of that is fitter noise, the decoder change
 itself is a few ALMs). Every clock met: core +0.389 ns, HDMI +0.221 ns.
 
-## 5. Open items
+## 5. Fit 16 (2026-10-14): misses complete in W; the `perf` suite
+
+The D-cache miss path replayed the instruction (flush, refetch, 6 bubbles
+on top of the fill). Now the cache captures the missed doubleword during the
+fill (`pa_dcache` `op_dw`) and re-reads the line of the instruction in M in
+the operation's last cycle (`m_hash` input), and `pa_core` completes the
+access in W (`w_stfill`: a load's word from `op_dw`, a store's lanes merged
+into it and written at W_DONE); a consumer in E that took the load's word
+from M has its operand register patched (`e_bp_ld_a/b`) instead of being
+refetched -- the uncached load's consumer too. cpu.md 6.6.
+
+Measured with the new `tests/cpu` `perf` suite (kernels copied into RAM,
+cached code and data, CR16 ticks per iteration; `perf_report.py`), old
+(replay) -> new, run 1 (cold) / run 2 (warm):
+
+| kernel | old | new | what it measures |
+|---|---|---|---|
+| ld-stride32 | 33.0 / 6.0 | 25.0 / 6.0 | one load miss per iteration (clean victims): the miss penalty 27 -> 19 cycles over the hit's 6 |
+| ld-use-chain | 5.0 / 5.0 | 5.0 / 5.0 | load -> dependent load in one line: 3 instructions, 1 load-use bubble, 2 taken-branch bubbles (see fit 17) |
+| alu-loop | 8.0 / 8.0 | 8.0 / 8.0 | 6 instructions: 2 taken-branch bubbles |
+| ld-stride-use | 29.0 / 8.0 | 22.0 / 8.0 | the missed load's word used by the next instruction: no refetch any more |
+| memcpy-32k | 12.3 / 7.0 | 10.5 / 7.0 | ldw,ma / stw,ma per word, a miss every 8th of each |
+| st-stride32 | 30.0 / 6.0 | 22.0 / 6.0 | one store miss per iteration (a quarter of the victims dirty) |
+
+The suite: 985,301 -> 864,899 cycles (-12 %). cputest 13/13, cosim 8/8,
+run-rom.sh pass (section 10 of system.md will have the fit).
+
+## 6. Fit 17 (2026-10-14): a D-predicted target looked up in the redirect cycle
+
+The fetch unit issued the next sequential address into F1 in the same cycle
+D predicted a branch, then killed it and only recorded the target in `nf`,
+so the target's I-cache read started a cycle later: 2 bubbles per predicted
+taken branch (`+ftrace` in `cputest_top`, the ALU loop: addib in D at c, the
+slot in D at c + 1, the target in D at c + 4). Now the redirect block issues
+the target into F1 at once when F1 is free (`redir_issue`; the cache's
+lookup address takes `redir_target` from D's adder -- the timing of that
+path is what the next Quartus fit measures). E's redirects (BV/BE/BLE/BLR,
+mispredicts) are left alone: their target comes out of the ALU.
+
+perf, fit 16 -> fit 17 (run 1 / run 2 per iteration):
+
+| kernel | fit 16 | fit 17 |
+|---|---|---|
+| ld-stride32 | 25.0 / 6.0 | 25.0 / 5.0 |
+| ld-use-chain | 5.0 / 5.0 | 4.0 / 4.0 |
+| alu-loop | 8.0 / 8.0 | 7.0 / 7.0 |
+| ld-stride-use | 22.0 / 8.0 | 21.0 / 7.0 |
+| memcpy-32k | 10.5 / 7.0 | 9.5 / 6.0 |
+| st-stride32 | 22.0 / 6.0 | 22.0 / 5.0 |
+
+The suite: 864,899 -> 815,673 cycles (-6 %; -17 % over fit 15). Every
+loop's taken branch is one cycle cheaper; the branch suite (every form,
+nullification, delay-slot branches) passes unchanged.
+
+## 7. Open items
 
 - Seed 1 of fit 15's RTL, if one more point of the spread is wanted (seed 3
   gave 69.3 MHz, +1.19 ns).

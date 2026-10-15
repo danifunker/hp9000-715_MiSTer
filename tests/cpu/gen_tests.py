@@ -1512,6 +1512,58 @@ def gen_link(rng):
 
 
 # ---------------------------------------------------------------------------
+# perf: cycle counts of small kernels run from RAM (cached code and data), no
+# reference -- tests/cpu/perf_report.py prints them (cpu-timing.md keeps the
+# history). Each vector copies a kernel into RAM, flushes its lines, runs it
+# twice and stores the CR16 deltas: words = run 1, run 2, iterations, 0...
+# ---------------------------------------------------------------------------
+PERF_WORDS = 8
+PERF_RAM = 0x00200000            # the kernels' data (2 MB RAM in the harness: 0x100000 ... 0x1F0000 is the scratch area; this is above the stack)
+
+
+def gen_perf(rng):
+    suite = Suite("perf")
+    SYNC = "\tsync"
+    kernels = []
+    # K1: strided loads, one line per iteration over 128 KB (every access misses)
+    kernels.append(("ld-stride32", 4096, li(3, 0x00100000) + ["\tldi\t4095, %r5", "1:", "\tldw\t0(%r3), %r4", "\tldo\t32(%r3), %r3",
+                    "\taddib,>=\t-1, %r5, 1b", "\tnop"]))
+    # K3: a load-use chain within one line (hits): the load-use bubble
+    kernels.append(("ld-use-chain", 4096, li(3, 0x00180000) + ["\tstw\t%r3, 0(%r3)", "\tldi\t4095, %r5", "1:", "\tldw\t0(%r3), %r3",
+                    "\taddib,>=\t-1, %r5, 1b", "\tnop"]))
+    # K4: ALU only (I-cache hits)
+    kernels.append(("alu-loop", 4096, ["\tldi\t4095, %r5", "\tldi\t0, %r4", "1:", "\tadd\t%r4, %r5, %r4", "\tsh2add\t%r4, %r5, %r6",
+                    "\tsub\t%r6, %r4, %r6", "\tor\t%r6, %r4, %r4", "\taddib,>=\t-1, %r5, 1b", "\tnop"]))
+    # K6: strided loads each used by the next instruction (the consumer of a missed load)
+    kernels.append(("ld-stride-use", 4096, li(3, 0x00160000) + ["\tldi\t4095, %r5", "\tldi\t0, %r6", "1:", "\tldw\t0(%r3), %r4",
+                    "\tadd\t%r4, %r6, %r6", "\tldo\t32(%r3), %r3", "\taddib,>=\t-1, %r5, 1b", "\tnop"]))
+    # K5: memcpy 32 KB -> 32 KB by words (a miss every 8 loads and every 8 stores)
+    kernels.append(("memcpy-32k", 8192, li(3, 0x001A0000) + li(4, 0x001B0000) + ["\tldi\t8191, %r5", "1:", "\tldw,ma\t4(%r3), %r6",
+                    "\tstw,ma\t%r6, 4(%r4)", "\taddib,>=\t-1, %r5, 1b", "\tnop"]))
+    # K2: strided stores, one line per iteration (write-allocate; run 2 writes dirty victims back) -- last:
+    # afterwards every line of the cache is dirty, and the kernels after it would pay a write-back per miss
+    kernels.append(("st-stride32", 4096, li(3, 0x00140000) + ["\tldi\t4095, %r5", "1:", "\tstw\t%r5, 0(%r3)", "\tldo\t32(%r3), %r3",
+                    "\taddib,>=\t-1, %r5, 1b", "\tnop"]))
+    body, ins = [], []
+    for kidx, (name, iters, code) in enumerate(kernels):
+        lab = "Lperf_%d" % kidx
+        dest = 0x00180000 + 0x1000 * kidx            # the kernel's code page (above the data of K1/K2/K5, below K3's line)
+        tpl = ["\tb\t%s_skip" % lab, "\tnop", "\t.balign\t32", "%s_tpl:" % lab] + code + ["\tbv\t%r0(%r15)", "\tnop", "%s_end:" % lab, "%s_skip:" % lab]
+        b = tpl + ["\tldil\tL%%%s_tpl, %%r13" % lab, "\tldo\tR%%%s_tpl(%%r13), %%r13" % lab] + li(11, dest) + \
+            ["\tldil\tL%%%s_end, %%r14" % lab, "\tldo\tR%%%s_end(%%r14), %%r14" % lab,
+             "2:", "\tldw,ma\t4(%r13), %r3", "\tstw,ma\t%r3, 4(%r11)", "\tcomb,<<\t%r13, %r14, 2b", "\tnop"]
+        b += li(11, dest) + ["\tldi\t8, %r3", "3:", "\tfdc\t%r0(%r11)", "\tldo\t32(%r11), %r11", "\taddib,>\t-1, %r3, 3b", "\tnop", SYNC]
+        for run in (0, 1):
+            b += li(13, dest) + ["\tldil\tL%%%s_r%d, %%r15" % (lab, run), "\tldo\tR%%%s_r%d(%%r15), %%r15" % (lab, run),
+                  "\tmfctl\t%cr16, %r17", "\tbv\t%r0(%r13)", "\tnop", "%s_r%d:" % (lab, run),
+                  "\tmfctl\t%cr16, %r18", "\tsub\t%r18, %r17, %r18", "\tstw,ma\t%r18, 4(%r9)"]
+        b += li(11, iters) + ["\tstw,ma\t%r11, 4(%r9)"] + ["\tstw,ma\t%r0, 4(%r9)"] * (PERF_WORDS - 3)
+        body += b; ins.append({"kernel": name, "iters": iters})
+    suite.add("kernels", len(kernels), PERF_WORDS, body, ins)
+    return suite
+
+
+# ---------------------------------------------------------------------------
 # cache: the PCX-L cache diagnose path and the behaviours the ROM's cache
 # self-tests check (BOOTFLOW.md 4.3/4.4, cpu.md 5.4/5.5): tag and data bits
 # through WDD/SET_TAG/WDT and RDD/RDT (and the I side), parity generation
@@ -2149,13 +2201,13 @@ def gen_tlbx(rng):
 GENERATORS = {"alu1": gen_alu1, "alu2": gen_alu2, "shift": gen_shift,
               "mem": gen_mem, "branch": gen_branch, "trap": gen_trap,
               "fp": gen_fp, "fpedge": gen_fpedge, "max1": gen_max1, "sys": gen_sys, "cache": gen_cache, "tlbx": gen_tlbx,
-              "link": gen_link}
+              "link": gen_link, "perf": gen_perf}
 
 
 def main(argv):
     if len(argv) != 3 or argv[1] not in GENERATORS:
         sys.exit(__doc__)
-    rng = random.Random({"alu1": 1, "alu2": 3, "shift": 2, "mem": 4, "branch": 5, "trap": 6, "fp": 7, "fpedge": 8, "max1": 9, "sys": 10, "cache": 11, "tlbx": 12, "link": 13}[argv[1]] * 0x715)
+    rng = random.Random({"alu1": 1, "alu2": 3, "shift": 2, "mem": 4, "branch": 5, "trap": 6, "fp": 7, "fpedge": 8, "max1": 9, "sys": 10, "cache": 11, "tlbx": 12, "link": 13, "perf": 14}[argv[1]] * 0x715)
     suite = GENERATORS[argv[1]](rng)
     os.makedirs(argv[2], exist_ok=True)
     suite.write(argv[2])

@@ -15,10 +15,13 @@
 // old data during a write and for one more cycle).
 //
 // W-stage operations (op_req / op_done): a miss (victim write-back if dirty,
-// line fill, the core then replays the instruction), FDC/FDCE/PDC, the LDCW
-// cache check, and the diagnose reads/writes RDD/RDT/WDD/WDT. They own the
-// read port while they run; the core flushes every younger instruction
-// afterwards, so the lookup in M is never resumed.
+// line fill; the missed doubleword is captured on its way in, `op_dw`, so the
+// core completes the load or store in W without replaying it -- 2026-10-14),
+// FDC/FDCE/PDC, the LDCW cache check, and the diagnose reads/writes
+// RDD/RDT/WDD/WDT. They own the read port while they run; in their last
+// cycle (S_DONE) the read port re-reads the line of the instruction in M
+// (`m_addr`, `m_hash`), so M's hit/data are valid again when the core moves on
+// (the core still flushes after every operation but a plain miss).
 //
 // After reset the tag array is written invalid (4096 cycles); `ready` holds
 // cacheable accesses until then (the ROM runs from the UIB meanwhile).
@@ -34,6 +37,7 @@ module pa_dcache
     input  logic [31:0] lk_addr,        // VA
     input  logic [4:0]  lk_hash,        // XORed into index bits 16:12 (the space hash, cpu.md 2.7)
     input  logic [31:0] m_addr,         // the instruction in M (registered lk_addr)
+    input  logic [4:0]  m_hash,         // its hash (for the re-read after an operation)
     input  logic [19:0] m_rpn,          // its RPN (translated, or the address in real mode)
     output logic [63:0] m_rdata,
     output logic        m_hit,
@@ -56,6 +60,7 @@ module pa_dcache
     input  logic [19:0] op_rpn,
     input  logic [31:0] op_wdata,       // WDD: GR[x]; WDT: the SET_TAG latch
     output logic [127:0] op_rd2,        // DC_RD2: the 16 bytes at op_addr (the walker's PDIR entry)
+    output logic [63:0] op_dw,          // DC_MISS: the filled doubleword at op_addr
     output logic        op_done,        // one cycle
     output logic        op_err,         // fill: bus error
     output logic        op_hit,         // RDD/RDT: tag match; LDCW: hit and dirty
@@ -125,11 +130,15 @@ module pa_dcache
     wire [13:0] lk_idx = {lk_addr[16:12] ^ lk_hash, lk_addr[11:3]};
     wire [13:0] op_idx = {op_addr[16:12] ^ op_hash, op_addr[11:3]};
     wire [13:0] st_idx = {st_addr[16:12] ^ st_hash, st_addr[11:3]};
+    wire [13:0] m_idx  = {m_addr[16:12] ^ m_hash, m_addr[11:3]};
     always_comb begin
         d_ren   = 1'b1;
         d_raddr = lk_idx;
         t_raddr = lk_idx[13:2];
-        if (busy) begin
+        if (st == S_DONE) begin
+            // the operation's last cycle: back to the line of the instruction in M
+            d_raddr = m_idx; t_raddr = m_idx[13:2];
+        end else if (busy) begin
             // the engine reads: a line beat during write-back reads, else the op address
             d_raddr = (st == S_WBRD) ? {op_idx[13:2], cnt[1:0]} : (op == DC_WDT) ? last_wdd_idx :
                       (st == S_Q && op == DC_RD2) ? {op_idx[13:1], 1'b1} : op_idx;
@@ -205,7 +214,7 @@ module pa_dcache
             st <= S_INIT; init_cnt <= 13'd0; cnt <= 3'd0; fill_got <= 4'd0; fill_err <= 1'b0;
             vic_rpn <= 20'd0; last_wdd_odd <= 1'b0; last_wdd_idx <= 14'd0;
             prev_st_valid <= 1'b0; prev_st_addr <= 29'd0; prev_st_data <= 64'd0;
-            op_done <= 1'b0; op_err <= 1'b0; op_hit <= 1'b0; op_perr <= 4'd0; op_rdata <= 32'd0; op_rd2 <= 128'd0;
+            op_done <= 1'b0; op_err <= 1'b0; op_hit <= 1'b0; op_perr <= 4'd0; op_rdata <= 32'd0; op_rd2 <= 128'd0; op_dw <= 64'd0;
             for (int i = 0; i < 4; i++) linebuf[i] <= 64'd0;
         end else begin
             op_done <= 1'b0;
@@ -279,6 +288,7 @@ module pa_dcache
                 S_FILLREQ: if (ln_ack) st <= S_FILLDATA;
                 S_FILLDATA: if (ln_rvalid) begin
                     fill_got[ln_rbeat] <= 1'b1;
+                    if (ln_rbeat == op_addr[4:3]) op_dw <= ln_rdata;
                     fill_err <= fill_err | ln_rerr;
                     if ((fill_got | (4'b0001 << ln_rbeat)) == 4'b1111) st <= S_FILLTAG;
                 end

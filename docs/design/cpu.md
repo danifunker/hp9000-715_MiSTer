@@ -1069,7 +1069,12 @@ single-phase classic pipeline with the same hazard profile (1-cycle load-use,
   PC-relative conditional branches with negative displacement and BL/GATE
   redirect fetch to the target; forward conditional branches fall through.
   E resolves; a misprediction kills the one younger fetched instruction
-  (1 bubble). BV, BE, BLE, BLR redirect from E (1 bubble).
+  (1 bubble). BV, BE, BLE, BLR redirect from E (1 bubble). A D-predicted
+  target is looked up in the I-cache in the redirect cycle itself (the issue
+  slot of that cycle had gone to the wrong path; `pa_fetch` `redir_issue`,
+  2026-10-14): a predicted taken branch costs 1 bubble, not 2. E's targets
+  come out of the ALU too late for the cache's address register and keep
+  the extra cycle.
 * **Nullification**: E computes "nullify next" (ALU conditions, branch ,n
   rules: forward taken / backward not taken, unconditional ,n always; ACD
   p.4-11). The flag attaches to the next valid instruction in program order
@@ -1110,7 +1115,7 @@ single-phase classic pipeline with the same hazard profile (1-cycle load-use,
   copies + a 32-bit live-value table. Write port 0: result/load target; write
   port 1: base-register modification (loads/stores with ,m/,ma/,mb, LDWM/STWM,
   PDC/FDC/FIC ,m). Both write in W, so commit stays atomic.
-* W-to-D same-cycle write-through bypass (MLAB returns old data), and the M-to-D bypass (cpu-timing.md 4.8): a load's word from M is right for a hit; a miss replays; a load completing late in W (uncached, LDCW through memory) refetches the consumer that took it (`e_bp_ld` -> `w_refetch`); PROBE/LPA/LDSID/LCI/DIAG reads hold the consumer in D while in E or M.
+* W-to-D same-cycle write-through bypass (MLAB returns old data), and the M-to-D bypass (cpu-timing.md 4.8): a load's word from M is right for a hit; a load completing late in W (a miss filled, uncached, LDCW through memory) writes its word into the consumer's operand register in E (`e_bp_ld_a/b`; the refetch `w_refetch` remains as the fallback); PROBE/LPA/LDSID/LCI/DIAG reads hold the consumer in D while in E or M.
 
 ### 6.5 Fetch side
 
@@ -1132,7 +1137,7 @@ single-phase classic pipeline with the same hazard profile (1-cycle load-use,
 | L2-D | 128 KB: data 16K x 66 bits, tag 4K x 23 bits, M10K simple dual-port; read port in M (and for write-back/diagnose reads while frozen), write port at the end of W (stores, fills, diagnose) |
 | Lookup | VIPT: index from the VA registered at the end of E; the UTLB CAM compares in E and its hit vector is registered, the payload select (flip-flops, one-hot AND-OR) runs in M; tag compare with the payload RPN. Real mode: PA = VA, the TLB is not used |
 | Stores | read-merge-write of a whole doubleword in W (the merge data and the line's dirty state come from the M read); byte-lane writes are therefore never needed, parity is regenerated per word, and STB/STH/STBY need no byte enables (2K x 5 M10K slices have none) |
-| Misses | registered in M, acted on in W: **replay**. W writes back the victim if dirty, fills the line (write-allocate for stores; no store hints), then flushes the pipeline and refetches the missing instruction itself, which now hits. Only one miss outstanding. (The real chip's stall-on-use is a later optimisation, P-016) |
+| Misses | registered in M, acted on in W: W writes back the victim if dirty and fills the line (write-allocate for stores; no store hints); the missed doubleword is captured on its way in (`op_dw`) and **the access completes in W** (2026-10-14; before, W replayed the instruction: flush + refetch, 6 bubbles): a load takes its word from it, a store writes its lanes merged into it at W_DONE; the younger instructions in D/E/M wait (W holds) and go on -- the cache re-reads M's line in the operation's last cycle so M's hit/data are valid again, and a consumer in E that had bypassed the load's (wrong) word from M gets the real one written into its operand register (`e_bp_ld_a/b`), as an uncached load's consumer does. Only one miss outstanding; the walker's and the cache-maintenance operations still flush afterwards. (The real chip's stall-on-use lets independent instructions pass the miss; ours holds them, P-016) |
 | Uncached loads/stores | issued from W (non-speculative), in order. Loads stall W until `io_ack`; stores go into a **one-entry uncached store buffer** and W continues; any later uncached access, line transaction or SYNC waits for it to drain |
 | TLB miss | W runs the walker (if enabled) using the D-cache read port and the BIU, inserts, then replays; or traps. The PDIR read (`DC_RD2`) is a D-cache operation: a hit reads the 16 bytes, a miss writes a dirty victim back and **then fills** (2026-10-08: the read took the flush path after the write-back, so it finished without a fill and handed the walker the previous walk's entry -- HP-UX 10.20 page-faulted on mapped kernel pages whenever a PDIR line missed over a dirty victim; tlbx "walker" has the case) |
 | Multi-cycle W ops | TLB insert/purge, DIAG cache/L1 ops, FDC/FDCE/PDC with write-back, FIC/FICE (4 L1 entries), LDCW memory RMW: W holds, the operation completes, younger instructions are flushed and refetched |

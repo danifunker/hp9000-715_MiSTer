@@ -137,6 +137,24 @@ module cputest_top #(
         end
     end endgenerate
 
+    // +ftrace_from=<cycle> +ftrace_n=<cycles>: the fetch/decode stages per cycle (pipelined core)
+    logic [63:0] ft_from, ft_n;
+    logic        ft_on;
+    logic [63:0] ft_cyc;
+    initial begin ft_on = $value$plusargs("ftrace_from=%d", ft_from) && $value$plusargs("ftrace_n=%d", ft_n); ft_cyc = 0; end
+    generate if (PIPE) begin : g_ftrace
+        always_ff @(posedge clk) begin
+            ft_cyc <= ft_cyc + 1;
+            if (ft_on && ft_cyc >= ft_from && ft_cyc < ft_from + ft_n)
+                $display("%0d nf=%08x F1 %0d %08x rdy=%0d F2 %0d %08x D %0d %08x E %0d %08x M %0d W %0d st=%0d adv=%0d advd=%0d redir=%0d(%0d) kill=%0d",
+                         ft_cyc, g_pipe.u_cpu.u_fetch.nf, g_pipe.u_cpu.u_fetch.f1_valid, g_pipe.u_cpu.u_fetch.f1_iaoq_f, g_pipe.u_cpu.u_fetch.f1_ready,
+                         g_pipe.u_cpu.u_fetch.f2_valid, g_pipe.u_cpu.u_fetch.f2_iaoq_f, g_pipe.u_cpu.u_core.d_valid, g_pipe.u_cpu.u_core.d_iaoq_f,
+                         g_pipe.u_cpu.u_core.e_valid, g_pipe.u_cpu.u_core.e_iaoq_f, g_pipe.u_cpu.u_core.m_valid, g_pipe.u_cpu.u_core.w_valid,
+                         g_pipe.u_cpu.u_core.wst, g_pipe.u_cpu.u_core.adv, g_pipe.u_cpu.u_core.adv_d, g_pipe.u_cpu.redir, g_pipe.u_cpu.redir_from_e,
+                         g_pipe.u_cpu.redir_kill_all);
+        end
+    end endgenerate
+
     // +dctrace=<hex line address>: trace everything the D-cache and the line
     // port do to that 32-byte line
     logic [31:0] trace_line;

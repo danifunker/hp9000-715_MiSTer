@@ -382,3 +382,17 @@ harness's handler returns to the trapping instruction like an OS kernel's
 line at +40 first if set. The timer's steps are coarser than a core cycle,
 so the RAM groups also pad the arming with 0/1 nops; two of the 48 vectors
 of each RAM group land the interrupt on the nullified branch.
+
+## The perf suite
+
+`gen_perf` builds small kernels (strided loads and stores across the 128 KB
+D-cache, a load-use chain, an ALU loop, a load used by the next instruction,
+a 32 KB memcpy), copies each into RAM so code and data are cached, runs it
+twice and stores the CR16 deltas (run 1 cold, run 2 warm) and the iteration
+count. No reference: `python3 tests/cpu/perf_report.py LOG` prints ticks per
+run and per iteration; `docs/design/cpu-timing.md` keeps the history (fit 16
+onwards). Run it by hand: `make -C tests/cpu build/perf.bin && make -C
+verilator obj_dir_ct/perf.hex && verilator/obj_dir_ct/pipe/Vcputest_top
++rom=verilator/obj_dir_ct/perf.hex --log perf.log`. The store kernel runs
+last: it leaves every line of the cache dirty, which would add a write-back
+to every later miss.

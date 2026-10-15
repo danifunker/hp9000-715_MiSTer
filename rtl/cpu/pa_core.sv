@@ -99,10 +99,11 @@ module pa_core
     // D-cache (pa_dcache)
     input  logic        dc_ready,
     output logic        dc_lk_en,
-    output logic [4:0]  dc_lk_hash, dc_st_hash, dc_op_hash,
+    output logic [4:0]  dc_lk_hash, dc_st_hash, dc_op_hash, dc_m_hash,
     output logic [19:0] dc_m_rpn, dc_st_rpn, dc_op_rpn,
     output logic        dc_st_fwd,
     input  logic [127:0] dc_op_rd2,
+    input  logic [63:0] dc_op_dw,       // the missed doubleword, filled (misses complete in W)
     output logic [31:0] dc_lk_addr, dc_m_addr,
     input  logic [63:0] dc_m_rdata,
     input  logic        dc_m_hit, dc_m_dirty,
@@ -208,6 +209,7 @@ module pa_core
     ctrl_t       e_c;
     logic [1:0]  e_fa_sel, e_fb_sel;      // 0 reg (D read or bypass), 1 M port0, 2 M port1
     logic        e_bp_ld;                 // an operand was bypassed in D from the load then in M
+    logic        e_bp_ld_a, e_bp_ld_b;   // which operand it was (the late load patches it in E)
     logic [4:0]  e_sar_r;                 // SAR as of D (bypassed from an MTSAR in M/W)
     logic [1:0]  e_cb_sel, e_v_sel, e_sar_sel;  // 0 PSW/reg, 1 M, 2 W
     // ---- M
@@ -238,6 +240,7 @@ module pa_core
     logic [3:0]  w_be;
     logic [31:0] w_stdata;
     logic        w_cached, w_hit, w_dirty, w_opflush;
+    logic        w_stfill;              // a store (or LDCW) whose line was filled in W: write it at W_DONE, no flush
     logic [19:0] w_rpn;
     logic [4:0]  w_hash;
     logic        w_walk;                // the TLB miss may be walked
@@ -450,6 +453,7 @@ module pa_core
     assign dc_lk_addr = ls_ea;
     assign dc_lk_hash = e_hash;
     assign dc_m_addr  = m_ea;
+    assign dc_m_hash  = m_hash;
     wire [31:0] ls_wd_eff = e_c.ldcw ? 32'd0 : ls_wd;          // LDCW clears the word
     wire e_unal = (e_c.size == 2'd3) ? |e_va[2:0] : ls_unaligned; // doublewords: 8-byte aligned
     wire e_fstd_fr0 = e_c.fpm && e_c.fu == FU_STORE && e_c.size == 2'd3 && e_insn[4:0] == 5'd0;
@@ -810,8 +814,15 @@ module pa_core
             d_req = 1'b1; d_rclr = w_c.ldcw;
         end
     end
-    // load data formatting at the ack
-    wire [31:0] ld_word = w_ea[2] ? d_rdata[31:0] : d_rdata[63:32];
+    // load data formatting at the ack (uncached), or from the filled doubleword (a miss completing in W)
+    wire [63:0] ld_src  = (wst == W_OP) ? dc_op_dw : d_rdata;
+    wire [31:0] ld_word = w_ea[2] ? ld_src[31:0] : ld_src[63:32];
+    // the store's lanes merged into the filled doubleword (the merge in M read the wrong line)
+    wire [7:0] w_lanes = (w_c.size == 2'd3) ? 8'hFF : w_ea[2] ? {4'b0000, w_be} : {w_be, 4'b0000};
+    logic [63:0] w_fill_stdw;
+    always_comb
+        for (int b = 0; b < 8; b++)
+            w_fill_stdw[63 - 8*b -: 8] = w_lanes[7 - b] ? w_stdata[31 - 8*(b & 3) -: 8] : dc_op_dw[63 - 8*b -: 8];
     logic [31:0] ld_data;
     always_comb case (w_c.size)
         2'd0:    ld_data = {24'd0, ld_word[8 * (3 - w_ea[1:0]) +: 8]};
@@ -908,7 +919,8 @@ module pa_core
     // the cached access of the instruction in W completes in the cache this cycle
     wire w_cache_hit_go = w_cmem_go && w_chit;
     assign dc_st_we   = (w_cache_hit_go && (w_c.fu == FU_STORE || w_c.ldcw)) ||
-                        (w_valid && wst == W_DONE && w_c.ldcw && w_cached && !w_lderr && w_opflush);
+                        (w_valid && wst == W_DONE && w_c.ldcw && w_cached && !w_lderr && w_opflush) ||
+                        (w_valid && wst == W_DONE && (w_c.fu == FU_STORE || w_c.ldcw) && w_cached && !w_lderr && w_stfill);
     assign dc_st_addr = w_ea;
     // FP stores: the FR data replaces the store lanes merged in M (FSTD: all eight)
     assign dc_st_data = !w_c.fpm ? w_stdw :
@@ -1016,7 +1028,7 @@ module pa_core
         if (!rst_n) begin
             d_valid <= 1'b0; e_valid <= 1'b0; m_valid <= 1'b0; w_valid <= 1'b0; m_need <= 1'b0;
             d_ferr <= 0; d_fperr <= 0; e_fperr <= 0; m_fperr <= 0; w_fperr <= 0; d_insn <= 0; d_iaoq_f <= 0; d_iaoq_b <= 0; d_iasq_f <= 0; d_iasq_b <= 0;
-            e_nul <= 0; e_err <= 0; e_pred <= 0; e_bflag <= 0; e_insn <= 0; e_iaoq_f <= 0; e_iaoq_b <= 0;
+            e_nul <= 0; e_err <= 0; e_pred <= 0; e_bflag <= 0; e_insn <= 0; e_iaoq_f <= 0; e_iaoq_b <= 0; e_bp_ld_a <= 0; e_bp_ld_b <= 0;
             e_iasq_f <= 0; e_iasq_b <= 0; e_gra <= 0; e_grb <= 0; e_target <= 0; e_c <= '0;
             e_fa_sel <= 0; e_fb_sel <= 0; e_cb_sel <= 0; e_v_sel <= 0; e_sar_sel <= 0; e_bp_ld <= 0; e_sar_r <= 0;
             m_nul <= 0; m_err <= 0; m_taken <= 0; m_nullify <= 0; m_new_space <= 0; m_insn <= 0;
@@ -1027,7 +1039,7 @@ module pa_core
             w_iaoq_f <= 0; w_iaoq_b <= 0; w_iasq_f <= 0; w_iasq_b <= 0; w_result <= 0; w_base <= 0;
             w_ea <= 0; w_target <= 0; w_trap <= 0; w_trap_data <= 0; w_cb <= 0; w_v <= 0; w_space <= 0;
             w_be <= 0; w_stdata <= 0; w_c <= '0; w_ld <= 0; w_lderr <= 0;
-            w_cached <= 0; w_hit <= 0; w_dirty <= 0; w_dperr <= 0; w_stdw <= 0; w_opflush <= 0; w_op_eng <= 0;
+            w_cached <= 0; w_hit <= 0; w_dirty <= 0; w_dperr <= 0; w_stdw <= 0; w_opflush <= 0; w_stfill <= 0; w_op_eng <= 0;
             w_rpn <= 0; w_hash <= 0; w_walk <= 0; w_pdir_a <= 0; w_cr28_we <= 0; w_cr28_val <= 0;
             d_itlb <= 0; d_imp <= 0; d_type <= 0; e_itlb <= 0; e_imp <= 0; e_type <= 0;
             m_space <= 0; m_hash <= 0; m_pl <= 0; m_ppl <= 0; m_xlate <= 0;
@@ -1048,7 +1060,7 @@ module pa_core
                     w_trap <= m_trap_x; w_trap_data <= m_trap_xd; w_cb <= m_cb; w_v <= m_v;
                     w_space <= m_space; w_be <= m_be; w_stdata <= m_stdata; w_c <= m_c;
                     w_fperr <= m_fperr; w_cached <= m_cached_c; w_hit <= dc_m_hit; w_dirty <= dc_m_dirty;
-                    w_dperr <= dc_m_perr; w_stdw <= m_stdw; w_opflush <= 1'b0;
+                    w_dperr <= dc_m_perr; w_stdw <= m_stdw; w_opflush <= 1'b0; w_stfill <= 1'b0;
                     w_rpn <= m_rpn; w_hash <= m_hash; w_walk <= m_walk_ok;
                     w_ld <= (m_c.size == 2'd3) ? dc_m_rdata : {32'd0, m_ld};   // an uncached load overwrites it at its ack
 
@@ -1081,7 +1093,7 @@ module pa_core
                         e_gra <= gra_d; e_grb <= grb_d; e_target <= d_target; e_c <= dc;
                         e_pred <= d_pred;
                         e_fa_sel <= fsel(dc.ra); e_fb_sel <= fsel(dc.rb);
-                        e_bp_ld <= bp_ld_a || bp_ld_b; e_sar_r <= d_sar;
+                        e_bp_ld <= bp_ld_a || bp_ld_b; e_bp_ld_a <= bp_ld_a; e_bp_ld_b <= bp_ld_b; e_sar_r <= d_sar;
                         e_cb_sel <= d_cb_sel; e_v_sel <= d_v_sel; e_sar_sel <= d_sar_sel;
                     end else begin
                         e_valid <= 1'b0;
@@ -1132,7 +1144,13 @@ module pa_core
             else if (wst == W_WALK_RD3 && dc_op_done) begin wst <= W_WFAIL; w_cr28_val <= pdir_w3; end
             else if (wst == W_WALK_A && tlb_op_done) wst <= W_WALK_P;
             else if (wst == W_WALK_P && tlb_op_done) wst <= W_REPLAY;
-            else if (wst == W_WAIT && d_ack) begin wst <= W_DONE; w_ld <= (w_c.size == 2'd3) ? d_rdata : {32'd0, ld_data}; w_lderr <= d_err; end
+            else if (wst == W_WAIT && d_ack) begin
+                wst <= W_DONE; w_ld <= (w_c.size == 2'd3) ? d_rdata : {32'd0, ld_data}; w_lderr <= d_err;
+                // the consumer in E took the (wrong) word from M: give it the real one instead of refetching it
+                if (e_valid && e_bp_ld_a) e_gra <= ld_data;
+                if (e_valid && e_bp_ld_b) e_grb <= ld_data;
+                if (e_valid) e_bp_ld <= 1'b0;
+            end
             else if (wst == W_OP && w_op_done) begin
                 if (w_is_mem) begin
                     if (dc_op == DC_LDCW) begin
@@ -1142,7 +1160,17 @@ module pa_core
                         if (dc_op_hit) begin wst <= W_DONE; w_lderr <= 1'b0; end
                         else begin wst <= W_WAIT; w_cached <= 1'b0; end
                     end else if (dc_op_err) begin wst <= W_DONE; w_lderr <= 1'b1; end
-                    else wst <= W_REPLAY;
+                    else begin
+                        // the line is in: complete the access here (no replay, cpu.md 6.6): a load
+                        // takes its word from the filled doubleword, a store writes its merged
+                        // doubleword at W_DONE; a consumer in E that took the word from M is refetched
+                        wst <= W_DONE; w_lderr <= 1'b0; w_stfill <= 1'b1;
+                        w_ld <= (w_c.size == 2'd3) ? dc_op_dw : {32'd0, ld_data};
+                        w_stdw <= w_c.fpm ? dc_op_dw : w_fill_stdw;
+                        if (e_valid && e_bp_ld_a) e_gra <= ld_data;
+                        if (e_valid && e_bp_ld_b) e_grb <= ld_data;
+                        if (e_valid) e_bp_ld <= 1'b0;
+                    end
                 end else begin
                     wst <= W_DONE; w_lderr <= 1'b0;
                     if (w_diag_rd) w_ld <= {32'd0, w_op_isd ? dc_op_rdata : ic_op_rdata};

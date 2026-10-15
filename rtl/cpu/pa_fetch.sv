@@ -149,14 +149,14 @@ module pa_fetch (
 
     // I-cache: look up the instruction entering F1; re-issue F1's lookup when
     // the engine took the read port in between
-    logic issue;
+    logic issue, redir_issue;
     wire reissue = f1_valid && !f1_io && !ic_lk_valid && !ic_busy && !issue;
     function automatic logic [4:0] ihash_of(input logic [15:0] sp);
         return ihash[0] ? {sp[4], sp[3], sp[0], sp[1], sp[2]} : 5'd0;
     endfunction
-    assign ic_lk_en   = issue || reissue;
-    assign ic_lk_addr = issue ? nf : f1_iaoq_f;
-    assign ic_lk_hash = psw_c ? ihash_of(issue ? nsf : f1_iasq_f) : 5'd0;
+    assign ic_lk_en   = issue || reissue || redir_issue;
+    assign ic_lk_addr = redir_issue ? redir_target : issue ? nf : f1_iaoq_f;
+    assign ic_lk_hash = psw_c ? ihash_of(redir_issue ? n_nsf : issue ? nsf : f1_iasq_f) : 5'd0;
     assign ic_f1_addr = f1_iaoq_f;
     assign ic_f1_rpn  = f1_pa[31:12];
 
@@ -209,6 +209,7 @@ module pa_fetch (
         issue = !f1_valid || f1_consumed;
         n_f1_slot = issue ? sl_nf : sl_f1;
         slot_found = 1'b0;
+        redir_issue = 1'b0;
         if (issue) begin
             n_f1_valid = 1'b1;
             n_f1_iaoq_f = nf; n_f1_iaoq_b = nb; n_f1_iasq_f = nsf; n_f1_iasq_b = nsb;
@@ -246,6 +247,16 @@ module pa_fetch (
             n_nf = redir_target; n_nb = redir_target + 32'd4;
             n_nsf = redir_new_space ? redir_space : n_nsb;
             n_nsb = n_nsf;
+            // D's prediction: the issue slot of this cycle went to the wrong path and was
+            // just killed, so look the target up now instead of next cycle (one bubble
+            // less per predicted branch, 2026-10-14). Not for E's redirects: their target
+            // comes out of the ALU too late in the cycle for the I-cache's address register.
+            if (!redir_from_e && !n_f1_valid) begin
+                redir_issue = 1'b1;
+                n_f1_valid = 1'b1; n_f1_iaoq_f = redir_target; n_f1_iaoq_b = redir_target + 32'd4;
+                n_f1_iasq_f = n_nsf; n_f1_iasq_b = n_nsf;
+                n_nf = redir_target + 32'd4; n_nb = redir_target + 32'd8;
+            end
         end
     end
 
@@ -268,7 +279,7 @@ module pa_fetch (
             f2_iasq_f <= n_f2_iasq_f; f2_iasq_b <= n_f2_iasq_b; f2_insn <= n_f2_insn; f2_err <= n_f2_err;
             f2_perr <= n_f2_perr; f2_itlb <= n_f2_itlb; f2_imp <= n_f2_imp; f2_type <= n_f2_type;
             nf <= n_nf; nb <= n_nb; nsf <= n_nsf; nsb <= n_nsb;
-            if (issue) begin f1_ferr <= 1'b0; f1_tmiss <= 1'b0; end
+            if (issue || redir_issue) begin f1_ferr <= 1'b0; f1_tmiss <= 1'b0; end
 
             // I-LAB refill
             if (it_ack) begin

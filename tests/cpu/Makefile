@@ -12,7 +12,7 @@ CFLAGS = -O1 -mpa-risc-1-1 -mschedule=7100LC -mdisable-fpregs -mno-space-regs \
 	-ffreestanding -nostdlib -fno-builtin -fno-pic \
 	-fno-asynchronous-unwind-tables -Wall -Isrc
 
-SUITES = alu1 alu2 shift mem branch trap fp fpedge max1 sys cache tlbx link
+SUITES = alu1 alu2 shift mem branch trap fp fpedge max1 sys cache tlbx link perf
 # suites QEMU can run: cache and tlbx use PCX-L diagnose cache/TLB access,
 # which QEMU 11.1.1 ignores (they are checked against model.py instead)
 QEMU_SUITES = alu1 alu2 shift mem branch trap fp fpedge max1 sys

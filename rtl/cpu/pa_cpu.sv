@@ -77,6 +77,8 @@ module pa_cpu
     logic        dc_st_fwd, psw_c, f2_itlb, f2_imp;
     logic [2:0]  f2_type;
     logic [127:0] dc_op_rd2;
+    logic [63:0]  dc_op_dw;
+    logic [4:0]   dc_m_hash;
     // TLB
     logic [15:0] tlb_lk_space, tlb_op_space, it_space;
     logic [19:0] tlb_lk_vpn, tlb_lk_rpn, it_vpn, it_rpn;
@@ -156,11 +158,11 @@ module pa_cpu
 
     pa_dcache u_dcache (
         .clk(clk), .rst_n(rst_n), .ready(dc_ready),
-        .lk_en(dc_lk_en), .lk_addr(dc_lk_addr), .lk_hash(dc_lk_hash), .m_addr(dc_m_addr), .m_rpn(dc_m_rpn),
+        .lk_en(dc_lk_en), .lk_addr(dc_lk_addr), .lk_hash(dc_lk_hash), .m_addr(dc_m_addr), .m_hash(dc_m_hash), .m_rpn(dc_m_rpn),
         .m_rdata(dc_m_rdata), .m_hit(dc_m_hit), .m_dirty(dc_m_dirty), .m_perr(dc_m_perr),
         .st_we(dc_st_we), .st_fwd(dc_st_fwd), .st_addr(dc_st_addr), .st_hash(dc_st_hash), .st_rpn(dc_st_rpn), .st_data(dc_st_data),
         .op_req(dc_op_req), .op(dc_op), .op_addr(dc_op_addr), .op_hash(dc_op_hash), .op_rpn(dc_op_rpn),
-        .op_wdata(dc_op_wdata), .op_rd2(dc_op_rd2), .op_done(dc_op_done),
+        .op_wdata(dc_op_wdata), .op_rd2(dc_op_rd2), .op_dw(dc_op_dw), .op_done(dc_op_done),
         .op_err(dc_op_err), .op_hit(dc_op_hit), .op_perr(dc_op_perr), .op_rdata(dc_op_rdata),
         .ln_req(dl_req), .ln_we(dl_we), .ln_addr(dl_addr), .ln_ack(dl_ack), .ln_wdata(dl_wdata),
         .ln_wvalid(dl_wvalid), .ln_wready(dl_wready), .ln_rdata(dl_rdata), .ln_rvalid(dl_rvalid),
@@ -193,7 +195,7 @@ module pa_cpu
         .it_xok(it_xok), .it_type(it_type),
         .dc_ready(dc_ready), .dc_lk_en(dc_lk_en), .dc_lk_addr(dc_lk_addr), .dc_m_addr(dc_m_addr),
         .dc_lk_hash(dc_lk_hash), .dc_st_hash(dc_st_hash), .dc_op_hash(dc_op_hash),
-        .dc_m_rpn(dc_m_rpn), .dc_st_rpn(dc_st_rpn), .dc_op_rpn(dc_op_rpn), .dc_st_fwd(dc_st_fwd), .dc_op_rd2(dc_op_rd2),
+        .dc_m_rpn(dc_m_rpn), .dc_st_rpn(dc_st_rpn), .dc_op_rpn(dc_op_rpn), .dc_st_fwd(dc_st_fwd), .dc_op_rd2(dc_op_rd2), .dc_op_dw(dc_op_dw), .dc_m_hash(dc_m_hash),
         .dc_m_rdata(dc_m_rdata), .dc_m_hit(dc_m_hit), .dc_m_dirty(dc_m_dirty), .dc_m_perr(dc_m_perr),
         .dc_st_we(dc_st_we), .dc_st_addr(dc_st_addr), .dc_st_data(dc_st_data),
         .dc_op_req(dc_op_req), .dc_op(dc_op), .dc_op_addr(dc_op_addr), .dc_op_wdata(dc_op_wdata),
