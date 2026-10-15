@@ -49,6 +49,25 @@ show the numbers, then implement.
   whole run. The installed system is `hpux1111.img` (ID 5, primary path
   scsi.5 in the mounted `hp715_release.eep`).
 
+## The install is not CPU-bound (2026-10-15, 13:40)
+
+The second TCOE install, on build 57, reached **fileset 353 of 977 at 2 h
+02 m after Finish; build 53 had reached 356 at the same elapsed time** the
+day before (fileset 1 came ~45 min in on both). A core that is 17 % faster
+on cached kernels made no difference to the install, so its time goes to
+the I/O path: the SCSI target (no disconnect: the bus is held for every
+transfer, S-020), the hps_io block path to the SD card (64 blocks per
+request, `scsi_targets.sv`), the 53C710's DMA through the MIOC, and
+swinstall's own disk traffic (reads of the DVD, writes to VxFS, the
+installed-software database). **Before any further CPU work for the
+install's sake, measure the I/O path in the installed 11.11** (`hpux1111.img`
+boots on build 57): `timex dd if=/dev/rdsk/c0t2d0 of=/dev/null bs=64k
+count=1000` (raw DVD read rate), the same from `/dev/rdsk/c0t5d0`, a
+`dd` write of 64 MB to a file, and a CPU-only `gzip` of a file in the
+buffer cache; the system stream owns the SCSI target. The CPU plan below
+still stands for the desktop and for compute, where the perf suite's gains
+are real (HP-UX 11.11 boots to CDE in ~7 min on build 57).
+
 ## The plan, in order (each step: perf suite old/new, cputest 13/13, cosim,
 ## run-rom, then a fit; the HP-UX boot in romsim before a board build)
 
