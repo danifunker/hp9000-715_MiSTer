@@ -115,6 +115,27 @@ The PA-7100LC's pairing rules (OpenPA "PA-7100LC" table 2.20; ERS s.5.2;
   serialising/system instruction paired;
 * the DIAG instructions never pair (cpu.md 5.x).
 
+**The cheap shape first (user's question 2026-10-15, "a smarter second
+ALU"): the pair is asymmetric, as the chip's is.** Slot A = the existing
+integer pipeline unchanged. Slot B = a load/store or FP instruction only:
+an address adder (base + disp / base + index << scale, ~60 ALMs), no
+shifter, no ALU; the FP unit is already separate. Cut the cost where it
+really is:
+* read ports: slot B reads base/index from a second MLAB copy of the
+  register file (~250 ALMs), not a 4-port file;
+* **no bypass into slot B** in the first version: a pair issues only when
+  B's base and index are not written by the instructions in E, M or W
+  (register-number compares in D); else B issues alone next cycle, as today.
+  This keeps the E-stage operand muxes as they are (the critical paths);
+* **no base-modify in a pair** (`,ma`/`,mb` loads and stores issue alone),
+  so W's two write ports suffice (A's result, B's load data);
+* a cut-down decoder for B (loads, stores, FP ops and their fields);
+* B is always the younger: a trap in A kills B, a trap in B commits A;
+  nullification flows A -> B only; no branch in B.
+Estimate 1,200-1,800 ALMs, pairing rate ~10-15 % cycles saved on real code
+(the chip's 20-35 % needs the bypass into B -- a later step). Below, the
+full-rule version for reference.
+
 Design sketch for our pipeline (cpu.md 6.1):
 * F2 delivers the doubleword with two valid bits; D decodes both words
   (second `pa_decode`), checks the pairing rules on the control words and
