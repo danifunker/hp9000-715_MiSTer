@@ -90,13 +90,15 @@ details:
    - rebuild `/etc/lvmtab` with `vgscan`: the disk is `c2t6d0` on the 715.
 
 The core uses the framework in `sys/` unchanged. For the right time of day
-it needs a Main_MiSTer that sends this core UTC (HP-UX reads the clock as
-UTC): branch `hp9000715` of
-[danifunker/Main_MiSTer](https://github.com/danifunker/Main_MiSTer). With a
-stock Main_MiSTer HP-UX's clock is off by your zone offset (STUBS S-022).
+and for the LAN it needs a Main_MiSTer that sends this core UTC (HP-UX reads
+the clock as UTC) and bridges the 82596's frames to the MiSTer's Ethernet:
+branch `hp9k-family` of
+[danifunker/Main_MiSTer](https://github.com/danifunker/Main_MiSTer); the
+`release/MiSTer` binary is that Main built on 2026-10-14 (replace
+`/media/fat/MiSTer` with it). With a stock Main_MiSTer HP-UX's clock is off
+by your zone offset (STUBS S-022) and there is no network.
 
-Known limitations of this build: no LAN, audio or floppy (HP-UX lists them
-UNCLAIMED); the analog VGA output carries Artist's picture at 64 MHz pixels
+Known limitations of this build: the analog VGA output carries Artist's picture at 64 MHz pixels
 (1280x1024 at 44.7 Hz, which most CRTs will not take); the CPU issues one
 instruction a clock (the real PA-7100LC can pair two), so it is somewhat
 slower than a 715/64; only HP-UX 10.20 has been tried so far. The full list
