@@ -97,6 +97,29 @@ common `bv r0(rp)` has fa = 0) in D from D's bypassed operands when the
 operands are not being forwarded from M (a "predicted BV" with E checking
 it: the mispredict path exists). Measure with a call/return kernel.
 
+### Steps 2b-2d -- the other levers (user's question 2026-10-15), cheaper per percent than dual issue
+
+* **2b, walks without a replay** (small): the walker inserts and then
+  replays the instruction (flush + refetch, ~6 cycles); complete the access
+  in W after the insert instead, as misses do now (re-lookup through the
+  TLB port, then the cache). HP-UX walks constantly (the ring dumps), so
+  this is HP-UX-specific gain.
+* **2c, fill before write-back** (medium): a dirty victim is written back
+  (8 cycles) before the fill; fill into the line buffer first and drain the
+  victim behind. The BIU's rule "a line transaction never overtakes a
+  posted uncached store" (cpu-requests #6) must still hold.
+* **2d, instruction fetch** (medium, likely the most visible on the desktop):
+  an I-cache miss waits for the pipeline to drain, then fills, then
+  re-looks up (`pa_fetch`: "non-speculative, only for a missing, unkilled
+  F1 ... drained"). Start the fill at once for a cacheable address, and
+  prefetch the next sequential line into a one-line buffer. Measure with a
+  perf kernel of straight-line code larger than the L1-I (and than the
+  L2-I).
+* A small forward-branch predictor and a one-cycle `bv` return (step 3)
+  are a few percent each; the FPU (unpipelined) only matters for FP code,
+  which HP-UX and CDE barely run; the clock (the CPU alone fitted at 70 MHz)
+  means re-closing the whole machine and is last.
+
 ### Step 4 -- dual issue (large: 5-8 sessions, est. 2,500-3,500 ALMs, 1.2-1.35x on integer code)
 
 Do the area plan's remaining Tier A/B items first (A5, A6, A9, A10, A11,
