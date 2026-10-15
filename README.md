@@ -6,7 +6,7 @@ PA-7100LC CPU, the LASI I/O chip (SCSI, Ethernet, serial, parallel, PS/2,
 audio) and the built-in 8-plane Artist graphics, with the aim of running
 HP's own boot ROM and HP-UX.
 
-**Status (build 53, 2026-10-14, alpha):** HP's boot ROM passes its self-tests, boots
+**Status (build 57, 2026-10-15, alpha):** HP's boot ROM passes its self-tests, boots
 from SCSI, and **HP-UX 10.20 boots to the CDE desktop on the MiSTer** with the
 built-in Artist graphics at 1280x1024: the boot console, the X login and CDE
 (windows, menus, proportional and terminal fonts, xclock, oclock, private
@@ -14,6 +14,14 @@ colour maps), PS/2 keyboard and mouse with the hardware cursor (tried at 32 and
 64 MB). The RS-232 console is still there (on the MiSTer's screen when the OSD
 "Display" says so). Design notes are in [`docs/design/`](docs/design/), the
 build log in [`docs/design/system.md`](docs/design/system.md) section 10.
+
+**Build 57 (2026-10-15)** over build 53: the faster CPU -- a D-cache miss
+no longer replays the instruction, a predicted branch costs one bubble, not
+two (the `tests/cpu` perf suite runs in 17 % fewer cycles; HP-UX 11.11 boots
+to CDE in about 7 minutes). The core clock closes to within 0.01 ns of 64 MHz
+on one path, which runs fine on the board at room temperature. An HP-UX 11i
+install is not faster: it is bound by the SCSI/SD path, the next thing to
+work on.
 
 **Build 53 (2026-10-14)** over build 25: Artist at the monitor's own timing,
 Harmony audio and CD audio, the 82596 LAN (HP-UX's `lan`), the LASI floppy
@@ -30,7 +38,7 @@ The files in [`release/`](release/):
 
 | file | goes to | what |
 |---|---|---|
-| `HP9K715.rbf` | `/media/fat/_Unstable/` (or `_Computer/`) | the core, Quartus build 53 (2026-10-14; `HP9K715_20261014.rbf` is the same file): 64 MHz |
+| `HP9K715.rbf` | `/media/fat/_Unstable/` (or `_Computer/`) | the core, Quartus build 57 (2026-10-15; `HP9K715_20261015.rbf` is the same file): 64 MHz |
 | `boot0.rom` | `/media/fat/games/HP9K715/` | HP's PDC 1.6 boot ROM for the 715/64, 258,728 bytes ([`roms/README.md`](roms/README.md): HP firmware patch PF_C7X50016, image IMAGE1A's payload). Loaded by the framework at core start; the loader patches one word ([`docs/STUBS.md`](docs/STUBS.md) S-011) |
 | `hp715.eep` | `/media/fat/games/HP9K715/` | the EEPROM image (8 KB, `tools/eeprom/mkrelease.sh`): manufacturing and chassis codes off, **console on the graphics** (monitor type 1, 1280x1024), PS/2 keyboard, primary path scsi.6, autoboot and autosearch on. **The same image is built into the core**, so nothing needs mounting to boot; mount it in the OSD's "Mount EEPROM" slot only to keep the firmware's changes (boot paths, monitor type, `lanaddress`): it is written back, and mounting it resets the machine so the ROM reads it. For the RS-232 console instead: `CONSOLE=rs232 tools/eeprom/mkrelease.sh`, or `path console rs232` at `BOOT_ADMIN>` |
 
