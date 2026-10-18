@@ -84,13 +84,20 @@ module artist (
     output logic        busy
 );
     // ------------------------------------------------------------ registers
-    logic [31:0] dst_ba, src_ba, ctl_plane, fg, bg, pmask, ibo;      // 0x118004-0x11801C
-    logic [31:0] binc_src, binc_dst, binc_mask, r4c0, r520, r580;    // BINC block
-    logic [31:0] r100080;                                            // 0x100080 = 0x7D: fills advance DST y
+    // (the registers that are only stored and read back -- 0x1004C0, 0x100520,
+    // 0x100580, 0x300004, 0x300204, 0x300238, PLL 0x300300, MISC_CTRL
+    // 0x300308 -- and the read-back of CONTROL_PLANE, FG, BG, PLANE_MASK, IBO
+    // and the cursor control live in st_ram, below; of these the flops keep
+    // what the engine and the display use: fg/bg/pmask bits 7:0, ibo bits 1,
+    // 11:8, 28, 29, cur_ctl bits 5:0, 7 -- synthesis drops the rest)
+    logic [31:0] dst_ba, src_ba, fg, bg, pmask, ibo;                 // 0x118004-0x11801C
+    logic        ctl_zero, ctl_lut1;                                 // CONTROL_PLANE (0x11800C) == 0, its bit 24
+    logic [31:0] binc_src, binc_dst, binc_mask;                      // BINC block
+    logic        r80_fill;                                           // 0x100080 = 0x7D or 0x08: fills advance DST y
+    logic [3:0]  r80_bv;                                             // its bytes written since reset (be order)
     logic [23:0] cur_col [4];                                        // cursor colours (LUT blt type 2)
     logic [31:0] dstxy, lenxy, srcxy, xfer;                          // 0x100800-0x100820
-    logic [31:0] cur_pos, cur_ctl, reg19, r204, reg20, misc_video, r238, r23c, pll, misc_ctrl;
-    logic [23:0] r300004;                                            // bytes 0x300005-7
+    logic [31:0] cur_pos, cur_ctl, reg19, reg20, misc_video;
     logic        be_en, srst;
     logic [3:0]  srst_cnt;
 
@@ -166,15 +173,47 @@ module artist (
     endfunction
 
     // ------------------------------------------------------------ memories
-    // 0x100000-0x1000FF: the state block, plain storage (08 1.2.1)
-    logic [31:0] st_ram [64];
+    // plain storage: entries 0-63 are the state block, 0x100000-0x1000FF
+    // (08 1.2.1); 64-79 the registers above that are only stored and read
+    // back (st_index). Those read 0 after a reset until written: pr_v says
+    // which have been, and a write stores the whole merged word. One read
+    // port, at the request's address in G_IDLE and at g_addr after it, so the
+    // word is valid in G_DEC (byte merges) and in G_RD (reads); a write lands
+    // the cycle after G_DEC, before the MIOC can have sent its next request
+    //   64 0x1004C0 (read at 0x1007C0)  65 0x300004  66 0x300204  67 CONTROL_PLANE
+    //   68 FG  69 BG  70 PLANE_MASK  71 IBO  72 0x100580 (read at 0x118020)
+    //   73 0x300238  74 PLL 0x300300  75 MISC_CTRL 0x300308
+    //   77 0x100520 (read at 0x118034)  78 the cursor control 0x300104
+    // Only the addresses the register cases decode need their own entry, so a
+    // few address bits pick it
+    function automatic logic [6:0] st_index(input logic [23:0] a);
+        if (a[21])                              // 0x2xxxxx-0x3xxxxx
+            case (a[9:8])
+                2'd0:    return 7'd65;
+                2'd1:    return 7'd78;
+                2'd2:    return a[5] ? 7'd73 : 7'd66;
+                default: return a[3] ? 7'd75 : 7'd74;
+            endcase
+        else if (a[16])                         // 0x118000-0x11803F
+            return {3'b100, a[5:2]};
+        else if (a[10:8] == 3'd0)               // the state block
+            return {1'b0, a[7:2]};
+        else                                    // 0x1004C0, 0x100520, 0x100580, 0x1007C0
+            return a[7] ? (a[6] ? 7'd64 : 7'd72) : 7'd77;
+    endfunction
+    logic [31:0] st_ram [128];
     logic [31:0] st_q;
     logic        st_we;
-    logic [5:0]  st_wa;
+    logic [6:0]  st_wa;
     logic [31:0] st_wd;
+    logic [15:0] pr_v;                          // entry 64 + i written since reset
+    logic        pr_vq;
+    wire  [6:0]  st_ra = st_index(g_st == G_IDLE ? addr[23:0] : g_addr[23:0]);
+    wire  [31:0] pr_q  = pr_vq ? st_q : 32'd0;  // a plain-storage register
     always_ff @(posedge clk) begin
         if (st_we) st_ram[st_wa] <= st_wd;
-        st_q <= st_ram[g_st == G_IDLE ? addr[7:2] : g_addr[7:2]];     // valid in G_DEC
+        st_q <= st_ram[st_ra];                  // valid in G_DEC
+        pr_vq <= pr_v[st_ra[3:0]];
     end
 
     // colour-map staging line (buffer 15); LUT0 lives in the display (pal_*)
@@ -441,36 +480,36 @@ module artist (
     wire         g_engine = g_fb || (g_reg2 && g_we &&
                     ((g_off >= 24'h100400 && g_off < 24'h101000) || g_off[23:6] == 18'h04600 || g_offw == 24'h300118));
 
-    // register reads (st_q, the state block's word, is valid in G_RD)
+    // register reads (st_q and pr_q, st_ram's word, are valid in G_RD)
     logic [31:0] reg_rdata;
     always_comb begin
         case (g_offw)
-            24'h1007C0: reg_rdata = r4c0;
+            24'h1007C0: reg_rdata = pr_q;
             24'h118000, 24'h118004: reg_rdata = dst_ba;
             24'h118008: reg_rdata = src_ba;
-            24'h11800C: reg_rdata = ctl_plane;
-            24'h118010: reg_rdata = fg;
-            24'h118014: reg_rdata = bg;
-            24'h118018: reg_rdata = pmask;
-            24'h11801C: reg_rdata = ibo;
-            24'h118020: reg_rdata = r580;
+            24'h11800C: reg_rdata = pr_q;           // CONTROL_PLANE
+            24'h118010: reg_rdata = pr_q;           // FG
+            24'h118014: reg_rdata = pr_q;           // BG
+            24'h118018: reg_rdata = pr_q;           // PLANE_MASK
+            24'h11801C: reg_rdata = pr_q;           // IBO
+            24'h118020: reg_rdata = pr_q;           // 0x100580
             24'h118024: reg_rdata = binc_mask;
             24'h118028: reg_rdata = binc_dst;
             24'h11802C: reg_rdata = binc_src;
-            24'h118034: reg_rdata = r520;
+            24'h118034: reg_rdata = pr_q;           // 0x100520
             24'h300000: reg_rdata = {7'd0, e_busy, 24'd0};
-            24'h300004: reg_rdata = {8'd0, r300004};
+            24'h300004: reg_rdata = {8'd0, pr_q[23:0]};
             24'h300008: reg_rdata = 32'h10;
             24'h300100: reg_rdata = cur_pos;
-            24'h300104: reg_rdata = cur_ctl;
+            24'h300104: reg_rdata = pr_q;           // the cursor control
             24'h300200: reg_rdata = reg19;
-            24'h300204: reg_rdata = r204;
+            24'h300204: reg_rdata = pr_q;
             24'h300208: reg_rdata = reg20;
             24'h300218: reg_rdata = misc_video;
-            24'h300238: reg_rdata = {2'b00, r238[29:0]};
+            24'h300238: reg_rdata = {2'b00, pr_q[29:0]};
             24'h30023C: reg_rdata = signature(hactive);
-            24'h300300: reg_rdata = pll;
-            24'h300308: reg_rdata = misc_ctrl;
+            24'h300300: reg_rdata = pr_q;           // PLL
+            24'h300308: reg_rdata = pr_q;           // MISC_CTRL
             24'h380000: reg_rdata = {7'd0, e_busy, 24'd0};
             24'h380004: reg_rdata = 32'h6CC20006 | {6'd0, 1'b0, be_en, 15'd0, srst, 8'd0};
             24'h380008: reg_rdata = 32'h10;
@@ -484,6 +523,8 @@ module artist (
         logic [31:0] lp_dxy;
         logic [4:0]  lp_frow;
         logic [21:0] lp_xy;
+        logic        pr_w;                      // a write to a plain-storage register (st_ram 64-79)
+        pr_w = 1'b0;
         lp_put = 1'b0; lp_fill = 1'b0; lp_move = 1'b0;
         lp_font = 1'b0; lp_line = 1'b0; lp_incl = 1'b0; lp_frow = 5'd0; lp_end_len = 1'b0;
         lp_lto = 1'b0; lp_dash = 1'b0; lp_cont = 1'b0;
@@ -494,23 +535,24 @@ module artist (
         st_we <= 1'b0; stg_we <= 1'b0; lb_we <= 1'b0; pal_wr <= 1'b0; cb_we <= 1'b0;
         if (srst_cnt != 4'd0) srst_cnt <= srst_cnt - 4'd1;
         srst <= srst_cnt > 4'd1;
+        if (st_we && st_wa[6]) pr_v[st_wa[3:0]] <= 1'b1;
 
         if (rst) begin
             g_st <= G_IDLE; e_st <= E_IDLE;
-            dst_ba <= 32'd0; src_ba <= 32'd0; ctl_plane <= 32'd0; fg <= 32'd0; bg <= 32'd0;
+            dst_ba <= 32'd0; src_ba <= 32'd0; ctl_zero <= 1'b1; ctl_lut1 <= 1'b0; fg <= 32'd0; bg <= 32'd0;
             pmask <= 32'd0; ibo <= 32'd0;
-            binc_src <= 32'd0; binc_dst <= 32'd0; binc_mask <= 32'd0; r100080 <= 32'd0;
-            r4c0 <= 32'd0; r520 <= 32'd0; r580 <= 32'd0;
+            binc_src <= 32'd0; binc_dst <= 32'd0; binc_mask <= 32'd0; r80_fill <= 1'b0; r80_bv <= 4'd0;
+            pr_v <= 16'd0;
             dstxy <= 32'd0; lenxy <= 32'd0; srcxy <= 32'd0; xfer <= 32'd0; r80c <= 32'd0; pat_mode <= 1'b0;
-            cur_pos <= 32'd0; cur_ctl <= 32'd0; reg19 <= 32'd0; r204 <= 32'd0; reg20 <= 32'd0;
+            cur_pos <= 32'd0; cur_ctl <= 32'd0; reg19 <= 32'd0; reg20 <= 32'd0;
             // MISC_VIDEO's active-size fields come out of reset at 1280 x 1024
             // (bits 11:8 = 3, 3:0 = 1, as in every 1280-wide record), the rest 0:
             // the STI keeps its state at (1536, 384) when bits 3:0 != 0, else at
             // (1536, 776); its cold path writes freq_ref there before the first
             // mode set, and the PDC's next init_graph reads it back from where the
             // 1280 mode puts it -- from 0 it would divide by zero (artist.md 1)
-            misc_video <= 32'h0000_0301; r238 <= 32'd0; r23c <= 32'd0; pll <= 32'd0; misc_ctrl <= 32'd0;
-            r300004 <= 24'd0; be_en <= 1'b1; srst_cnt <= 4'd0; srst <= 1'b0;
+            misc_video <= 32'h0000_0301;
+            be_en <= 1'b1; srst_cnt <= 4'd0; srst <= 1'b0;
             vr_req <= 1'b0; f_n <= 4'd0; f_rp <= 3'd0; f_wp <= 3'd0; p1_v <= 1'b0;
             a_clr <= 1'b1;
             cur_col[0] <= 24'd0; cur_col[1] <= 24'd0; cur_col[2] <= 24'hFFFFFF; cur_col[3] <= 24'h000000;
@@ -557,9 +599,7 @@ module artist (
                     case (g_offw)
                         24'h100480: binc_src <= bmerge(binc_src, g_wdata, g_be);
                         24'h1004A0: binc_dst <= bmerge(binc_dst, g_wdata, g_be);
-                        24'h1004C0: r4c0 <= bmerge(r4c0, g_wdata, g_be);
-                        24'h100520: r520 <= bmerge(r520, g_wdata, g_be);
-                        24'h100580: r580 <= bmerge(r580, g_wdata, g_be);
+                        24'h1004C0, 24'h100520, 24'h100580: pr_w = 1'b1;
                         24'h1005A0: binc_mask <= bmerge(binc_mask, g_wdata, g_be);
                         24'h1005C0, 24'h100600, 24'h100604, 24'h100620, 24'h100640, 24'h100660,
                         24'h100680, 24'h1006A0, 24'h1006C0, 24'h1006E0: begin
@@ -631,15 +671,19 @@ module artist (
                         24'h118000: begin dst_ba <= bmerge(dst_ba, g_wdata, g_be); src_ba <= bmerge(src_ba, g_wdata, g_be); end
                         24'h118004: dst_ba <= bmerge(dst_ba, g_wdata, g_be);
                         24'h118008: src_ba <= bmerge(src_ba, g_wdata, g_be);
-                        24'h11800C: ctl_plane <= bmerge(ctl_plane, g_wdata, g_be);
-                        24'h118010: fg <= bmerge(fg, g_wdata, g_be);
-                        24'h118014: bg <= bmerge(bg, g_wdata, g_be);
-                        24'h118018: pmask <= bmerge(pmask, g_wdata, g_be);
-                        24'h11801C: ibo <= bmerge(ibo, g_wdata, g_be);
+                        24'h11800C: begin
+                            logic [31:0] v;
+                            v = bmerge(pr_q, g_wdata, g_be);
+                            ctl_zero <= v == 32'd0; ctl_lut1 <= v[24]; pr_w = 1'b1;
+                        end
+                        24'h118010: begin fg <= bmerge(fg, g_wdata, g_be); pr_w = 1'b1; end
+                        24'h118014: begin bg <= bmerge(bg, g_wdata, g_be); pr_w = 1'b1; end
+                        24'h118018: begin pmask <= bmerge(pmask, g_wdata, g_be); pr_w = 1'b1; end
+                        24'h11801C: begin ibo <= bmerge(ibo, g_wdata, g_be); pr_w = 1'b1; end
                         24'h118024: binc_mask <= bmerge(binc_mask, g_wdata, g_be);
-                        24'h300004: r300004 <= 24'(bmerge({8'd0, r300004}, g_wdata, g_be));
+                        24'h300004: pr_w = 1'b1;
                         24'h300100: cur_pos <= bmerge(cur_pos, g_wdata, g_be);
-                        24'h300104: cur_ctl <= bmerge(cur_ctl, g_wdata, g_be);
+                        24'h300104: begin cur_ctl <= bmerge(cur_ctl, g_wdata, g_be); pr_w = 1'b1; end
                         24'h300118: begin
                             logic [31:0] v;
                             v = bmerge(32'd0, g_wdata, g_be);
@@ -658,13 +702,11 @@ module artist (
                             end
                         end
                         24'h300200: reg19 <= bmerge(reg19, g_wdata, g_be);
-                        24'h300204: r204 <= bmerge(r204, g_wdata, g_be);
+                        24'h300204: pr_w = 1'b1;
                         24'h300208: reg20 <= bmerge(reg20, g_wdata, g_be);
                         24'h300218: misc_video <= bmerge(misc_video, g_wdata, g_be);
-                        24'h300238: r238 <= bmerge(r238, g_wdata, g_be);
-                        24'h30023C: r23c <= bmerge(r23c, g_wdata, g_be);
-                        24'h300300: pll <= bmerge(pll, g_wdata, g_be);
-                        24'h300308: misc_ctrl <= bmerge(misc_ctrl, g_wdata, g_be);
+                        // (0x30023C reads the signature: what is written there is dropped)
+                        24'h300238, 24'h300300, 24'h300308: pr_w = 1'b1;
                         24'h380004: begin
                             // bit 8: reset the engine (self-clearing; clears the
                             // bus-error timer enable, bit 24, which the ROM sets again)
@@ -673,10 +715,17 @@ module artist (
                         end
                         default:
                             if (g_off[23:8] == 16'h1000) begin
-                                st_we <= 1'b1; st_wa <= g_off[7:2]; st_wd <= bmerge(st_q, g_wdata, g_be);
-                                if (g_offw == 24'h100080) r100080 <= bmerge(r100080, g_wdata, g_be);
+                                st_we <= 1'b1; st_wa <= {1'b0, g_off[7:2]}; st_wd <= bmerge(st_q, g_wdata, g_be);
+                                if (g_offw == 24'h100080) begin
+                                    // the engine's view: the bytes written since reset, the others 0
+                                    logic [31:0] v;
+                                    v = bmerge(bmerge(32'd0, st_q, r80_bv), g_wdata, g_be);
+                                    r80_fill <= v == 32'h7D || v == 32'h08;
+                                    r80_bv <= r80_bv | g_be;
+                                end
                             end
                     endcase
+                    if (pr_w) begin st_we <= 1'b1; st_wa <= st_ra; st_wd <= bmerge(pr_q, g_wdata, g_be); end
                     ack <= 1'b1; g_st <= G_IDLE;
                 end
             end
@@ -774,7 +823,7 @@ module artist (
                 l_inc <= {1'b0, mnr, 1'b0};
                 l_dec <= l_lto ? {1'b0, maj - mnr, 1'b0} : {1'b0, sh, 1'b0};
                 if (l_lto && !l_dash) l_n <= maj + {15'd0, l_incl};
-                e_st <= ctl_plane == 32'd0 && ba_image(dst_ba) ? E_LINE : E_IDLE;
+                e_st <= ctl_zero && ba_image(dst_ba) ? E_LINE : E_IDLE;
             end
             // a vector's next pixel: a one-pixel span, then the step (the minor axis
             // moves while the error term is >= 0)
@@ -929,7 +978,7 @@ module artist (
 `endif
                 end
             end
-            if (e_st == E_LAUNCH && (lq_fill || lq_move) && ctl_plane == 32'd0 && ba_image(dst_ba) &&
+            if (e_st == E_LAUNCH && (lq_fill || lq_move) && ctl_zero && ba_image(dst_ba) &&
                 lq_dxy[31:16] < 16'd2048 && lq_dxy[15:0] < 16'd1024 && lenxy[31:16] != 16'd0 && lenxy[15:0] != 16'd0 &&
                 (lq_fill || (srcxy[31:16] < 16'd2048 && srcxy[15:0] < 16'd1024))) begin
                 // rectangle fill / block move at lq_dxy (x<<16 | y), size lenxy (w<<16 | h), clipped to the VRAM
@@ -948,7 +997,7 @@ module artist (
                     e_kind <= K_SOLID; e_pat <= xfer;
                     // with 0x100080 = 0x7D (polygon spans) or 0x08 (pattern rows) a fill
                     // moves DST down by its height (09 5.1; QEMU knew 0x7D)
-                    if (r100080 == 32'h7D || r100080 == 32'h08) dstxy <= {lq_dxy[31:16], lq_dxy[15:0] + lenxy[15:0]};
+                    if (r80_fill) dstxy <= {lq_dxy[31:16], lq_dxy[15:0] + lenxy[15:0]};
                 end
                 else begin
                     e_kind <= K_MOVE;
@@ -966,7 +1015,7 @@ module artist (
                                     w, h, ibo, pmask[7:0], fg[7:0], bg[7:0], src_ba, dst_ba);
 `endif
             end
-            if (e_st == E_LAUNCH && lq_fill && ctl_plane != 32'd0 && ba_buf(dst_ba) == 4'd13 &&
+            if (e_st == E_LAUNCH && lq_fill && !ctl_zero && ba_buf(dst_ba) == 4'd13 &&
                 lq_dxy[31:16] < 16'd2048 && lq_dxy[15:0] < 16'd1024 && lenxy[31:16] != 16'd0 && lenxy[15:0] != 16'd0) begin
                 // a fill of the attribute plane (X's nglePolyPaintAttr, Linux's SETUP_ATTR_ACCESS):
                 // the pixels' LUT bit := CONTROL_PLANE bit 24 (0x01000102 LUT1, 0x102 LUT0; review 09 4.2)
@@ -976,17 +1025,17 @@ module artist (
                 if (w > 17'd2048 - {1'b0, lq_dxy[31:16]}) w = 17'd2048 - {1'b0, lq_dxy[31:16]};
                 if (h > 17'd1024 - {1'b0, lq_dxy[15:0]}) h = 17'd1024 - {1'b0, lq_dxy[15:0]};
                 xe = lq_dxy[27:16] + w[11:0];
-                e_kind <= K_ATTR; e_color <= {7'd0, ctl_plane[24]};
+                e_kind <= K_ATTR; e_color <= {7'd0, ctl_lut1};
                 e_x0 <= lq_dxy[27:16]; e_xend <= xe; e_y <= lq_dxy[10:0]; e_rows <= h[10:0];
                 // whole words need no read first
                 e_rmw <= lq_dxy[21:16] != 6'd0 || xe[5:0] != 6'd0;
-                if (r100080 == 32'h7D || r100080 == 32'h08) dstxy <= {lq_dxy[31:16], lq_dxy[15:0] + lenxy[15:0]};
+                if (r80_fill) dstxy <= {lq_dxy[31:16], lq_dxy[15:0] + lenxy[15:0]};
                 e_st <= E_ROW;
 `ifdef SIMULATION
-                if (dbg_trace) $display("artist: attr %0d,%0d %0dx%0d := LUT%0d", lq_dxy[31:16], lq_dxy[15:0], w, h, ctl_plane[24]);
+                if (dbg_trace) $display("artist: attr %0d,%0d %0dx%0d := LUT%0d", lq_dxy[31:16], lq_dxy[15:0], w, h, ctl_lut1);
 `endif
             end
-            if (e_st == E_LAUNCH && lq_font && ctl_plane == 32'd0 && ba_image(dst_ba) && lq_dxy[31:16] < 16'd2048) begin
+            if (e_st == E_LAUNCH && lq_font && ctl_zero && ba_image(dst_ba) && lq_dxy[31:16] < 16'd2048) begin
                 // two 16-pixel glyph rows at DST + row counter (rows >= LEN h dropped)
                 logic [15:0] y;
                 logic [11:0] n;
@@ -1009,7 +1058,7 @@ module artist (
                 if (lq_cont) begin
                     // the next dash: the colour bit flips, the vector goes on where it stopped
                     l_ph <= !l_ph;
-                    e_st <= ctl_plane == 32'd0 && ba_image(dst_ba) ? E_LINE : E_IDLE;
+                    e_st <= ctl_zero && ba_image(dst_ba) ? E_LINE : E_IDLE;
                 end else begin
                     logic [15:0] dx, dy;
                     logic [31:0] lend;

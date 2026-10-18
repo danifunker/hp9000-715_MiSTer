@@ -432,6 +432,37 @@ int main(int argc, char** argv) {
 	gsc(true, 0xF8100088, 0x00010000); expect("state word 0x100088", rd(0xF8100088), 0x00010000);
 	gsc(true, 0xF8100000, 0x12345678); gsc(true, 0xF8100002, 0x0000ABCD, 0x3);
 	expect("state word 0x100000 byte merge", rd(0xF8100000), 0x1234ABCD);
+	// the registers that are only stored and read back (st_ram 64-79): 0 from
+	// reset (a byte write merges into 0), the read-back aliases, 0x300238's
+	// top bits, 0x30023C's writes dropped
+	static const uint32_t plain[] = {0xF81007C0, 0xF811800C, 0xF8118010, 0xF8118014, 0xF8118018, 0xF811801C,
+		0xF8118020, 0xF8118034, 0xF8300104, 0xF8300204, 0xF8300238, 0xF8300300, 0xF8300308};
+	auto plain_zero = [&](const char* what) {
+		int bad = 0;
+		for (uint32_t a : plain) if (rd(a)) { printf("  %08x: %08x\n", a, last_rd); bad++; }
+		if (bad) { printf("FAIL: %s\n", what); fails++; } else printf("ok   %s\n", what);
+	};
+	plain_zero("plain-storage registers 0 after reset");
+	gsc(true, 0xF8300205, 0x00AB0000, 0x4); expect("0x300204 byte 5 after reset", rd(0xF8300204), 0x00AB0000);
+	gsc(true, 0xF8300204, 0x11223344); gsc(true, 0xF8300207, 0x000000FF, 0x1);
+	expect("0x300204 byte merge", rd(0xF8300204), 0x112233FF);
+	gsc(true, 0xF81004C0, 0xDEADBEEF); expect("0x1004C0 read at 0x1007C0", rd(0xF81007C0), 0xDEADBEEF);
+	expect("0x1004C0 itself reads 0", rd(0xF81004C0), 0);
+	gsc(true, 0xF8100580, 0x55AA55AA); expect("0x100580 read at 0x118020", rd(0xF8118020), 0x55AA55AA);
+	gsc(true, 0xF8100520, 0x0F0F0F0F); expect("0x100520 read at 0x118034", rd(0xF8118034), 0x0F0F0F0F);
+	gsc(true, 0xF8300238, 0xFFFFFFFF); expect("0x300238 bits 29:0", rd(0xF8300238), 0x3FFFFFFF);
+	gsc(true, 0xF830023C, 0x12345678); expect("0x30023C still the signature", rd(0xF830023C), 0xAC4FFDAC);
+	gsc(true, 0xF8300300, 0x01234567); gsc(true, 0xF8300308, 0x89ABCDEF);
+	expect("PLL", rd(0xF8300300), 0x01234567); expect("MISC_CTRL", rd(0xF8300308), 0x89ABCDEF);
+	gsc(true, 0xF8300004, 0xCCDDEEFF); expect("0x300004 bytes 5-7", rd(0xF8300004), 0x00DDEEFF);
+	gsc(true, 0xF8300104, 0xABCD0040); expect("cursor control", rd(0xF8300104), 0xABCD0040);
+	gsc(true, 0xF8300104, 0);
+	gsc(true, 0xF811800C, 0x01000000, 0x8); expect("CONTROL_PLANE byte 0", rd(0xF811800C), 0x01000000);
+	wr(0x11800C, 0);
+	wr(0x118010, 0xA1B2C3D4); wr(0x118014, 0x5E6F7A8B); wr(0x118018, 0x13579BDF); wr(0x11801C, 0x2468ACE0);
+	expect("FG", rd(0xF8118010), 0xA1B2C3D4); expect("BG", rd(0xF8118014), 0x5E6F7A8B);
+	expect("PLANE_MASK", rd(0xF8118018), 0x13579BDF); expect("IBO", rd(0xF811801C), 0x2468ACE0);
+	wr(0x118010, 0); wr(0x118014, 0); wr(0x118018, 0); wr(0x11801C, 0);
 
 	// ---- the ROM's VRAM probe (08 0.3, 4.1)
 	wr(0x118000, 0x2EA02000); wr(0x118010, 0); wr(0x118018, 0xFF); wr(0x11801C, 0x85000302);
@@ -830,6 +861,12 @@ int main(int argc, char** argv) {
 		if (badm) { printf("FAIL: monitor records' pixel clocks\n"); fails++; } else printf("ok   monitor records' pixel clocks\n");
 	}
 	check("final VRAM");
+
+	// a chip reset (LASI IORESET): the plain-storage registers read 0 again
+	t->chip_rst = 1; for (int i = 0; i < 4; i++) tick(); t->chip_rst = 0; tick();
+	plain_zero("plain-storage registers 0 after a chip reset");
+	expect("MISC_VIDEO after a chip reset", rd(0xF8300218), 0x00000301);
+	expect("0x300004 after a chip reset", rd(0xF8300004), 0);
 
 	printf("%s (%llu cycles)\n", fails ? "FAILED" : "PASS", (unsigned long long)cyc);
 	delete t;
