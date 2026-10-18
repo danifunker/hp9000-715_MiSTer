@@ -683,3 +683,20 @@ seeds 1-3 if it still misses (builds 58-60).
   compare in F2 (I side) and M (D side); if the D-side compare + load align
   does not fit M, the fallback is the compare in W with a second load-use
   bubble (the PowerPC core measured that at 9-14 % cycles).
+
+### 2026-10-18: D's early I-cache lookup off E's paths (build 64 -> 65)
+
+Build 64 (the area-plan trims elsewhere, no CPU change) placed the CPU's
+E-redirect paths worse: core setup -1.479 ns, every failing path from
+`e_fa_sel`/`e_fb_sel` through the BV/BE/BLR target adder (`br_target`) and
+`redir_target` into the I-cache tag RAM's read address (13 levels, 16.4 ns,
+the last hop 2.37 ns). The RAM never used E's target -- the early lookup
+(`redir_issue`, 2026-10-14) is D's only -- but `ic_lk_addr` muxed
+`redir_target` (E's or D's) and its select and `lk_en` depended on `redir`
+and `redir_from_e`. Now `pa_core` exports `redir_d`/`redir_d_target` and
+`pa_fetch` decides the lookup from D's side alone (`d_issue`: the D-redirect
+branch's "F1 left free" rule with D's slot compares); if E or W overrides D
+in that cycle the lookup was for nothing and `ic_lk_drop` keeps the I-cache
+from marking it valid (it trusts a valid lookup to be F1's: RPN compare
+only), so `reissue` looks F1 up again. No cycle cost except one in that rare
+overlap. cputest 13/13, cosim 8/8, run-rom PASS.

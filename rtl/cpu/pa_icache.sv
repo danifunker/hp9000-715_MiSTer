@@ -31,6 +31,8 @@ module pa_icache
     input  logic [4:0]  lk_hash,        // space hash into index bits 16:12
     input  logic [31:0] f1_addr,        // the instruction in F1 (registered lk_addr)
     input  logic [19:0] f1_rpn,         // its RPN (the I-LAB's, or the address in real mode)
+    input  logic        lk_drop,        // this lookup is not F1's after all (the fetch's early
+                                        // lookup of D's target, overridden by E/W): not valid
     output logic        lk_valid,
     output logic [31:0] f1_word,
     output logic        f1_hit,
@@ -137,7 +139,7 @@ module pa_icache
     always_ff @(posedge clk) begin
         if (!rst_n) lk_valid <= 1'b0;
         else if (busy) lk_valid <= 1'b0;
-        else if (lk_en) lk_valid <= 1'b1;
+        else if (lk_en) lk_valid <= !lk_drop;
     end
 
     // ---------------------------------------------------------------- F1 results

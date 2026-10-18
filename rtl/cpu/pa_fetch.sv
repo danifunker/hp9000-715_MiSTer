@@ -66,6 +66,8 @@ module pa_fetch (
     input  logic [31:0] redir_slot_e, redir_slot_d,
     input  logic        redir_from_e,
     input  logic        redir_slot_in_d,    // E's redirect: the core holds the slot in D (nothing here is it)
+    input  logic        redir_d,            // D's prediction redirects (E or W may override it)
+    input  logic [31:0] redir_d_target,     // its target (not E's: the early lookup's address)
     // F2 -> D
     output logic        f2_valid,
     output logic [31:0] f2_insn,
@@ -78,6 +80,7 @@ module pa_fetch (
     output logic [2:0]  f2_type,        // the page's AR type
     // I-cache lookup and fill
     output logic        ic_lk_en,
+    output logic        ic_lk_drop,         // this cycle's lookup is not F1's (see d_issue)
     output logic [31:0] ic_lk_addr,
     output logic [4:0]  ic_lk_hash,
     output logic [31:0] ic_f1_addr,     // the instruction in F1 (for the hit compare)
@@ -149,14 +152,22 @@ module pa_fetch (
 
     // I-cache: look up the instruction entering F1; re-issue F1's lookup when
     // the engine took the read port in between
-    logic issue, redir_issue;
+    logic issue, redir_issue, d_issue;
     wire reissue = f1_valid && !f1_io && !ic_lk_valid && !ic_busy && !issue;
     function automatic logic [4:0] ihash_of(input logic [15:0] sp);
         return ihash[0] ? {sp[4], sp[3], sp[0], sp[1], sp[2]} : 5'd0;
     endfunction
-    assign ic_lk_en   = issue || reissue || redir_issue;
-    assign ic_lk_addr = redir_issue ? redir_target : issue ? nf : f1_iaoq_f;
-    assign ic_lk_hash = psw_c ? ihash_of(redir_issue ? n_nsf : issue ? nsf : f1_iasq_f) : 5'd0;
+    // The early lookup of D's target (redir_issue below) is decided and addressed
+    // from D's side alone (d_issue, redir_d_target): E's branch target and condition
+    // come out of the ALU too late for the RAM's address and enable (build 64: -1.48 ns
+    // from e_fb_sel into the tag RAM, 2026-10-18). When E or W overrides D in the same
+    // cycle, the lookup was made for nothing: lk_drop keeps it from counting as F1's
+    // (the I-cache trusts that a valid lookup is F1's: it compares the RPN only), and
+    // reissue looks F1 up again.
+    assign ic_lk_en   = issue || reissue || d_issue;
+    assign ic_lk_addr = d_issue ? redir_d_target : issue ? nf : f1_iaoq_f;
+    assign ic_lk_hash = psw_c ? ihash_of(d_issue ? nsb : issue ? nsf : f1_iasq_f) : 5'd0;
+    assign ic_lk_drop = d_issue && !redir_issue;
     assign ic_f1_addr = f1_iaoq_f;
     assign ic_f1_rpn  = f1_pa[31:12];
 
@@ -186,6 +197,9 @@ module pa_fetch (
     wire sl_nf = redir_from_e ? sl_nf_e : sl_nf_d;
     wire n_f2_slot = adv_f2 ? sl_f1 : sl_f2;
     logic n_f1_slot;                                 // issue ? sl_nf : sl_f1, set below
+    // D's view: the slot compares against D's slot only (E is not redirecting)
+    wire n_f2_slot_d = adv_f2 ? sl_f1_d : sl_f2_d;
+    logic n_f1_slot_d;
     logic slot_found;                                // the redirect's slot already kept (D, then F2)
 
     always_comb begin
@@ -208,6 +222,10 @@ module pa_fetch (
         end
         issue = !f1_valid || f1_consumed;
         n_f1_slot = issue ? sl_nf : sl_f1;
+        n_f1_slot_d = issue ? sl_nf_d : sl_f1_d;
+        // D's early lookup as if neither E nor W redirected: the F1 the D redirect
+        // would leave is free unless it holds D's slot (and F2 does not)
+        d_issue = redir_d && !((issue || f1_valid) && n_f1_slot_d && !(n_f2_valid && n_f2_slot_d));
         slot_found = 1'b0;
         redir_issue = 1'b0;
         if (issue) begin

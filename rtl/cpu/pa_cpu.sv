@@ -113,7 +113,8 @@ module pa_cpu
     logic [15:0] f2_iasq_f, f2_iasq_b;
     logic        redir, redir_kill_all, ilab_inval, redir_new_space;
     logic [31:0] redir_target, redir_back, redir_slot_e, redir_slot_d;
-    logic        redir_from_e, redir_slot_in_d;
+    logic        redir_from_e, redir_slot_in_d, redir_d, ic_lk_drop;
+    logic [31:0] redir_d_target;
     logic [15:0] redir_space, redir_back_space;
     logic        f_req, f_beat, f_done, f_err;
     logic [31:0] f_addr;
@@ -132,11 +133,12 @@ module pa_cpu
         .redir(redir), .redir_kill_all(redir_kill_all), .ilab_inval(ilab_inval), .redir_target(redir_target), .redir_back(redir_back),
         .redir_space(redir_space), .redir_back_space(redir_back_space), .redir_new_space(redir_new_space),
         .redir_slot_e(redir_slot_e), .redir_slot_d(redir_slot_d), .redir_from_e(redir_from_e), .redir_slot_in_d(redir_slot_in_d),
+        .redir_d(redir_d), .redir_d_target(redir_d_target),
         .f2_valid(f2_valid), .f2_insn(f2_insn), .f2_iaoq_f(f2_iaoq_f), .f2_iaoq_b(f2_iaoq_b),
         .f2_iasq_f(f2_iasq_f), .f2_iasq_b(f2_iasq_b), .f2_err(f2_err), .f2_perr(f2_perr),
         .f2_itlb(f2_itlb), .f2_imp(f2_imp), .f2_type(f2_type),
         .ic_lk_en(ic_lk_en), .ic_lk_addr(ic_lk_addr), .ic_lk_hash(ic_lk_hash), .ic_f1_addr(ic_f1_addr), .ic_f1_rpn(ic_f1_rpn),
-        .ic_lk_valid(ic_lk_valid), .ic_busy(ic_busy),
+        .ic_lk_valid(ic_lk_valid), .ic_lk_drop(ic_lk_drop), .ic_busy(ic_busy),
         .ic_word(ic_word), .ic_hit(ic_hit), .ic_perr(ic_perr), .ic_fill_req(ic_fill_req),
         .ic_fill_addr(ic_fill_addr), .ic_fill_hash(ic_fill_hash), .ic_fill_rpn(ic_fill_rpn),
         .ic_fill_done(ic_fill_done), .ic_fill_err(ic_fill_err),
@@ -147,7 +149,7 @@ module pa_cpu
     pa_icache u_icache (
         .clk(clk), .rst_n(rst_n), .ready(ic_ready), .busy(ic_busy), .l1_en(ic_l1_en),
         .lk_en(ic_lk_en), .lk_addr(ic_lk_addr), .lk_hash(ic_lk_hash), .f1_addr(ic_f1_addr), .f1_rpn(ic_f1_rpn),
-        .lk_valid(ic_lk_valid),
+        .lk_valid(ic_lk_valid), .lk_drop(ic_lk_drop),
         .f1_word(ic_word), .f1_hit(ic_hit), .f1_perr(ic_perr), .f1_l1hit(),
         .fill_req(ic_fill_req), .fill_addr(ic_fill_addr), .fill_hash(ic_fill_hash), .fill_rpn(ic_fill_rpn),
         .fill_done(ic_fill_done), .fill_err(ic_fill_err),
@@ -210,6 +212,7 @@ module pa_cpu
         .redir(redir), .redir_kill_all(redir_kill_all), .ilab_inval(ilab_inval), .redir_target(redir_target), .redir_back(redir_back),
         .redir_space(redir_space), .redir_back_space(redir_back_space), .redir_new_space(redir_new_space),
         .redir_slot_e(redir_slot_e), .redir_slot_d(redir_slot_d), .redir_from_e(redir_from_e), .redir_slot_in_d(redir_slot_in_d),
+        .redir_d(redir_d), .redir_d_target(redir_d_target),
         .d_req(d_req), .d_we(d_we), .d_addr(d_addr), .d_be(d_be), .d_wdata(d_wdata), .d_rclr(d_rclr),
         .d_ack(d_ack), .d_err(d_err), .d_rdata(d_rdata), .sb_empty(sb_empty), .sb_err(sb_err),
         .eir_set(eir_set), .eir_num(eir_num), .toc_req(toc_req), .hpmc_req(hpmc_req), .lpmc_req(lpmc_req),

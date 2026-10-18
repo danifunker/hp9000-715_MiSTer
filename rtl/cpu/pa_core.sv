@@ -56,6 +56,8 @@ module pa_core
     output logic [31:0] redir_slot_e, redir_slot_d,   // E's / D's branch delay-slot address
     output logic        redir_from_e,
     output logic        redir_slot_in_d,   // E's redirect with its delay slot held in D
+    output logic        redir_d,           // D's prediction redirects (whether or not E/W override it)
+    output logic [31:0] redir_d_target,    // its target, free of E's adder (the fetch's early lookup)
 
     // TLB (pa_tlb)
     output logic [15:0] tlb_lk_space,   // the next lookup tag (E's address or the I-LAB's request)
@@ -644,6 +646,8 @@ module pa_core
     assign redir_slot_d   = d_iaoq_b;
     assign redir_from_e   = e_redir;
     assign redir_slot_in_d = e_redir && d_valid;
+    assign redir_d        = d_redir;
+    assign redir_d_target = d_target;
 
     // ================================================================ M stage
     // TLB lookup: the instruction in M when it translates, else the fetch unit's refill
