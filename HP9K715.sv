@@ -55,33 +55,55 @@ assign BUTTONS = 0;
 
 //////////////////////////////////////////////////////////////////
 
-wire [1:0] ar = status[122:121];
 
 `include "build_id.v"
+// The OSD follows docs/osd-standard.md: the media and Load ROM, Memory and
+// Network interface on the top page, then Machine (P1), Video (P2), Input
+// (P3) and Advanced (P5). Every setting but the media, Input and the buttons
+// waits for the next reset ("Apply and reset"; cfg below), and "Changes
+// pending" (menumask bit 0) shows while one differs from what is running.
 localparam CONF_STR = {
 	"HP9K715;UART9600:19200:38400:57600:115200;",
 	"-;",
-	// slots 0/2/3 are the SCSI images (IDs 6, 5 and the CD-ROM at 2);
-	// slot 1 is the 8 KB EEPROM image: loaded before the machine leaves
-	// reset, saved back when the firmware changes it. "SC": remembered.
-	"SC0,HDAIMG,SCSI disk (ID 6);",
-	"SC2,HDAIMG,SCSI disk (ID 5);",
+	// slots 0/2/3 are the SCSI images (IDs 6, 5 and the CD-ROM at 2), "SC":
+	// remembered; F0 loads another boot ROM through the boot0.rom path
+	// (ioctl index 0) for this session only (a core start loads boot0.rom)
+	"SC0,HDAIMG,Pri. disk (ID 6);",
+	"SC2,HDAIMG,Disk (ID 5);",
 	"SC3,ISO,CD-ROM (ID 2);",
-	"SC1,EEP,Mount EEPROM;",
+	"F0,ROM,Load ROM;",
 	"-;",
-	"O[17:15],Boot mode (on reset),Normal,BOOT_ADMIN,ISL,Single-user,LVM maintenance,Network,CD/DVD;",
-	"O[2:1],Model (on reset),715/64,715/80,715/100;",
-	"O[5:3],RAM (on reset),32MB,64MB,128MB,16MB;",
-	"O[11:10],Display,Graphics,Auto,Serial console;",
-	"O[14:12],Network,eth0,Off,eth1,macvlan,tap0;",
-	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
-	"O[125:123],Scale,V-Integer,Normal,Narrower HV-Integer,Wider HV-Integer,HV-Integer;",
+	"O[5:3],Memory,32MB,64MB,128MB,16MB;",
+	// read by Main's 82596 bridge (support/hp9k), so it acts at once (STUBS S-027)
+	"O[14:12],Network interface,eth0,None,eth1,macvlan,tap0;",
 	"-;",
-	"T[6],TOC (front panel);",
-	"T[7],Soft power off;",
+	"P1,Machine;",
+	"P2,Video;",
+	"P3,Input;",
+	"P5,Advanced;",
 	"-;",
-	"T[0],Reset;",
-	"R[0],Reset and close OSD;",
+	"h0-,Changes pending;",
+	"R[0],Apply and reset;",
+
+	"P1O[2:1],Model,715/64,715/80,715/100;",
+	"P1-;",
+	"P1T[6],TOC (front panel);",
+	"P1T[7],Soft power off;",
+
+	"P2O[11:10],Display,Graphics,Auto,Serial console;",
+	"P2O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
+	"P2O[125:123],Scale,V-Integer,Normal,Narrower HV-Integer,Wider HV-Integer,HV-Integer;",
+
+	"P3O[19],Swap Alt/Win keys,No,Yes;",
+
+	"P5O[17:15],Boot mode,Normal,BOOT_ADMIN,ISL,Single-user,LVM maint.,Network,CD/DVD;",
+	"P5-;",
+	// slot 1 is the 8 KB EEPROM image: loaded before the machine leaves
+	// reset, saved back when the firmware changes it
+	"P5SC1,EEP,EEPROM image;",
+
+	// status bits 8, 9 and 18 were development options until 2026-10-18:
+	// left unused so a saved config cannot turn them into something else
 	"v,0;",
 	"V,v",`BUILD_DATE
 };
@@ -90,6 +112,7 @@ localparam VDNUM = 4;           // 0 disk ID 6, 1 EEPROM, 2 disk ID 5, 3 CD-ROM
 wire forced_scandoubler;
 wire   [1:0] buttons;
 wire [127:0] status;
+wire         cfg_pending;   // an OSD setting differs from the running one (below)
 wire  [10:0] ps2_key;
 wire  [24:0] ps2_mouse;
 wire  [15:0] sdram_sz;
@@ -122,7 +145,7 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(VDNUM), .BLKSZ(2)) hps_io
 	.forced_scandoubler(forced_scandoubler),
 	.buttons(buttons),
 	.status(status),
-	.status_menumask(16'd0),
+	.status_menumask({15'd0, cfg_pending}),
 
 	.ps2_key(ps2_key),
 	.ps2_mouse(ps2_mouse),
@@ -207,6 +230,30 @@ always @(posedge clk_sys) if (m_reset) begin
 	cfg_ram_lg <= want_lg > max_lg ? max_lg : want_lg;
 end
 
+// the settings the machine runs with: the OSD's values, taken while the
+// machine is in reset (Apply and reset, the board's button, a core start or
+// a ROM load), so a change waits for the next reset (docs/osd-standard.md).
+// The media, Input (Swap Alt/Win keys), the buttons (T[6], T[7]) and the
+// Network interface (Main reads it itself) act at once and stay out of it.
+reg [125:0] cfg = 0;
+always @(posedge clk_sys) if (m_reset) cfg <= status[125:0];
+assign cfg_pending = {status[5:1], status[11:10], status[17:15], status[125:121]}
+                  != {cfg[5:1],    cfg[11:10],    cfg[17:15],    cfg[125:121]};
+wire [1:0] ar = cfg[122:121];
+
+// Input: Swap Alt/Win keys (status[19], at once): left Alt <-> left GUI,
+// right Alt <-> right GUI (ps2_key: [8] extended, [7:0] the set-2 code)
+function automatic [8:0] alt_win(input [8:0] k);
+	case (k)
+		9'h011: alt_win = 9'h11F;   // left Alt -> left GUI
+		9'h11F: alt_win = 9'h011;
+		9'h111: alt_win = 9'h127;   // right Alt -> right GUI
+		9'h127: alt_win = 9'h111;
+		default: alt_win = k;
+	endcase
+endfunction
+wire [10:0] kbd_key = status[19] ? {ps2_key[10:9], alt_win(ps2_key[8:0])} : ps2_key;
+
 // the soft power button: held "pressed" for 2 s (HP-UX polls it at 4 Hz, Linux at 1 Hz)
 reg [27:0] softoff_cnt = 0;
 reg        stat7_q = 0;
@@ -251,7 +298,7 @@ wire [255:0] tr_data;
 // the serial console on the screen and the MiSTer keyboard typing into it
 wire        con_tx, con_rx_full, kbd_ascii_stb;
 wire  [7:0] con_tx_byte, kbd_ascii;
-ps2_ascii ps2_ascii (.clk(clk_sys), .rst(m_reset), .ps2_key(ps2_key), .strobe(kbd_ascii_stb), .ascii(kbd_ascii));
+ps2_ascii ps2_ascii (.clk(clk_sys), .rst(m_reset), .ps2_key(kbd_key), .strobe(kbd_ascii_stb), .ascii(kbd_ascii));
 
 // Artist's VRAM (DDR3 at 0x3300_0000), its attribute plane (0x3340_0000) and its display
 wire        vr_req, vr_we, vr_ack, vr_wvalid, vr_wready, vr_rvalid;
@@ -285,7 +332,7 @@ localparam bit DBG_RECORDER = 1'b0;
 hp715 #(.CLK_HZ(64_000_000), .HAS_ARTIST(1'b1), .EE_INIT("rtl/mister/hp715_default.hex"), .DBG_RECORDER(DBG_RECORDER)) hp715
 (
 	.clk(clk_sys), .reset(m_reset), .pclk(clk_pix), .prst(prst_pix),
-	.cfg_model(cfg_model), .cfg_ram_lg(cfg_ram_lg), .sim_cr16_mul(4'd0), .cfg_boot(status[17:15]),
+	.cfg_model(cfg_model), .cfg_ram_lg(cfg_ram_lg), .sim_cr16_mul(4'd0), .cfg_boot(cfg[17:15]),
 	.soft_pwr_n(softoff_cnt == 0), .toc_button(status[6]),
 	.led_latch(leds), .led_strobe(led_strobe), .lasi_pcr(pcr), .audio_l(audio_l), .audio_r(audio_r), .cd_change(img_mounted[3]),
 	.nb_req(nb_req), .nb_we(nb_we), .nb_addr(nb_addr), .nb_wdata(nb_wdata), .nb_ack(nb_ack), .nb_rdata(nb_rdata),
@@ -298,7 +345,7 @@ hp715 #(.CLK_HZ(64_000_000), .HAS_ARTIST(1'b1), .EE_INIT("rtl/mister/hp715_defau
 	.rom_rdata(rom_rdata), .rom_inval(rom_dl),
 	.uart_txd(UART_TXD), .uart_rxd(UART_RXD), .uart_tap_strobe(con_tx), .uart_tap_byte(con_tx_byte),
 	.uart_inj_strobe(kbd_ascii_stb && !con_rx_full), .uart_inj_byte(kbd_ascii), .uart_inj_full(con_rx_full),
-	.ps2_key(ps2_key), .ps2_mouse(ps2_mouse),
+	.ps2_key(kbd_key), .ps2_mouse(ps2_mouse),
 	.img_present(img_present), .img_blocks(img_blocks), .sd_lba(m_lba), .sd_blk_cnt(m_blk_cnt),
 	.sd_rd(m_rd), .sd_wr(m_wr), .sd_ack({sd_ack[3], sd_ack[2], sd_ack[0]}), .sd_buff_addr(sd_buff_addr),
 	.sd_buff_dout(sd_buff_dout), .sd_buff_din(m_buff_din), .sd_buff_wr(sd_buff_wr), .scsi_activity(scsi_act),
@@ -472,7 +519,7 @@ eeprom_save #(.CLK_HZ(64_000_000)) eeprom_save
 // video_mode).
 reg  gfx_seen = 1'b0;
 always @(posedge clk_sys) gfx_seen <= m_reset ? 1'b0 : gfx_seen | gfx_on;
-wire gfx_show = status[11:10] == 2'd2 ? 1'b0 : status[11:10] == 2'd0 ? 1'b1 : gfx_on | gfx_seen;   // 0 Graphics, 1 Auto, 2 serial
+wire gfx_show = cfg[11:10] == 2'd2 ? 1'b0 : cfg[11:10] == 2'd0 ? 1'b1 : gfx_on | gfx_seen;   // 0 Graphics, 1 Auto, 2 serial
 // the clock the shown picture needs (0 = 108.181 MHz, the console's too)
 reg  [2:0] pix_want = 3'd0;
 always @(posedge clk_sys) pix_want <= gfx_show ? gfx_pix_mode : 3'd0;
@@ -588,7 +635,7 @@ serial_term serial_term
 // the shown picture, black while the clock is being retargeted
 reg  show_s1 = 1'b0, show_pix = 1'b0;
 always @(posedge clk_pix) begin show_s1 <= gfx_show; show_pix <= show_s1; end
-wire [2:0] scale_osd = status[125:123];
+wire [2:0] scale_osd = cfg[125:123];
 wire       vid_de;
 video_freak video_freak
 (

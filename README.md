@@ -40,21 +40,33 @@ The files in [`release/`](release/):
 |---|---|---|
 | `HP9K715_20261015.rbf` | `/media/fat/_Unstable/` (or `_Computer/`) | the core, Quartus build 57 (2026-10-15): 64 MHz |
 | `boot0.rom` | `/media/fat/games/HP9K715/` | HP's PDC 1.6 boot ROM for the 715/64, 258,728 bytes ([`roms/README.md`](roms/README.md): HP firmware patch PF_C7X50016, image IMAGE1A's payload). Loaded by the framework at core start; the loader patches one word ([`docs/STUBS.md`](docs/STUBS.md) S-011) |
-| `hp715.eep` | `/media/fat/games/HP9K715/` | the EEPROM image (8 KB, `tools/eeprom/mkrelease.sh`): manufacturing and chassis codes off, **console on the graphics** (monitor type 1, 1280x1024), PS/2 keyboard, primary path scsi.6, autoboot and autosearch on. **The same image is built into the core**, so nothing needs mounting to boot; mount it in the OSD's "Mount EEPROM" slot only to keep the firmware's changes (boot paths, monitor type, `lanaddress`): it is written back, and mounting it resets the machine so the ROM reads it. For the RS-232 console instead: `CONSOLE=rs232 tools/eeprom/mkrelease.sh`, or `path console rs232` at `BOOT_ADMIN>` |
+| `hp715.eep` | `/media/fat/games/HP9K715/` | the EEPROM image (8 KB, `tools/eeprom/mkrelease.sh`): manufacturing and chassis codes off, **console on the graphics** (monitor type 1, 1280x1024), PS/2 keyboard, primary path scsi.6, autoboot and autosearch on. **The same image is built into the core**, so nothing needs mounting to boot; mount it in the OSD's Advanced > "EEPROM image" slot only to keep the firmware's changes (boot paths, monitor type, `lanaddress`): it is written back, and mounting it resets the machine so the ROM reads it. For the RS-232 console instead: `CONSOLE=rs232 tools/eeprom/mkrelease.sh`, or `path console rs232` at `BOOT_ADMIN>` |
 
 Also needed: a disk image in `/media/fat/games/HP9K715/`, mounted in the OSD's
-disk slot (slot 0, SCSI ID 6). RAM: 32 MB by default (HP-UX 10.20 with CDE
+"Pri. disk (ID 6)" slot. RAM: 32 MB by default (HP-UX 10.20 with CDE
 runs in it); 64 MB is recommended for HP-UX 10.20, 128 MB for HP-UX 11i.
 
-**The OSD** (F12; the Right key jumps to the System page, Enter cycles a
-value; "Save settings" on the System page keeps the choices):
+**The OSD** (F12; Enter opens a submenu or cycles a value, Left goes back;
+the Right key jumps to MiSTer's System page, where "Save settings" keeps
+the choices). It follows the [OSD standard](docs/osd-standard.md) for the
+computer cores: **settings wait for the next reset**. Change them, then
+press **Apply and reset**; "Changes pending" shows above it until you do.
+Disks, Load ROM, Network interface, Input and the buttons act at once.
 
-| option | values | notes |
-|---|---|---|
-| Boot mode (on reset) | **Normal**, BOOT_ADMIN, ISL, Single-user, LVM maintenance, Network, CD/DVD | what the core does after every reset until it is changed back: Normal lets the ROM autoboot; the others stop the autoboot (ESC) and, from `BOOT_ADMIN>`, type `boot pri isl` (then `hpux -is` / `hpux -lm` at `ISL>`), `boot lan` or `boot scsi.2` for you. It works on the graphics console and on RS-232 |
-| Model, RAM | 715/64; **32MB**, 64MB, 128MB, 16MB | on reset; the RAM is clipped to the SDRAM module |
-| Display | **Graphics**, Auto, Serial console | Graphics shows Artist's picture always; Auto shows the RS-232 console until Artist's video first comes on; Serial console shows the RS-232 console |
-| Network | eth0, Off, eth1, macvlan, tap0 | the 82596's bridge (needs the custom Main) |
+| page | row | values | notes |
+|---|---|---|---|
+| main | Pri. disk (ID 6) | a disk image | the disk the 715 boots from by default (the EEPROM's primary path, `scsi.6`; a path set at `BOOT_ADMIN>` can point elsewhere) |
+| main | Disk (ID 5), CD-ROM (ID 2) | disk image, ISO | |
+| main | Load ROM | a .rom file | another boot ROM for this session only; a core start loads `boot0.rom`. An MGL can name one (`<file type="f" index="0" path="..."/>`) |
+| main | Memory | **32MB**, 64MB, 128MB, 16MB | clipped to the SDRAM module |
+| main | Network interface | **eth0**, None, eth1, macvlan, tap0 | the 82596's bridge (needs the custom Main); None leaves the built-in LAN without a cable |
+| Machine | Model | **715/64**, 715/80, 715/100 | |
+| Machine | TOC (front panel), Soft power off | buttons | TOC: HP-UX dumps and reboots; soft power off: the power button held 2 s, HP-UX shuts down |
+| Video | Display | **Graphics**, Auto, Serial console | Graphics shows Artist's picture always; Auto shows the RS-232 console until Artist's video first comes on; Serial console shows the RS-232 console |
+| Video | Aspect ratio, Scale | **Original**; **V-Integer** | |
+| Input | Swap Alt/Win keys | **No**, Yes | Yes swaps the left and right Alt and Windows keys (for a Mac keyboard) |
+| Advanced | Boot mode | **Normal**, BOOT_ADMIN, ISL, Single-user, LVM maint., Network, CD/DVD | what the core does after every reset until it is changed back: Normal lets the ROM autoboot; the others stop the autoboot (ESC) and, from `BOOT_ADMIN>`, type `boot pri isl` (then `hpux -is` / `hpux -lm` at `ISL>`), `boot lan` or `boot scsi.2` for you. It works on the graphics console and on RS-232 |
+| Advanced | EEPROM image | an .eep file | the firmware's saved settings; empty: the built-in image (below) |
 
 Saved configs from before 2026-10-14 (build 49) read differently: the RAM
 and Display values moved so the defaults come first (the old 16 MB is now
