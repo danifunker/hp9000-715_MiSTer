@@ -80,7 +80,12 @@ def setpath(b, path):
     paths = pv_paths(b)
     if len(paths) != 1:
         sys.exit("expected one PV in the table, found %d" % len(paths))
-    words = [len(el)] + el + [0]
+    # keep the table's own layout: a 0 count after the last path only if the
+    # original has one (tenox's 10.20 table does; an 11.11 install's does not,
+    # 2026-10-18)
+    old_n = struct.unpack(">I", b[PV_LEN_AT:PV_LEN_AT + 4])[0]
+    term = old_n > 4 * (1 + len(paths[0]))
+    words = [len(el)] + el + ([0] if term else [])
     n = 4 * len(words)
     if n > 0x100:
         sys.exit("path too long")

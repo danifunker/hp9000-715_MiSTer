@@ -88,3 +88,16 @@ The root volume runs to the last block, so the image cannot be trimmed: on
 the MiSTer it needs 4 GiB on an **exFAT** SD card (FAT32's limit is 4 GiB - 1
 byte). Use `--snapshot` in romsim to keep the image pristine (writes stay in
 memory).
+
+**HP-UX 11.11 (`hpux1111.img`, the TCOE 12/2004 install, 2026-10-14) moved
+from SCSI ID 5 to ID 6** (2026-10-18), so it boots from the OSD's "Pri.
+disk (ID 6)" slot with the shipped EEPROM: the LVM boot record rewritten
+offline (`lvmbdra.py setpath IMG 2/0/1.6.0`; the original 8 KB kept next to
+the image as `hpux1111.bdra-id5.bin`), then from a single-user boot at ID 6
+`mv /etc/lvmtab /etc/lvmtab.id5; vgscan -v; lvlnboot -R /dev/vg00`
+(`lvlnboot -v vg00`: boot, root, swap and dump on `/dev/dsk/c0t6d0`,
+2/0/1.6.0). Also on that image: hostname `hp715mi` (`netconf`; DHCP from the
+router gives the address but no name), `/etc/hosts` `192.168.99.151 hp715mi
+mrss1`, and `/etc/nsswitch.conf` with `hosts: files dns` (without it the
+router's DNS answered for the host's own name first and CDE's messaging
+failed).

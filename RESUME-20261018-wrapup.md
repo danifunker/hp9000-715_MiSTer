@@ -45,7 +45,11 @@ No new fit was made for the release.
    - A hang in 11.11: before calling it a hang, check whether the mouse
      wakes X's screen saver (Artist goes black), whether the machine
      answers ping or telnet, and what the serial console shows.
-2. **Done in build 65** (the fetch cut, every clock met). Was: close build 57's last 0.009 ns (CPU stream, needs the user's
+2. **OSD Boot mode failed on the board with build 65** (2026-10-18; STUBS
+   S-029): graphics console, valid primary path, Single-user applied, the
+   ROM autobooted anyway. Trace it in romsim with the graphics-console
+   EEPROM (as build 49 did); suspect the A6 ps2_dev rework first.
+3. **Done in build 65** (the fetch cut, every clock met). Was: close build 57's last 0.009 ns (CPU stream, needs the user's
    go-ahead): `RESUME-20261015-dual-issue.md` step 1, `docs/design/cpu-timing.md`.
    Seeds 1-3 of the same RTL gave -0.357 / -0.357 / worse.
 3. **Installs are I/O-bound** (the SCSI target / hps_io path; TCOE fileset
