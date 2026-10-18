@@ -8,7 +8,7 @@
 //     LBA[23:0]}, the lead-out (track 0xAA) last;
 //   block 0x80000000 + 5f: disc frame f, 2352 bytes of 44.1 kHz 16-bit
 //     stereo samples (little-endian, left first) then 208 zero bytes.
-// The engine copies the table into toc (port A, a byte at a time) and READ
+// The engine copies the table into toc (port A) and READ
 // TOC reads it back there. The player fetches a frame at a time into one of
 // two banks (fr_*: the engine's sd port, a 5-block transfer whose halfwords
 // arrive on fb_*),
@@ -23,12 +23,10 @@ module cd_audio #(
 ) (
     input  logic        clk,
     input  logic        rst,
-    // the track table: port A (written a byte at a time while copying, read
-    // for READ TOC)
+    // the track table: port A (written while copying, read for READ TOC)
     input  logic        toc_we,
     input  logic [6:0]  toc_a,
-    input  logic [2:0]  toc_wb,             // byte of the entry, 0 = bits 63:56
-    input  logic [7:0]  toc_wd,
+    input  logic [63:0] toc_wd,
     output logic [63:0] toc_q,              // entry toc_a, a clock later
     input  logic [7:0]  toc_first,          // first track, number of tracks
     input  logic [7:0]  toc_n,
@@ -56,11 +54,13 @@ module cd_audio #(
     output logic signed [15:0] out_l, out_r
 );
     // ------------------------------------------------------------ the track table
-    logic [7:0][7:0] toc [128];
+    // whole-entry writes: byte-enabled writes with the second read port
+    // (tb_q) crash Quartus 17's RAM inference (2026-10-18)
+    logic [63:0] toc [128];
     logic [6:0]  tb_a;
     logic [63:0] tb_q;
     always_ff @(posedge clk) begin
-        if (toc_we) toc[toc_a][3'd7 - toc_wb] <= toc_wd;
+        if (toc_we) toc[toc_a] <= toc_wd;
         toc_q <= toc[toc_a];
     end
     always_ff @(posedge clk) tb_q <= toc[tb_a];

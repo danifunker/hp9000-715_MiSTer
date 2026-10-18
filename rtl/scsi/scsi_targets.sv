@@ -134,9 +134,7 @@ module scsi_targets #(
     // ------------------------------------------------------------ CD audio
     logic        toc_ok, toc_we;
     logic [6:0]  toc_a, toc_a_r;
-    logic [2:0]  toc_wb;                 // the table copy writes a byte at a time
-    logic [7:0]  toc_wd;
-    logic [63:0] toc_q;
+    logic [63:0] toc_wd, toc_q;
     logic [7:0]  toc_first, toc_n;
     logic [10:0] cp_b;                   // the table copy: byte, sub-step
     logic [1:0]  cp_s;
@@ -160,7 +158,7 @@ module scsi_targets #(
 
     cd_audio u_cda (
         .clk(clk), .rst(rst),
-        .toc_we(toc_we), .toc_a(toc_a), .toc_wb(toc_wb), .toc_wd(toc_wd), .toc_q(toc_q), .toc_first(toc_first), .toc_n(toc_n),
+        .toc_we(toc_we), .toc_a(toc_a), .toc_wd(toc_wd), .toc_q(toc_q), .toc_first(toc_first), .toc_n(toc_n),
         .play(a_play), .p_start(a_start), .p_end(a_end), .pause(a_pause), .resume(a_resume), .stop(a_stop),
         .a_status(a_status), .status_read(a_stread), .q_ctl(q_ctl), .q_track(q_track),
         .q_abs_lba(q_abs_lba), .q_rel_lba(q_rel_lba), .q_abs_msf(q_abs_msf), .q_rel_msf(q_rel_msf),
@@ -694,8 +692,8 @@ module scsi_targets #(
                         if (cp_b == 11'd0) toc_first <= b_q;
                         else if (cp_b == 11'd1) toc_n <= b_q > 8'd99 ? 8'd99 : b_q;
                         else if (cp_b >= 11'd8) begin
-                            // straight into the entry, a byte at a time
-                            toc_we <= 1'b1; toc_a_r <= 7'((cp_b - 11'd8) >> 3); toc_wb <= cp_b[2:0]; toc_wd <= b_q;
+                            toc_wd[8 * (7 - cp_b[2:0]) +: 8] <= b_q;
+                            if (cp_b[2:0] == 3'd7) begin toc_we <= 1'b1; toc_a_r <= 7'((cp_b - 11'd8) >> 3); end
                         end
                         if ((cp_b == 11'd1 && b_q == 8'd0) || last_e) cp_s <= 2'd3;
                         else begin cp_b <= cp_b == 11'd1 ? 11'd8 : cp_b + 11'd1; cp_s <= 2'd0; end
