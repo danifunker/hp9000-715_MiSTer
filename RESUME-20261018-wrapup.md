@@ -12,8 +12,9 @@ and never start a flow next to another one.
 
 ## What was released
 
-On 2026-10-18 the core was wrapped up with **build 57** (2026-10-15, the
-performance core) as the release, unchanged: `release/HP9K715_20261015.rbf`,
+On 2026-10-18 the core was wrapped up with **build 65** as the release
+(the OSD standard, area trims, the fetch timing cut; every clock met; it
+replaced build 57): `release/HP9K715_20261018.rbf`,
 `boot0.rom` (HP's PDC 1.6; the user chose to keep it in the public repo),
 `hp715.eep` and `MiSTer` (Main_MiSTer `hp9k-family` at `12b0f43`, built
 2026-10-14). The release notes and known limitations are in the root README.
@@ -44,7 +45,7 @@ No new fit was made for the release.
    - A hang in 11.11: before calling it a hang, check whether the mouse
      wakes X's screen saver (Artist goes black), whether the machine
      answers ping or telnet, and what the serial console shows.
-2. **Close build 57's last 0.009 ns** (CPU stream, needs the user's
+2. **Done in build 65** (the fetch cut, every clock met). Was: close build 57's last 0.009 ns (CPU stream, needs the user's
    go-ahead): `RESUME-20261015-dual-issue.md` step 1, `docs/design/cpu-timing.md`.
    Seeds 1-3 of the same RTL gave -0.357 / -0.357 / worse.
 3. **Installs are I/O-bound** (the SCSI target / hps_io path; TCOE fileset

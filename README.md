@@ -6,7 +6,7 @@ PA-7100LC CPU, the LASI I/O chip (SCSI, Ethernet, serial, parallel, PS/2,
 audio) and the built-in 8-plane Artist graphics, with the aim of running
 HP's own boot ROM and HP-UX.
 
-**Status (build 57, 2026-10-15, alpha):** HP's boot ROM passes its self-tests, boots
+**Status (build 65, 2026-10-18, alpha):** HP's boot ROM passes its self-tests, boots
 from SCSI, and **HP-UX 10.20 boots to the CDE desktop on the MiSTer** with the
 built-in Artist graphics at 1280x1024: the boot console, the X login and CDE
 (windows, menus, proportional and terminal fonts, xclock, oclock, private
@@ -14,6 +14,25 @@ colour maps), PS/2 keyboard and mouse with the hardware cursor (tried at 32 and
 64 MB). The RS-232 console is still there (on the MiSTer's screen when the OSD
 "Display" says so). Design notes are in [`docs/design/`](docs/design/), the
 build log in [`docs/design/system.md`](docs/design/system.md) section 10.
+
+**Build 65 (2026-10-18)** over build 57:
+- **A new OSD, laid out to the [standard](docs/osd-standard.md) for the
+  computer cores.** The main screen holds the disks, Load ROM, Memory and
+  Network interface; the rest is in the Machine, Video, Input and Advanced
+  submenus. Settings now wait for **Apply and reset**, and a "Changes
+  pending" line shows until you press it.
+- **New rows:** Load ROM, to boot another ROM for one session (an MGL file
+  can name it), and Input > Swap Alt/Win keys, for Mac keyboards.
+- **Development rows gone:** SDRAM read capture (fixed at the edge that
+  works) and EEPROM (no image) Blank.
+- **Every clock meets timing**, the 64 MHz core with 0.31 ns to spare (build
+  57 missed by 0.009 ns). The core is about 1,200 ALMs smaller (85 % full)
+  from area trims in the keyboard/mouse model, the 82596, the SCSI targets,
+  Artist and the MIOC. A CPU path from the branch-target adder into the
+  I-cache address was cut, without costing cycles.
+- On the board (a SuperStation One), from the MiSTer menu: HP's boot ROM
+  passes its self-tests, and HP-UX 11.11 boots to the CDE desktop and runs
+  it (terminal, editor, menus, dialogs, workspaces, help).
 
 **Build 57 (2026-10-15)** over build 53: the faster CPU -- a D-cache miss
 no longer replays the instruction, a predicted branch costs one bubble, not
@@ -38,7 +57,7 @@ The files in [`release/`](release/):
 
 | file | goes to | what |
 |---|---|---|
-| `HP9K715_20261015.rbf` | `/media/fat/_Unstable/` (or `_Computer/`) | the core, Quartus build 57 (2026-10-15): 64 MHz |
+| `HP9K715_20261018.rbf` | `/media/fat/_Unstable/` (or `_Computer/`) | the core, Quartus build 65 (2026-10-18): 64 MHz |
 | `boot0.rom` | `/media/fat/games/HP9K715/` | HP's PDC 1.6 boot ROM for the 715/64, 258,728 bytes ([`roms/README.md`](roms/README.md): HP firmware patch PF_C7X50016, image IMAGE1A's payload). Loaded by the framework at core start; the loader patches one word ([`docs/STUBS.md`](docs/STUBS.md) S-011) |
 | `hp715.eep` | `/media/fat/games/HP9K715/` | the EEPROM image (8 KB, `tools/eeprom/mkrelease.sh`): manufacturing and chassis codes off, **console on the graphics** (monitor type 1, 1280x1024), PS/2 keyboard, primary path scsi.6, autoboot and autosearch on. **The same image is built into the core**, so nothing needs mounting to boot; mount it in the OSD's Advanced > "EEPROM image" slot only to keep the firmware's changes (boot paths, monitor type, `lanaddress`): it is written back, and mounting it resets the machine so the ROM reads it. For the RS-232 console instead: `CONSOLE=rs232 tools/eeprom/mkrelease.sh`, or `path console rs232` at `BOOT_ADMIN>` |
 
@@ -114,9 +133,11 @@ Known limitations of this build:
 - **Tested on one board** (a SuperStation One with its SDRAM). On a second
   board (a MiSTer Pi) the core did not work properly and HP-UX 11.11 hung
   once; the cause is not known. The SDRAM read timing was tuned on the first
-  board only ([`docs/STUBS.md`](docs/STUBS.md) S-019), and build 57 misses
-  the 64 MHz timing target by 0.009 ns on one CPU path in Quartus's slow
-  corner (100 C) -- both could differ from board to board.
+  board only ([`docs/STUBS.md`](docs/STUBS.md) S-019) and could differ from
+  board to board; build 65 meets timing on every clock.
+- OSD "Boot mode" cannot stop an auto-search boot: with no disk at ID 6 the
+  boot ROM boots another disk without the countdown the sequencer waits for
+  (STUBS S-029).
 - The CPU issues one instruction a clock (the real PA-7100LC can pair two),
   so it is somewhat slower than a 715/64.
 - An HP-UX install from CD/DVD is slow (about 2 hours for a third of the

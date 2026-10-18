@@ -54,8 +54,9 @@ recorder's one-shot/trigger/flow captures found the 11i installer's stalls:
 interrupt lands two instructions after the branch (`itool`'s scanner returns
 into itself). **Fixed 2026-10-14 (`5cda517`, build 52)**: not the interrupt but the kernel's `rfi` into a *nullified* `b,l,n` whose IIAOQ back is its own target -- the target was fetched twice and the second copy ran as the first's delay slot (`pa_fetch` keeps only the oldest instruction at the slot's address; the `link` suite's RAM groups reproduce it; cputest 13/13, cosim 8/8); the 11i installer passes its first step on the board. **Builds 53-57 (2026-10-14/15)**: the
 OSD boot helpers, then the performance core (build 57, -17 % cycles, core
-clock -0.009 ns). **2026-10-18: the core is wrapped up and released with
-build 57 as is** (`release/`, root README); the only board it was tested on is .92
+clock -0.009 ns). **2026-10-18: the core is wrapped up and released as
+build 65** (`release/`, root README: the OSD to `docs/osd-standard.md`, area
+trims, a CPU fetch timing cut; every clock met, 35.5k ALMs); the only board it was tested on is .92
 (SuperStation One), and on the user's second board (.143, a MiSTer Pi) the
 core misbehaved and 11.11 hung, cause unknown. **Next:
 `RESUME-20261018-wrapup.md`** (the second board, the last 0.009 ns, I/O,
