@@ -200,6 +200,11 @@ module mioc
         return r;
     endfunction
 
+    // the check byte of the doubleword in ram_wdata: the one ECC encoder,
+    // for both writers (S_LWPT, where ram_wdata walks through the line's
+    // four doublewords, and S_IRAMWR, where it holds the merged one)
+    wire  [7:0]  w_ecc = ecc_of(ram_wdata);
+
     // ------------------------------------------------------- address classes
     typedef enum logic [3:0] { C_MEM, C_ROM, C_XBUS, C_LASI, C_WAX, C_ART, C_CPU, C_MIOC, C_BCAST, C_BE } cls_e;
     function automatic cls_e io_class(input logic [31:0] a);
@@ -228,8 +233,11 @@ module mioc
     logic        l_we;
     logic [31:0] l_addr;
     blk_t        l_blk;
-    logic [63:0] wbuf [4];
-    logic [7:0]  wecc [4];
+    // the line being written back, in a 4 x 64 MLAB with one synchronous
+    // read port (w_ra, a cycle ahead of its use: wq)
+    (* ramstyle = "MLAB, no_rw_check" *) logic [63:0] wbuf [4];
+    logic [63:0] wq;
+    logic [1:0]  w_ra;
     logic [31:0] l_chkw;
     logic [2:0]  cnt;            // beats collected / sent / received
     logic [1:0]  wcnt;           // RAM write beats sent
@@ -246,8 +254,11 @@ module mioc
     logic        u_hi_pending, u_lo_pending;   // GSC words still to do
     logic [21:0] tmo;            // a GSC timeout: 1023 cycles, 4M for Artist (it stalls while drawing)
 
-    // ROM line buffer
-    logic [63:0] rb [4];
+    // ROM line buffer: a 4 x 64 MLAB with one synchronous read port (r_ra,
+    // a cycle ahead of its use: rq)
+    (* ramstyle = "MLAB, no_rw_check" *) logic [63:0] rb [4];
+    logic [63:0] rq;
+    logic [1:0]  r_ra;
     logic [17:5] rb_line;
     logic        rb_valid;
 
@@ -295,6 +306,34 @@ module mioc
     blk_t dec_blk;
     assign dec_blk = blk_decode(st == S_LDEC ? l_addr : u_addr);
 
+    // one poison-table lookup for both readers: the fill's stage 2 (f1_v is
+    // set only by a beat in S_LRRAM, so in its cycle st is S_LRRAM or S_IDLE)
+    // and the uncached read (S_IRAMRD) never coincide
+    pe_t pt_e;
+    assign pt_e = pt_find(f1_v    ? {l_blk.off[27:5], f1_beat} :
+                          u_burst ? {u_blk.off[27:5], ram_rbeat} : u_blk.off[27:3]);
+
+    // the line buffers' read addresses, a cycle before the data is used. wbuf:
+    // the last S_LWCOLL beat reads doubleword 1, S_LWPT's cycle k reads k + 2
+    // (so ram_wdata holds doubleword k in cycle k, and doubleword 0 again on
+    // entering S_LWRAM), S_LWRAM the one after the next beat ram_wready takes.
+    // rb: S_IDLE reads the beat io_addr names (for a hit in S_IDEC), S_IDEC
+    // beat 0 and S_IROMOUT's beat k reads k + 1 (the burst out of the buffer).
+    // No read whose data is used meets a write (wbuf is written only in
+    // S_LWCOLL, rb only in S_IROM)
+    assign w_ra = st == S_LWPT  ? cnt[1:0] + 2'd2 :
+                  st == S_LWRAM ? wcnt + 2'd1 + {1'b0, ram_wready} : 2'd1;
+    assign r_ra = st == S_IDLE    ? io_addr[4:3] :
+                  st == S_IROMOUT ? cnt[1:0] + 2'd1 : 2'd0;
+    always_ff @(posedge clk) begin
+        if (st == S_LWCOLL && mem_wvalid && mem_wready) wbuf[cnt[1:0]] <= mem_wdata;
+        wq <= wbuf[w_ra];
+    end
+    always_ff @(posedge clk) begin
+        if (st == S_IROM && rom_rvalid) rb[cnt[1:0]] <= rom_rdata;
+        rq <= rb[r_ra];
+    end
+
     wire [31:0] u_word = u_addr[2] ? u_wdata[31:0] : u_wdata[63:32];
 
     always_ff @(posedge clk) begin : p_main
@@ -331,7 +370,7 @@ module mioc
                 pe_t        e;
                 logic [63:0] d;
                 logic [31:0] pa;
-                e  = pt_find({l_blk.off[27:5], f1_beat});
+                e  = pt_e;
                 d  = f1_data;
                 pa = {l_addr[31:5], f1_beat, 3'd0};
                 if (ecc_on && e.v) begin
@@ -380,20 +419,20 @@ module mioc
                 cnt <= 3'd0;
             end
             S_LWCOLL: if (mem_wvalid && mem_wready) begin
-                wbuf[cnt[1:0]] <= mem_wdata;
-                wecc[cnt[1:0]] <= ecc_of(mem_wdata);
+                if (cnt == 3'd0) ram_wdata <= mem_wdata;     // S_LWPT starts on doubleword 0
                 cnt <= cnt + 3'd1;
                 if (cnt == 3'd3) begin mem_wready <= 1'b0; st <= S_LWPT; cnt <= 3'd0; end
             end
             S_LWPT: begin
                 // the check byte each doubleword is stored with, and its poison entry
                 logic [7:0] stored;
-                stored = ecc_on ? wecc[cnt[1:0]] : r_wrt_chk[31 - 8*cnt[1:0] -: 8];
+                stored = ecc_on ? w_ecc : r_wrt_chk[31 - 8*cnt[1:0] -: 8];
                 l_chkw[31 - 8*cnt[1:0] -: 8] <= stored;
                 if (l_blk.bank) begin
                     pw_en <= 1'b1; pw_dw <= {l_blk.off[27:5], cnt[1:0]};
-                    pw_stored <= stored; pw_ecc <= wecc[cnt[1:0]];
+                    pw_stored <= stored; pw_ecc <= w_ecc;
                 end
+                ram_wdata <= wq;             // doubleword cnt + 1; 0 after the last
                 cnt <= cnt + 3'd1;
                 if (cnt == 3'd3) begin
                     cnt <= 3'd0; wcnt <= 2'd0;
@@ -405,7 +444,7 @@ module mioc
                     else begin
                         st <= S_LWRAM;
                         ram_req <= 1'b1; ram_we <= 1'b1; ram_line <= 1'b1; ram_be <= 8'hFF;
-                        ram_addr <= {l_blk.off[27:5], 5'd0}; ram_wdata <= wbuf[0];
+                        ram_addr <= {l_blk.off[27:5], 5'd0};
                     end
                 end
             end
@@ -413,7 +452,7 @@ module mioc
                 if (ram_ack) ram_req <= 1'b0;
                 if (ram_wready) begin
                     wcnt <= wcnt + 2'd1;
-                    ram_wdata <= wbuf[wcnt + 2'd1];
+                    ram_wdata <= wq;             // doubleword wcnt + 1
                     if (wcnt == 2'd3) begin
                         st <= S_LWCHK;
                         chk_req <= 1'b1; chk_we <= 1'b1; chk_addr <= l_blk.off[27:5];
@@ -476,7 +515,7 @@ module mioc
                     C_ROM:  begin
                         if (u_we) st <= S_IRESP;       // flash writes are dropped
                         else if (rb_valid && rb_line == u_addr[17:5] && !u_burst) begin
-                            u_rdata <= rb[u_addr[4:3]]; st <= S_IRESP;
+                            u_rdata <= rq; st <= S_IRESP;           // read in S_IDLE at io_addr
                         end else if (rb_valid && rb_line == u_addr[17:5]) st <= S_IROMOUT;
                         else begin
                             st <= S_IROM; rom_req <= 1'b1; rom_addr <= u_addr[17:5]; rb_valid <= 1'b0;
@@ -558,7 +597,7 @@ module mioc
                     if (ram_rvalid) begin
                         pe_t e;
                         logic [63:0] d;
-                        e = pt_find(u_burst ? {u_blk.off[27:5], ram_rbeat} : u_blk.off[27:3]);
+                        e = pt_e;
                         d = ram_rdata;
                         if (ecc_on && e.v && e.cls == 2'd2) d[63 - e.bitn] = ~d[63 - e.bitn];
                         if (ecc_on && e.v) st_set[e.cls == 2'd3 ? 5 : 6] = 1'b1;
@@ -580,25 +619,26 @@ module mioc
             end
             S_IMERGE: begin
                 logic [63:0] m;
-                logic [7:0]  stored, e8;
                 m = u_rdata;
                 if (u_rclr) begin
                     if (u_addr[2]) m[31:0] = 32'd0; else m[63:32] = 32'd0;
                 end else
                     for (int b = 0; b < 8; b++) if (u_be[b]) m[8*b +: 8] = u_wdata[8*b +: 8];
-                e8 = ecc_of(m);
-                stored = ecc_on ? e8 : r_wrt_chk[31 - 8*u_blk.off[4:3] -: 8];
-                pw_en <= 1'b1; pw_dw <= u_blk.off[27:3]; pw_stored <= stored; pw_ecc <= e8;
                 ram_req <= 1'b1; ram_we <= 1'b1; ram_line <= 1'b0; ram_be <= 8'hFF;
                 ram_addr <= {u_blk.off[27:3], 3'd0}; ram_wdata <= m;
                 chk_addr <= u_blk.off[27:5]; chk_be <= 4'b1000 >> u_blk.off[4:3];
-                chk_wdata <= {4{stored}};
                 st <= S_IRAMWR;
             end
             S_IRAMWR: begin
+                // the check byte from ram_wdata (= m until the beat is taken);
+                // the poison entry before the response, as ever
+                logic [7:0] stored;
+                stored = ecc_on ? w_ecc : r_wrt_chk[31 - 8*u_blk.off[4:3] -: 8];
                 if (ram_ack) ram_req <= 1'b0;
                 if (ram_wready) begin
                     st <= S_ICHKWR; chk_req <= 1'b1; chk_we <= 1'b1;
+                    chk_wdata <= {4{stored}};
+                    pw_en <= 1'b1; pw_dw <= u_blk.off[27:3]; pw_stored <= stored; pw_ecc <= w_ecc;
                 end
             end
             S_ICHKWR: if (chk_ack) begin chk_req <= 1'b0; st <= S_IRESP; end
@@ -614,7 +654,6 @@ module mioc
             S_IROM: begin
                 if (rom_ack) rom_req <= 1'b0;
                 if (rom_rvalid) begin
-                    rb[cnt[1:0]] <= rom_rdata;
                     if (u_burst) begin
                         io_ack <= 1'b1; io_rdata <= rom_rdata; io_last <= cnt == 3'd3;
                     end else if (cnt[1:0] == u_addr[4:3]) u_rdata <= rom_rdata;
@@ -626,7 +665,7 @@ module mioc
                 end
             end
             S_IROMOUT: begin
-                io_ack <= 1'b1; io_rdata <= rb[cnt[1:0]]; io_last <= cnt == 3'd3;
+                io_ack <= 1'b1; io_rdata <= rq; io_last <= cnt == 3'd3;
                 cnt <= cnt + 3'd1;
                 if (cnt == 3'd3) st <= S_IGAP;
             end
