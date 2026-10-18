@@ -93,43 +93,46 @@ module i82596 (
         S_RXP1, S_RXP2, S_RXP3, S_RXP4,
         S_RX0, S_RX1, S_RX2, S_RX3, S_RX4, S_RX5, S_RX9, S_RX10, S_RX11, S_RX12, S_RX13,
         S_RB0, S_RB2, S_RB3, S_RB4, S_RB5, S_RB6,
-        S_GATHER, S_GATH2, S_SAI, S_SCAT, S_SCAT2, S_SCAT3
+        S_GATHER, S_GATH2, S_SAI, S_SCAT, S_SCAT2, S_SCAT3, S_CADR
     } st_e;
     st_e st, ret, nret, cret, rxret;
 
-    // a memory doubleword at m_base + m_off (one adder for every access):
-    // m_kind 0 read (the last doubleword read stays in m_dw, c_tag/c_tv: a
-    // read of it is free), 1 a halfword m_v, 2 a pointer m_v, 3 the staging
-    // doubleword sg_dw/sg_be. Fields come out at the address read: f8/f16/f32.
+    // a memory doubleword at m_base + m_off (one adder for every access, and
+    // for the copies' start addresses, S_CADR): m_kind 0 read (the last
+    // doubleword read stays in m_dw, c_tag/c_tv: a read of it is free), 1 a
+    // halfword m_v (held twice), 2 a pointer m_v, 3 the staging doubleword
+    // sg_dw/sg_be. Fields come out at the address read: f8/f16/f32.
     logic [31:0] m_base, m_a, m_v;
     logic [4:0]  m_off;
     logic [1:0]  m_kind;
-    logic [7:0]  m_be;
-    logic [63:0] m_wd, m_dw;
-    logic [28:0] c_tag, sg_tag;
+    logic [63:0] m_dw;
+    logic [28:0] c_tag;
     logic        c_tv;
     logic [63:0] sg_dw;
     logic [7:0]  sg_be;
+    wire  [31:0] m_sum = m_base + {27'd0, m_off};
     assign dma_we = m_kind != 2'd0;
     assign dma_addr = {m_a[31:3], 3'd0};
-    assign dma_be = m_be;
-    assign dma_wdata = m_wd;
+    // the lanes and data from the held request (a read's are don't-care)
+    assign dma_be = m_kind == 2'd3 ? sg_be : m_kind == 2'd2 ? (m_a[2] ? 8'h0F : 8'hF0) : 8'hC0 >> {m_a[2:1], 1'b0};
+    assign dma_wdata = m_kind == 2'd3 ? sg_dw : {2{m_v[15:0], m_v[31:16]}};
     wire [7:0]  f8  = m_dw[63 - 8 * m_a[2:0] -: 8];
     wire [15:0] f16 = m_dw[63 - 16 * m_a[2:1] -: 16];
     wire [31:0] f32 = m_a[2] ? {m_dw[15:0], m_dw[31:16]} : {m_dw[47:32], m_dw[63:48]};
-    // a mailbox word
+    // a mailbox word: n_d the word written, then the word read (every access
+    // loads it; nothing uses a write's)
     logic [12:0] n_a;
     logic        n_we;
-    logic [63:0] n_wd, n_rd;
+    logic [63:0] n_d;
     assign nb_addr = n_a;
     assign nb_we = n_we;
-    assign nb_wdata = n_wd;
+    assign nb_wdata = n_d;
 
     task automatic rd(input logic [31:0] b, input logic [4:0] o, input st_e r);
         m_base <= b; m_off <= o; m_kind <= 2'd0; ret <= r; st <= S_MEM0;
     endtask
     task automatic wr16(input logic [31:0] b, input logic [4:0] o, input logic [15:0] v, input st_e r);
-        m_base <= b; m_off <= o; m_kind <= 2'd1; m_v <= {16'd0, v}; ret <= r; st <= S_MEM0;
+        m_base <= b; m_off <= o; m_kind <= 2'd1; m_v <= {v, v}; ret <= r; st <= S_MEM0;
     endtask
     task automatic wr32(input logic [31:0] b, input logic [4:0] o, input logic [31:0] v, input st_e r);
         m_base <= b; m_off <= o; m_kind <= 2'd2; m_v <= v; ret <= r; st <= S_MEM0;
@@ -138,7 +141,11 @@ module i82596 (
         m_base <= {t, 3'd0}; m_off <= 5'd0; m_kind <= 2'd3; ret <= r; st <= S_MEM0;
     endtask
     task automatic nb(input logic [12:0] a, input logic w, input logic [63:0] v, input st_e r);
-        n_a <= a; n_we <= w; n_wd <= v; nret <= r; st <= S_NB;
+        n_a <= a; n_we <= w; n_d <= v; nret <= r; st <= S_NB;
+    endtask
+    // c_a <= b + o through the memory adder, then r
+    task automatic cadr(input logic [31:0] b, input logic [4:0] o, input st_e r);
+        m_base <= b; m_off <= o; ret <= r; st <= S_CADR;
     endtask
 
     // registers
@@ -149,7 +156,7 @@ module i82596 (
     localparam logic [2:0] CU_IDLE = 3'd0, CU_SUSP = 3'd1, CU_ACT = 3'd2;
     localparam logic [3:0] RU_IDLE = 4'd0, RU_SUSP = 4'd1, RU_NORES = 4'd2, RU_READY = 4'd4;
     logic        inited;
-    logic [31:0] scp, iscp, scb;
+    logic [31:0] scp, scb;
     logic [3:0]  ev, pub_ev;            // CX FR CNA RNR: pending, and as last written to the SCB
     logic        irq_gap;
     logic [2:0]  cus;
@@ -179,7 +186,7 @@ module i82596 (
     logic [31:0] c_a;
     logic [13:0] c_n, sc_n;
     logic [2:0]  bk;
-    logic [31:0] tick = 32'd0;
+    logic [15:0] tick = 16'd0;           // the mailbox generation
 
     wire accept = rx_loop || prm || da_me || (da_bc && !bc_dis) || (da_mc && !da_bc);
     wire done   = fb_pos == fb_len;
@@ -195,7 +202,7 @@ module i82596 (
         fb_we <= 1'b0;
         irq_gap <= 1'b0;
         dbg_valid <= 1'b0;
-        tick <= tick + 32'd1;
+        tick <= tick + 16'd1;
         if (rst || (rst_lan && !dma_req && !nb_req)) begin
             st <= S_BOOT; bk <= 3'd0; dma_req <= 1'b0; nb_req <= 1'b0;
             port_half <= 1'b0; port_pend <= 1'b0; ca_pend <= 1'b0; hrst_pend <= 1'b0;
@@ -218,18 +225,7 @@ module i82596 (
 
             case (st)
                 // ---- a doubleword at m_base + m_off, then ret
-                S_MEM0: begin
-                    logic [31:0] a;
-                    a = m_base + {27'd0, m_off};
-                    m_a <= a;
-                    case (m_kind)
-                        2'd1: begin m_be <= 8'hC0 >> {a[2:1], 1'b0}; m_wd <= {4{m_v[15:0]}}; end
-                        2'd2: begin m_be <= a[2] ? 8'h0F : 8'hF0; m_wd <= {2{m_v[15:0], m_v[31:16]}}; end
-                        2'd3: begin m_be <= sg_be; m_wd <= sg_dw; sg_be <= 8'd0; end
-                        default: ;
-                    endcase
-                    st <= S_MEM;
-                end
+                S_MEM0: begin m_a <= m_sum; st <= S_MEM; end
                 S_MEM: if (!dma_req) begin
                     if (m_kind == 2'd0 && c_tv && c_tag == m_a[31:3]) st <= ret;
                     else dma_req <= 1'b1;
@@ -237,10 +233,13 @@ module i82596 (
                     dma_req <= 1'b0; st <= ret;
                     if (m_kind == 2'd0) begin m_dw <= dma_rdata; c_tag <= m_a[31:3]; c_tv <= 1'b1; end
                     else if (c_tag == m_a[31:3]) c_tv <= 1'b0;
+                    if (m_kind == 2'd3) sg_be <= 8'd0;                       // the staging doubleword taken
                 end
+                // ---- a copy's start address, then ret
+                S_CADR: begin c_a <= m_sum; st <= ret; end
                 // ---- a mailbox word, then nret
                 S_NB: if (!nb_req) nb_req <= 1'b1;
-                else if (nb_ack) begin nb_req <= 1'b0; n_rd <= nb_rdata; st <= nret; end
+                else if (nb_ack) begin nb_req <= 1'b0; n_d <= nb_rdata; st <= nret; end
 
                 // ---- the mailbox at start-up: the magic off, all four ring pointers zero (Main's
                 // sun_enet expects that of a new generation), the magic last
@@ -254,7 +253,7 @@ module i82596 (
                         3'd3: nb(NB_RXW, 1'b1, 64'd0, S_BOOT);
                         3'd4: nb(NB_RXR, 1'b1, 64'd0, S_BOOT);
                         3'd5: nb(NB_MAC, 1'b1, 64'd0, S_BOOT);
-                        3'd6: nb(NB_GEN, 1'b1, {32'd0, tick}, S_BOOT);
+                        3'd6: nb(NB_GEN, 1'b1, {48'd0, tick}, S_BOOT);
                         default: nb(NB_MAGIC, 1'b1, MAGIC, S_IDLE);
                     endcase
                 end
@@ -293,8 +292,8 @@ module i82596 (
                 end
 
                 // ---- initialisation: SCP -> ISCP -> SCB, the busy word cleared, CX|CNA
-                S_INIT1: begin iscp <= f32; rd(f32, 5'd4, S_INIT2); end
-                S_INIT2: begin scb <= f32; wr32(iscp, 5'd0, 32'd0, S_INIT3); end
+                S_INIT1: rd(f32, 5'd4, S_INIT2);
+                S_INIT2: begin scb <= f32; wr32(m_base, 5'd0, 32'd0, S_INIT3); end    // m_base: the ISCP
                 S_INIT3: begin inited <= 1'b1; cus <= CU_IDLE; rus <= RU_IDLE; ev <= 4'b1010; st <= S_STAT; end
 
                 // ---- a channel attention: the SCB command; the status written, then the command cleared
@@ -386,9 +385,9 @@ module i82596 (
                 // ---- transmit: +8 TBD, +12 count (EOF), +16 the TCB's data; flexible: the TBDs
                 S_TX1: begin tbd <= f32; rd(cb, 5'd12, S_TX2); end
                 S_TX2: begin
-                    fb_len <= 11'd0; c_a <= m_a + 32'd4; c_n <= f16[13:0];
+                    fb_len <= 11'd0; c_n <= f16[13:0];
                     tx_flex <= cb_cmd[3] && !f16[15];
-                    cret <= S_TX3; st <= S_GATHER;
+                    cret <= S_TX3; cadr(cb, 5'd16, S_GATHER);
                 end
                 S_TX3: if (!tx_flex || tbd == NUL) st <= S_TXSEND;
                        else rd(tbd, 5'd0, S_TX4);
@@ -411,14 +410,14 @@ module i82596 (
                     end else begin tx_wait <= 16'd0; nb(NB_TXR, 1'b0, 64'd0, S_TXO1); end
                 end
                 // a free slot (Main takes them; a ring full for ~1 ms drops the frame)
-                S_TXO1: if (txw - n_rd[31:0] < 32'd8) begin
+                S_TXO1: if (txw - n_d[31:0] < 32'd8) begin
                     slot <= NB_TX + {2'd0, txw[2:0], 8'd0}; st <= S_TXO2;
                 end else if (tx_wait == 16'hFFFF) st <= S_CBF;
                 else begin tx_wait <= tx_wait + 16'd1; nb(NB_TXR, 1'b0, 64'd0, S_TXO1); end
                 // fbuf -> the slot's words, little-endian: bytes shifted in from the top
                 S_TXO2: st <= S_TXO3;                                        // fb_q <- fbuf[fb_pos]
                 S_TXO3: begin
-                    n_wd <= {fb_pos < fb_len ? fb_q : 8'd0, n_wd[63:8]};
+                    n_d <= {fb_pos < fb_len ? fb_q : 8'd0, n_d[63:8]};
                     fb_pos <= fb_pos + 11'd1;
                     if (fb_pos[2:0] == 3'd7) begin
                         n_a <= slot + 13'd1 + {5'd0, fb_pos[10:3]}; n_we <= 1'b1; st <= S_NB;
@@ -429,13 +428,13 @@ module i82596 (
                 S_TXO5: begin dbg(8'd6, {21'd0, fb_len}, 64'd0); txw <= txw + 32'd1; nb(NB_TXW, 1'b1, {32'd0, txw + 32'd1}, S_CBF); end
 
                 // ---- the bridge: a frame waiting (RXW, Main's)? Into fbuf, its address checked on the way
-                S_RXP1: if (n_rd[31:0] != rxr) begin
+                S_RXP1: if (n_d[31:0] != rxr) begin
                     slot <= NB_RX + {1'b0, rxr[3:0], 8'd0};
                     nb(NB_RX + {1'b0, rxr[3:0], 8'd0}, 1'b0, 64'd0, S_RXP2);
                 end else st <= S_IDLE;
                 S_RXP2: begin
                     logic [10:0] n;
-                    n = n_rd[10:0];                                          // with the FCS
+                    n = n_d[10:0];                                           // with the FCS
                     fb_len <= nocrcm ? n - 11'd4 : n; fb_pos <= 11'd0;
                     rx_runt <= n < 11'd18;
                     if (n < 11'd18) st <= S_RXP4;
@@ -443,8 +442,8 @@ module i82596 (
                 end
                 S_RXP3: begin
                     logic [7:0] b;
-                    b = n_rd[7:0];
-                    n_rd <= {8'd0, n_rd[63:8]};
+                    b = n_d[7:0];
+                    n_d <= {8'd0, n_d[63:8]};
                     fb_we <= 1'b1; fb_wa <= fb_pos; fb_wd <= b; fb_pos <= fb_pos + 11'd1;
                     if (fb_pos < 11'd6) begin
                         da_me <= (fb_pos == 11'd0 || da_me) && b == mac[47 - 8 * fb_pos[2:0] -: 8];
@@ -469,9 +468,9 @@ module i82596 (
                 S_RX2: begin rfd_link <= f32; rd(rfd, 5'd8, S_RX3); end
                 S_RX3: begin nx <= f32; rd(rfd, 5'd14, S_RX4); end
                 S_RX4: begin
-                    c_a <= m_a + 32'd2; c_n <= f16[13:0]; sc_n <= 14'd0;
+                    c_n <= f16[13:0]; sc_n <= 14'd0;
                     rb_used <= 1'b0;
-                    cret <= S_RX5; st <= S_SCAT;
+                    cret <= S_RX5; cadr(rfd, 5'd16, S_SCAT);
                 end
                 S_RX5: begin
                     rx_cnt <= sc_n;
@@ -531,17 +530,18 @@ module i82596 (
                     if (fb_len == 11'd11) st <= S_GATHER;
                 end
                 // ---- fbuf from fb_pos -> memory at c_a, up to c_n bytes (sc_n counts them): bytes
-                // shifted into sg_dw, written a doubleword at a time (a partial one padded out)
+                // shifted into sg_dw, written a doubleword at a time (a partial one padded out,
+                // c_a's low bits only: c_a[31:3] stays its doubleword)
                 S_SCAT: if (c_n == 14'd0 || done) st <= sg_be != 8'd0 ? S_SCAT3 : cret;
                         else st <= S_SCAT2;                                  // fb_q <- fbuf[fb_pos]
                 S_SCAT2: begin
-                    sg_dw <= {sg_dw[55:0], fb_q}; sg_be <= {sg_be[6:0], 1'b1}; sg_tag <= c_a[31:3];
+                    sg_dw <= {sg_dw[55:0], fb_q}; sg_be <= {sg_be[6:0], 1'b1};
                     c_a <= c_a + 32'd1; c_n <= c_n - 14'd1; fb_pos <= fb_pos + 11'd1; sc_n <= sc_n + 14'd1;
                     if (c_a[2:0] == 3'd7) wrsg(c_a[31:3], S_SCAT);
                     else st <= S_SCAT;
                 end
-                S_SCAT3: if (c_a[2:0] == 3'd0) wrsg(sg_tag, cret);
-                         else begin sg_dw <= {sg_dw[55:0], 8'd0}; sg_be <= {sg_be[6:0], 1'b0}; c_a <= c_a + 32'd1; end
+                S_SCAT3: if (c_a[2:0] == 3'd0) wrsg(c_a[31:3], cret);
+                         else begin sg_dw <= {sg_dw[55:0], 8'd0}; sg_be <= {sg_be[6:0], 1'b0}; c_a[2:0] <= c_a[2:0] + 3'd1; end
                 default: st <= S_IDLE;
             endcase
         end
