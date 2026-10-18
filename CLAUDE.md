@@ -52,9 +52,15 @@ passes. **Build 39**: recorder event 15 (HP-UX syscalls). **Builds 40-47 (2026-1
 recorder's one-shot/trigger/flow captures found the 11i installer's stalls:
 **cpu-requests #10**, `b,l`'s link register corrupted when an external
 interrupt lands two instructions after the branch (`itool`'s scanner returns
-into itself). **Fixed 2026-10-14 (`5cda517`, build 52)**: not the interrupt but the kernel's `rfi` into a *nullified* `b,l,n` whose IIAOQ back is its own target -- the target was fetched twice and the second copy ran as the first's delay slot (`pa_fetch` keeps only the oldest instruction at the slot's address; the `link` suite's RAM groups reproduce it; cputest 13/13, cosim 8/8); the 11i installer passes its first step on the board. **Next: `RESUME-20261011-bl-link.md`** (the user asked for the CPU
-fix: the bug, the evidence, the half-built reproduction, the recorder tools,
-then the TCOE 12/2004 install), then `RESUME-20261010-features.md`.
+into itself). **Fixed 2026-10-14 (`5cda517`, build 52)**: not the interrupt but the kernel's `rfi` into a *nullified* `b,l,n` whose IIAOQ back is its own target -- the target was fetched twice and the second copy ran as the first's delay slot (`pa_fetch` keeps only the oldest instruction at the slot's address; the `link` suite's RAM groups reproduce it; cputest 13/13, cosim 8/8); the 11i installer passes its first step on the board. **Builds 53-57 (2026-10-14/15)**: the
+OSD boot helpers, then the performance core (build 57, -17 % cycles, core
+clock -0.009 ns). **2026-10-18: the core is wrapped up and released with
+build 57 as is** (`release/`, root README); the only board it was tested on is .92
+(SuperStation One), and on the user's second board (.143, a MiSTer Pi) the
+core misbehaved and 11.11 hung, cause unknown. **Next:
+`RESUME-20261018-wrapup.md`** (the second board, the last 0.009 ns, I/O,
+NeXTSTEP). Quartus on this box: the DSPPC603 / Apple Pippin session has
+priority (user, 2026-10-18).
 
 ## The user's process
 
@@ -96,9 +102,10 @@ then the TCOE 12/2004 install), then `RESUME-20261010-features.md`.
 | `RESUME-20261009-artist.md` | superseded: root login, the stale-text SIGILL fix (build 15); the Artist plan |
 | `RESUME-20261009-x11.md` | superseded: Artist built (builds 16-17), the PDC console and HP-UX's X login on it |
 | `RESUME-20261010-features.md` | **current, system stream**: VGA timing, Harmony, CD audio, the 82596 LAN, Main's `support/hp9k`; what is left |
-| `RESUME-20261011-bl-link.md` | **current, next**: cpu-requests #10 (`b,l`'s link corrupted by an external interrupt two instructions later -- the 11i installer's stalls): the evidence, the `tests/cpu` `link` suite so far, the recorder's capture modes, then the TCOE install |
+| `RESUME-20261011-bl-link.md` | done (`5cda517`, build 52): cpu-requests #10 (`b,l`'s link corrupted by an external interrupt two instructions later -- the 11i installer's stalls): the evidence, the `tests/cpu` `link` suite so far, the recorder's capture modes, then the TCOE install |
 | `RESUME-20261011-11i-install.md` | superseded (its "Status" has how the stalls were traced): HP-UX 11i's installer stalls on the board (configuration with DHCP on, environment step with the network on, pre-install disk check) -- timings vs QEMU, the syscall/lan2 evidence, build 39's recorder event 15, the tools, next steps |
 | `RESUME-20261011-floppy.md` | done, system stream: the LASI PC floppy for HP-UX 11i -- done in builds 37-38 (its "Status" section); the board recipes for the 11i CD (serial and HDMI) and what is next (the install itself) |
+| `RESUME-20261018-wrapup.md` | **current**: what was released on 2026-10-18 (build 57) and everything left open, in order: the second board's failure and 11.11 hang, build 57's timing, the I/O-bound installs, NeXTSTEP, the cpu-requests to review |
 | `RESUME-20261015-dual-issue.md` | **current, CPU stream**: the speed plan after build 57 (the performance core: misses complete in W, 1-bubble predicted branches, -17 % cycles): close the last 0.009 ns, stall-on-use, one-cycle E redirects, then dual issue (the pairing rules, the design sketch, the gates) |
 | `RESUME-20261010-cpu.md` | superseded, CPU stream: cpu-requests #9 (done), the area limit |
 | `RESUME-20261009-artist-raster.md` | superseded: build 23 released (Artist's own picture, LUT1/attribute plane, vectors, OBS tool), the window-move stubs to chase, what is left |
