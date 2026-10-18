@@ -38,7 +38,7 @@ The files in [`release/`](release/):
 
 | file | goes to | what |
 |---|---|---|
-| `HP9K715.rbf` | `/media/fat/_Unstable/` (or `_Computer/`) | the core, Quartus build 57 (2026-10-15; `HP9K715_20261015.rbf` is the same file): 64 MHz |
+| `HP9K715_20261015.rbf` | `/media/fat/_Unstable/` (or `_Computer/`) | the core, Quartus build 57 (2026-10-15): 64 MHz |
 | `boot0.rom` | `/media/fat/games/HP9K715/` | HP's PDC 1.6 boot ROM for the 715/64, 258,728 bytes ([`roms/README.md`](roms/README.md): HP firmware patch PF_C7X50016, image IMAGE1A's payload). Loaded by the framework at core start; the loader patches one word ([`docs/STUBS.md`](docs/STUBS.md) S-011) |
 | `hp715.eep` | `/media/fat/games/HP9K715/` | the EEPROM image (8 KB, `tools/eeprom/mkrelease.sh`): manufacturing and chassis codes off, **console on the graphics** (monitor type 1, 1280x1024), PS/2 keyboard, primary path scsi.6, autoboot and autosearch on. **The same image is built into the core**, so nothing needs mounting to boot; mount it in the OSD's "Mount EEPROM" slot only to keep the firmware's changes (boot paths, monitor type, `lanaddress`): it is written back, and mounting it resets the machine so the ROM reads it. For the RS-232 console instead: `CONSOLE=rs232 tools/eeprom/mkrelease.sh`, or `path console rs232` at `BOOT_ADMIN>` |
 
@@ -56,6 +56,7 @@ value; "Save settings" on the System page keeps the choices):
 | Display | **Graphics**, Auto, Serial console | Graphics shows Artist's picture always; Auto shows the RS-232 console until Artist's video first comes on; Serial console shows the RS-232 console |
 | EEPROM (no image) | **Built-in**, Blank | with no image mounted: the shipped image, or a blank part (the ROM's manufacturing mode: console on RS-232, `BOOT_ADMIN>` at once) |
 | Network | eth0, Off, eth1, macvlan, tap0 | the 82596's bridge (needs the custom Main) |
+| SDRAM read capture | **Edge 3**, Edge 2.75, Edge 2.5, Edge 4 | when the core samples the SDRAM's read data. Edge 3 works on the board it was tuned on (2.75 too; 2.5 and 4 fail there). If the machine does not reach the boot console or misbehaves on another board, try Edge 2.75 |
 
 Saved configs from before 2026-10-14 (build 49) read differently: the RAM
 and Display values moved so the defaults come first (the old 16 MB is now
@@ -94,29 +95,42 @@ and for the LAN it needs a Main_MiSTer that sends this core UTC (HP-UX reads
 the clock as UTC) and bridges the 82596's frames to the MiSTer's Ethernet:
 branch `hp9k-family` of
 [danifunker/Main_MiSTer](https://github.com/danifunker/Main_MiSTer); the
-`release/MiSTer` binary is that Main built on 2026-10-14 (replace
+`release/MiSTer` binary is that Main built on 2026-10-14 from commit
+`12b0f43` (replace
 `/media/fat/MiSTer` with it). With a stock Main_MiSTer HP-UX's clock is off
 by your zone offset (STUBS S-022) and there is no network.
 
-Known limitations of this build: the CPU issues one instruction a clock
-(the real PA-7100LC can pair two), so it is somewhat slower than a 715/64;
-an HP-UX install from CD/DVD is slow (the SCSI/SD path); HP-UX 10.20 and
-11i v1 (11.11) have been tried, Linux, the BSDs and NeXTSTEP not yet. The
-full list
-is in [`docs/STUBS.md`](docs/STUBS.md). The core needs no Main_MiSTer
-changes, except that HP-UX's clock is off by your time-zone offset with a
-stock Main (above).
+Known limitations of this build:
+- **Tested on one board** (a SuperStation One with its SDRAM). On a second
+  board (a MiSTer Pi) the core did not work properly and HP-UX 11.11 hung
+  once; the cause is not known. The SDRAM read timing was tuned on the first
+  board only ([`docs/STUBS.md`](docs/STUBS.md) S-019), and build 57 misses
+  the 64 MHz timing target by 0.009 ns on one CPU path in Quartus's slow
+  corner (100 C) -- both could differ from board to board.
+- The CPU issues one instruction a clock (the real PA-7100LC can pair two),
+  so it is somewhat slower than a 715/64.
+- An HP-UX install from CD/DVD is slow (about 2 hours for a third of the
+  TCOE filesets): it is bound by the SCSI/SD path, not the CPU.
+- HP-UX 10.20 and 11i v1 (11.11) run; NeXTSTEP 3.3 does not run properly
+  yet; Linux and the BSDs have not been tried.
+- With a stock Main_MiSTer HP-UX's clock is off by your time-zone offset and
+  there is no network (above); everything else needs no Main changes.
 
-## Planned
+The full list of simplifications is in [`docs/STUBS.md`](docs/STUBS.md);
+what is left to do is in
+[`RESUME-20261018-wrapup.md`](RESUME-20261018-wrapup.md).
+
+## Hardware
 
 | | |
 |---|---|
-| CPU | PA-7100LC (PA-RISC 1.1 with MAX-1), FPU, 64-entry TLB -- built |
-| Memory | 32-128 MB in the SDRAM module, optionally up to 256 MB using DDR3 |
-| Graphics | built-in 8-plane colour graphics, up to 1280x1024 -- built (Artist: drawing engine, both colour maps, hardware cursor) |
-| Storage | NCR 53C710 SCSI: hard disk images (built) and a CD-ROM with CD audio |
-| Input | PS/2 keyboard and mouse |
-| Sound | Harmony audio (CS4215 codec) |
+| CPU | PA-7100LC (PA-RISC 1.1 with MAX-1), FPU, 64-entry TLB + 8 block entries, 128 KB + 128 KB caches, the hardware TLB-miss walker -- built (single issue) |
+| Memory | 16-128 MB in the SDRAM module -- built; up to 256 MB using DDR3 -- not built |
+| Graphics | built-in 8-plane Artist graphics, up to 1280x1024 -- built (drawing engine, both colour maps, hardware cursor) |
+| Storage | NCR 53C710 SCSI: two hard disk images and a CD-ROM with CD audio -- built; PC floppy controller with no drive |
+| Network | Intel 82596 Ethernet -- built (needs the custom Main) |
+| Input | PS/2 keyboard and mouse -- built; RS-232 console |
+| Sound | Harmony audio (CS4215 codec), playback -- built |
 | Firmware | HP's boot ROM, revision 1.6 |
 
 ## Licence
