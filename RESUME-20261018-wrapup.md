@@ -33,13 +33,14 @@ No new fit was made for the release.
      2/0/1.5.0. Mount it in the ID 5 slot, or run
      `tools/hpux/lvmbdra.py setpath IMG 2/0/1.6.0` (`disks/README.md`).
      The user hit "failing the LVM stuff" on that board on 10-14.
-   - SDRAM: OSD "SDRAM read capture" (`status[9:8]`, `sdram64` `rd_mode`).
+   - SDRAM: OSD "SDRAM read capture" (`status[9:8]`, `sdram64` `rd_mode`;
+     build 57 has it, it leaves the OSD with the next build and is tied to Edge 3).
      On .92, Edge 3 and Edge 2.75 pass and Edge 2.5 and Edge 4 fail
      (STUBS S-019). Try Edge 2.75 on .143, and run the ROM's memory test
      with fastboot off (EEPROM) to see whether reads are right.
-   - Timing: build 57 misses by 0.009 ns (slow 100 C corner). Build 53 met
-     timing with +0.317 ns. To tell a timing fault from a setup or SDRAM
-     problem, run 53 on .143: `git show 6cbf2ee:release/HP9K715_20261014.rbf`.
+   - Timing: build 57 misses by 0.009 ns (slow 100 C corner). **Fix
+     forward** (user, 2026-10-18): never go back to an earlier build to test
+     or bisect; close the timing on the current RTL instead (item 2).
    - A hang in 11.11: before calling it a hang, check whether the mouse
      wakes X's screen saver (Artist goes black), whether the machine
      answers ping or telnet, and what the serial console shows.

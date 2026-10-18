@@ -54,9 +54,7 @@ value; "Save settings" on the System page keeps the choices):
 | Boot mode (on reset) | **Normal**, BOOT_ADMIN, ISL, Single-user, LVM maintenance, Network, CD/DVD | what the core does after every reset until it is changed back: Normal lets the ROM autoboot; the others stop the autoboot (ESC) and, from `BOOT_ADMIN>`, type `boot pri isl` (then `hpux -is` / `hpux -lm` at `ISL>`), `boot lan` or `boot scsi.2` for you. It works on the graphics console and on RS-232 |
 | Model, RAM | 715/64; **32MB**, 64MB, 128MB, 16MB | on reset; the RAM is clipped to the SDRAM module |
 | Display | **Graphics**, Auto, Serial console | Graphics shows Artist's picture always; Auto shows the RS-232 console until Artist's video first comes on; Serial console shows the RS-232 console |
-| EEPROM (no image) | **Built-in**, Blank | with no image mounted: the shipped image, or a blank part (the ROM's manufacturing mode: console on RS-232, `BOOT_ADMIN>` at once) |
 | Network | eth0, Off, eth1, macvlan, tap0 | the 82596's bridge (needs the custom Main) |
-| SDRAM read capture | **Edge 3**, Edge 2.75, Edge 2.5, Edge 4 | when the core samples the SDRAM's read data. Edge 3 works on the board it was tuned on (2.75 too; 2.5 and 4 fail there). If the machine does not reach the boot console or misbehaves on another board, try Edge 2.75 |
 
 Saved configs from before 2026-10-14 (build 49) read differently: the RAM
 and Display values moved so the defaults come first (the old 16 MB is now

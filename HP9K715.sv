@@ -73,8 +73,6 @@ localparam CONF_STR = {
 	"O[2:1],Model (on reset),715/64,715/80,715/100;",
 	"O[5:3],RAM (on reset),32MB,64MB,128MB,16MB;",
 	"O[11:10],Display,Graphics,Auto,Serial console;",
-	"O[18],EEPROM (no image),Built-in,Blank;",
-	"O[9:8],SDRAM read capture,Edge 3,Edge 2.75,Edge 2.5,Edge 4;",
 	"O[14:12],Network,eth0,Off,eth1,macvlan,tap0;",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"O[125:123],Scale,V-Integer,Normal,Narrower HV-Integer,Wider HV-Integer,HV-Integer;",
@@ -335,7 +333,7 @@ end endgenerate
 
 sdram64 #(.CLK_HZ(64_000_000)) sdram
 (
-	.clk(clk_sys), .clk_sdram(clk_sdram), .rst(~pll_locked), .rd_mode(status[9:8]), .ready(sdram_ready),
+	.clk(clk_sys), .clk_sdram(clk_sdram), .rst(~pll_locked), .rd_mode(2'd0), .ready(sdram_ready),  // edge 3 (STUBS S-019; the OSD choice went 2026-10-18)
 	.ram_req(ram_req), .ram_we(ram_we), .ram_line(ram_line), .ram_addr(ram_addr[26:0]), .ram_be(ram_be),
 	.ram_wdata(ram_wdata), .ram_ack(ram_ack), .ram_wready(ram_wready), .ram_rvalid(ram_rvalid),
 	.ram_rbeat(ram_rbeat), .ram_rdata(ram_rdata),
@@ -439,7 +437,7 @@ generate for (gi = 0; gi < 3; gi = gi + 1) begin : g_sd
 end endgenerate
 eeprom_save #(.CLK_HZ(64_000_000)) eeprom_save
 (
-	.clk(clk_sys), .rst(~pll_locked), .ready(ee_ready), .loaded(ee_loaded), .blank_if_none(status[18]), .osd_open(OSD_STATUS),
+	.clk(clk_sys), .rst(~pll_locked), .ready(ee_ready), .loaded(ee_loaded), .blank_if_none(1'b0), .osd_open(OSD_STATUS),  // no OSD "Blank" since 2026-10-18
 	.img_mounted(img_mounted[1]), .img_size(img_size),
 	.sd_lba(sd_lba[1]), .sd_blk_cnt(sd_blk_cnt[1]), .sd_rd(sd_rd[1]), .sd_wr(sd_wr[1]), .sd_ack(sd_ack[1]),
 	.sd_buff_addr(sd_buff_addr), .sd_buff_dout(sd_buff_dout), .sd_buff_din(sd_buff_din[1]),
