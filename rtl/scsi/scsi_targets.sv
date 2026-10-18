@@ -55,8 +55,8 @@ module scsi_targets #(
     // 512-byte blocks, WIDE)
     input  logic [2:0]  img_present,
     input  logic [31:0] img_blocks [3],     // size in 512-byte blocks
-    output logic [31:0] sd_lba [3],
-    output logic [5:0]  sd_blk_cnt [3],
+    output logic [31:0] sd_lba [3],         // one request at a time: the three
+    output logic [5:0]  sd_blk_cnt [3],     // slots show the same address and count
     output logic [2:0]  sd_rd,
     output logic [2:0]  sd_wr,
     input  logic [2:0]  sd_ack,
@@ -94,6 +94,14 @@ module scsi_targets #(
     assign sd_buff_din[1] = h_q;
     assign sd_buff_din[2] = h_q;
 
+    // the block-device request: one at a time (sd_busy), so one address and
+    // count serve the three slots (hps_io reads a slot's address and count
+    // only while its sd_rd/sd_wr is up)
+    logic [31:0] s_lba;
+    logic [5:0]  s_blk_cnt;
+    assign sd_lba[0] = s_lba;     assign sd_lba[1] = s_lba;     assign sd_lba[2] = s_lba;
+    assign sd_blk_cnt[0] = s_blk_cnt; assign sd_blk_cnt[1] = s_blk_cnt; assign sd_blk_cnt[2] = s_blk_cnt;
+
     // ----------------------------------------------------------- state
     typedef enum logic [3:0] {
         T_FREE, T_MOUT, T_MIN, T_CMD, T_EXEC, T_DIN, T_DOUT, T_FETCH, T_STORE, T_STAT, T_DONE, T_DISC,
@@ -115,10 +123,10 @@ module scsi_targets #(
     logic [7:0]  sasc [3];
     // data phase
     logic        din_synth;              // IN data synthesised (INQUIRY ...) rather than from the buffer
-    logic [15:0] d_left;                 // bytes left in the data phase
-    logic [15:0] d_idx;                  // byte index into the synthesised response
+    logic [15:0] d_left;                 // bytes left in the data phase (MODE SELECT(10): up to 65535)
+    logic [9:0]  d_idx;                  // byte index into the synthesised response (at most 804)
     logic [31:0] x_lba;                  // next block of a READ/WRITE
-    logic [31:0] x_blocks;               // 512-byte blocks left
+    logic [18:0] x_blocks;               // 512-byte blocks left (at most 65535 CD blocks x 4)
     logic [11:0] chunk;                  // bytes left in the buffer chunk
     logic        pending;                // waiting for the buffer byte
     logic        hold_seen;
@@ -126,12 +134,14 @@ module scsi_targets #(
     // ------------------------------------------------------------ CD audio
     logic        toc_ok, toc_we;
     logic [6:0]  toc_a, toc_a_r;
-    logic [63:0] toc_wd, toc_q;
+    logic [2:0]  toc_wb;                 // the table copy writes a byte at a time
+    logic [7:0]  toc_wd;
+    logic [63:0] toc_q;
     logic [7:0]  toc_first, toc_n;
     logic [10:0] cp_b;                   // the table copy: byte, sub-step
     logic [1:0]  cp_s;
     logic        a_play, a_pause, a_resume, a_stop, a_stread;
-    logic [23:0] a_start, a_end;
+    logic [18:0] a_start, a_end;         // frames (cd_audio: 19 bits)
     logic [7:0]  a_status, q_ctl, q_track;
     logic [23:0] q_abs_lba, q_rel_lba, q_abs_msf, q_rel_msf;
     logic        fr_req, fr_go, fr_done;
@@ -142,15 +152,15 @@ module scsi_targets #(
     logic [7:0]  rs_status, rs_ctl, rs_track;      // READ SUB-CHANNEL, taken at the command
     logic [23:0] rs_abs, rs_rel;
     logic [2:0]  trk_s;
-    logic [15:0] ms_i;                   // MODE SELECT: parameter byte, block descriptor length, page
+    logic [9:0]  ms_i;                   // MODE SELECT: parameter byte (saturating), block descriptor length, page
     logic [7:0]  ms_bdl;
     logic [5:0]  ms_pg;
 
-    always_comb toc_a = (st == T_DIN && cdb[0] == 8'h43) ? 7'(rt_first + 7'((d_idx - 16'd4) >> 3)) : toc_a_r;
+    always_comb toc_a = (st == T_DIN && cdb[0] == 8'h43) ? 7'(rt_first + 7'((d_idx - 10'd4) >> 3)) : toc_a_r;
 
     cd_audio u_cda (
         .clk(clk), .rst(rst),
-        .toc_we(toc_we), .toc_a(toc_a), .toc_wd(toc_wd), .toc_q(toc_q), .toc_first(toc_first), .toc_n(toc_n),
+        .toc_we(toc_we), .toc_a(toc_a), .toc_wb(toc_wb), .toc_wd(toc_wd), .toc_q(toc_q), .toc_first(toc_first), .toc_n(toc_n),
         .play(a_play), .p_start(a_start), .p_end(a_end), .pause(a_pause), .resume(a_resume), .stop(a_stop),
         .a_status(a_status), .status_read(a_stread), .q_ctl(q_ctl), .q_track(q_track),
         .q_abs_lba(q_abs_lba), .q_rel_lba(q_rel_lba), .q_abs_msf(q_abs_msf), .q_rel_msf(q_rel_msf),
@@ -161,6 +171,10 @@ module scsi_targets #(
     // M:S:F (absolute, +150) to LBA
     function automatic logic [23:0] msf_lba(input logic [7:0] m, input logic [7:0] sec, input logic [7:0] f);
         return {16'd0, m} * 24'd4500 + {16'd0, sec} * 24'd75 + {16'd0, f} - 24'd150;
+    endfunction
+    // a play address as a frame: past 2^19 - 1 (116:30, beyond any disc) it is the last
+    function automatic logic [18:0] frame19(input logic [23:0] x);
+        return |x[23:19] ? 19'h7FFFF : x[18:0];
     endfunction
 
     wire [31:0] blocks = img_blocks[dev];
@@ -188,7 +202,7 @@ module scsi_targets #(
         logic        ms10;
         logic [5:0]  pg;
         logic [15:0] hdr, k;
-        op = cdb[0]; i = d_idx; syn = 8'd0;
+        op = cdb[0]; i = {6'd0, d_idx}; syn = 8'd0;
         nblk = blocks >> bshift;
         last = nblk - 32'd1;
         case (op)
@@ -393,7 +407,7 @@ module scsi_targets #(
             // a frame for the CD player, between the engine's own transfers
             if (fr_req && !fr_go && !sd_busy && img_present[2] &&
                 st != T_FETCH && st != T_DOUT && st != T_STORE && st != T_TOC) begin
-                sd_lba[2] <= fr_lba; sd_blk_cnt[2] <= 6'd4; sd_rd[2] <= 1'b1; sd_busy <= 1'b1; sd_dev <= 2'd2;
+                s_lba <= fr_lba; s_blk_cnt <= 6'd4; sd_rd[2] <= 1'b1; sd_busy <= 1'b1; sd_dev <= 2'd2;
                 aud_xfer <= 1'b1; fr_go <= 1'b1;
             end
 
@@ -455,6 +469,8 @@ module scsi_targets #(
                 T_EXEC: begin
                     logic [7:0]  op;
                     logic [31:0] lba, cnt;
+                    logic [15:0] alloc, rl, dl;
+                    logic [7:0]  t0, e0, nd;
                     op = cdb[0];
                     // block address and count of the READ/WRITE forms
                     if (op[7:5] == 3'd0) begin
@@ -465,7 +481,20 @@ module scsi_targets #(
                         lba = {cdb[2], cdb[3], cdb[4], cdb[5]};
                         cnt = {16'd0, cdb[7], cdb[8]};
                     end
-                    d_idx <= 16'd0; ms_i <= 16'd0; ms_bdl <= 8'd0; ms_pg <= 6'h3F;
+                    // READ TOC: the first entry sent (e0) and how many (nd)
+                    t0 = cdb[6];
+                    e0 = (t0 == 8'h00 || t0 <= toc_first) ? 8'd0 : t0 == 8'hAA ? toc_n : t0 - toc_first;
+                    nd = toc_n + 8'd1 - e0;
+                    if (cdb[9][7:6] == 2'd1 || cdb[2][3:0] == 4'd1) begin e0 = 8'd0; nd = 8'd1; end
+                    // a synthesised response's length (dl): its allocation length or
+                    // the response, the shorter -- one compare for all of them
+                    alloc = (op == 8'h25) ? 16'd8 : (op == 8'h43 || op == 8'h42 || op == 8'h5A) ? {cdb[7], cdb[8]} :
+                            {8'd0, cdb[4]};
+                    rl = (op == 8'h43) ? (toc_n == 8'd0 ? 16'd20 : 16'd4 + {5'd0, nd, 3'd0}) :
+                         (op == 8'h42) ? (!cdb[2][6] ? 16'd4 : cdb[3] == 8'd1 ? 16'd16 : 16'd24) :
+                         resp_len(op, cdb[2][5:0]);
+                    dl = (alloc < rl) ? alloc : rl;
+                    d_idx <= 10'd0; ms_i <= 10'd0; ms_bdl <= 8'd0; ms_pg <= 6'h3F;
                     if (is_cd && !toc_ok && (op == 8'h43 || op == 8'h42 || op == 8'h45 || op == 8'h47 ||
                                              op == 8'h48 || op == 8'hA5)) begin
                         st <= T_TOC;                                  // the track table first
@@ -476,35 +505,24 @@ module scsi_targets #(
                         skey[dev] <= 4'h5; sasc[dev] <= 8'h20; go_status(8'h02);
                     end else case (op)
                         8'h43: begin                                  // READ TOC
-                            logic [15:0] alloc, rl;
-                            logic [7:0]  t0, e0, nd;
-                            alloc = {cdb[7], cdb[8]};
-                            t0 = cdb[6];
-                            e0 = (t0 == 8'h00 || t0 <= toc_first) ? 8'd0 : t0 == 8'hAA ? toc_n : t0 - toc_first;
-                            nd = toc_n + 8'd1 - e0;
-                            if (cdb[9][7:6] == 2'd1 || cdb[2][3:0] == 4'd1) begin e0 = 8'd0; nd = 8'd1; end
-                            rl = toc_n == 8'd0 ? 16'd20 : 16'd4 + {5'd0, nd, 3'd0};
                             if (toc_n != 8'd0 && t0 != 8'hAA && t0 > toc_first + toc_n - 8'd1) begin
                                 skey[dev] <= 4'h5; sasc[dev] <= 8'h24; go_status(8'h02);
                             end else begin
                                 rt_first <= e0[6:0]; rt_nd <= nd;
-                                d_left <= (alloc < rl) ? alloc : rl; din_synth <= 1'b1;
+                                d_left <= dl; din_synth <= 1'b1;
                                 skey[dev] <= 4'd0; sasc[dev] <= 8'd0;
-                                if (((alloc < rl) ? alloc : rl) == 16'd0) go_status(8'h00);
+                                if (dl == 16'd0) go_status(8'h00);
                                 else begin st <= T_DIN; req <= 1'b0; phase <= P_DIN; pending <= 1'b1; end
                             end
                         end
                         8'h42: begin                                  // READ SUB-CHANNEL
-                            logic [15:0] alloc, rl;
-                            alloc = {cdb[7], cdb[8]};
-                            rl = !cdb[2][6] ? 16'd4 : cdb[3] == 8'd1 ? 16'd16 : 16'd24;
                             rs_status <= a_status; rs_ctl <= q_ctl; rs_track <= q_track;
                             rs_abs <= cdb[1][1] ? q_abs_msf : q_abs_lba;
                             rs_rel <= cdb[1][1] ? q_rel_msf : q_rel_lba;
                             a_stread <= 1'b1;
-                            d_left <= (alloc < rl) ? alloc : rl; din_synth <= 1'b1;
+                            d_left <= dl; din_synth <= 1'b1;
                             skey[dev] <= 4'd0; sasc[dev] <= 8'd0;
-                            if (((alloc < rl) ? alloc : rl) == 16'd0) go_status(8'h00);
+                            if (dl == 16'd0) go_status(8'h00);
                             else begin st <= T_DIN; req <= 1'b0; phase <= P_DIN; pending <= 1'b1; end
                         end
                         8'h45, 8'hA5, 8'h47: begin                    // PLAY AUDIO (10), (12), MSF
@@ -517,7 +535,7 @@ module scsi_targets #(
                                 p0 = {cdb[3], cdb[4], cdb[5]};
                                 p1 = p0 + ((op == 8'h45) ? {8'd0, cdb[7], cdb[8]} : {cdb[7], cdb[8], cdb[9]});
                             end
-                            a_start <= p0; a_end <= p1; a_play <= 1'b1;
+                            a_start <= frame19(p0); a_end <= frame19(p1); a_play <= 1'b1;
                             skey[dev] <= 4'd0; sasc[dev] <= 8'd0; go_status(8'h00);
                         end
                         8'h48: begin                                  // PLAY AUDIO TRACK/INDEX
@@ -536,9 +554,6 @@ module scsi_targets #(
                         8'h00, 8'h01, 8'h04, 8'h0B, 8'h16, 8'h17, 8'h1B, 8'h1D, 8'h1E, 8'h2B, 8'h2F, 8'h35:
                             begin skey[dev] <= 4'd0; sasc[dev] <= 8'd0; go_status(8'h00); end
                         8'h12, 8'h03, 8'h25, 8'h1A, 8'h5A: begin
-                            logic [15:0] alloc, rl;
-                            rl = resp_len(op, cdb[2][5:0]);
-                            alloc = (op == 8'h25) ? 16'd8 : (op == 8'h43 || op == 8'h5A) ? {cdb[7], cdb[8]} : {8'd0, cdb[4]};
                             if (op == 8'h1A || op == 8'h5A) begin
                                 // supported pages only
                                 if (!page_ok(cdb[2][5:0])) begin
@@ -546,10 +561,10 @@ module scsi_targets #(
                                 end
                             end
                             if (!((op == 8'h1A || op == 8'h5A) && !page_ok(cdb[2][5:0]))) begin
-                                d_left <= (alloc < rl) ? alloc : rl;
+                                d_left <= dl;
                                 din_synth <= 1'b1;
                                 if (op != 8'h03) begin skey[dev] <= 4'd0; sasc[dev] <= 8'd0; end
-                                if ((alloc < rl ? alloc : rl) == 16'd0) go_status(8'h00);
+                                if (dl == 16'd0) go_status(8'h00);
                                 else begin st <= T_DIN; req <= 1'b0; phase <= P_DIN; pending <= 1'b1; end
                             end
                         end
@@ -559,7 +574,7 @@ module scsi_targets #(
                                 skey[dev] <= 4'h5; sasc[dev] <= 8'h21; go_status(8'h02);
                             end else if (cnt == 0) go_status(8'h00);
                             else begin
-                                x_lba <= lba << bshift; x_blocks <= cnt << bshift; din_synth <= 1'b0;
+                                x_lba <= lba << bshift; x_blocks <= 19'(cnt << bshift); din_synth <= 1'b0;
                                 st <= T_FETCH; phase <= P_DIN; req <= 1'b0;
                             end
                         end
@@ -567,7 +582,7 @@ module scsi_targets #(
                             if (op == 8'h15 || op == 8'h55) begin
                                 // the parameter list is taken and ignored
                                 d_left <= (op == 8'h15) ? {8'd0, cdb[4]} : {cdb[7], cdb[8]};
-                                x_blocks <= 32'd0;
+                                x_blocks <= 19'd0;
                                 if (((op == 8'h15) ? cdb[4] : cdb[8]) == 8'd0 && (op == 8'h15 || cdb[7] == 8'd0)) go_status(8'h00);
                                 else begin st <= T_DOUT; phase <= P_DOUT; req <= 1'b1; chunk <= 12'd0; end
                             end else if (is_cd) begin
@@ -576,7 +591,7 @@ module scsi_targets #(
                                 skey[dev] <= 4'h5; sasc[dev] <= 8'h21; go_status(8'h02);
                             end else if (cnt == 0) go_status(8'h00);
                             else begin
-                                x_lba <= lba; x_blocks <= cnt; d_left <= 16'd0;
+                                x_lba <= lba; x_blocks <= 19'(cnt); d_left <= 16'd0;
                                 chunk <= (cnt >= 4) ? 12'd2048 : {cnt[2:0], 9'd0};
                                 b_addr <= 11'd0;
                                 st <= T_DOUT; phase <= P_DOUT; req <= 1'b1;
@@ -590,12 +605,12 @@ module scsi_targets #(
                 T_FETCH: if (!sd_busy) begin
                     if (x_blocks == 0) go_status(8'h00);
                     else begin
-                        logic [31:0] n;
-                        n = (x_blocks >= 4) ? 32'd4 : x_blocks;
-                        sd_lba[dev] <= x_lba; sd_blk_cnt[dev] <= 6'(n - 1); sd_rd[dev] <= 1'b1; sd_busy <= 1'b1;
+                        logic [2:0] n;
+                        n = (x_blocks >= 19'd4) ? 3'd4 : x_blocks[2:0];
+                        s_lba <= x_lba; s_blk_cnt <= {3'd0, n - 3'd1}; sd_rd[dev] <= 1'b1; sd_busy <= 1'b1;
                         sd_dev <= dev;
-                        x_lba <= x_lba + n; x_blocks <= x_blocks - n;
-                        chunk <= {n[2:0], 9'd0};
+                        x_lba <= x_lba + {29'd0, n}; x_blocks <= x_blocks - {16'd0, n};
+                        chunk <= {n, 9'd0};
                         b_addr <= 11'd0; pending <= 1'b1;
                         st <= T_DIN;
                     end
@@ -605,7 +620,7 @@ module scsi_targets #(
                 T_DIN: begin
                     if (ack && req) begin
                         req <= 1'b0; pending <= 1'b1;
-                        if (din_synth) begin d_idx <= d_idx + 16'd1; d_left <= d_left - 16'd1; end
+                        if (din_synth) begin d_idx <= d_idx + 10'd1; d_left <= d_left - 16'd1; end
                         else begin b_addr <= b_addr + 11'd1; chunk <= chunk - 12'd1; end
                     end else if (!req && !sd_busy) begin
                         if (din_synth && d_left == 16'd0) go_status(8'h00);
@@ -630,11 +645,11 @@ module scsi_targets #(
                             // page 0x0E (CD audio control): ports 0 and 1 volume
                             hl = (cdb[0] == 8'h15) ? 16'd4 : 16'd8;
                             po = hl + {8'd0, ms_bdl};
-                            if (ms_i == hl - 16'd1) ms_bdl <= idata;
-                            if (ms_i == po) ms_pg <= idata[5:0];
-                            if (is_cd && ms_pg == 6'h0E && ms_i == po + 16'd9) vol0 <= idata;
-                            if (is_cd && ms_pg == 6'h0E && ms_i == po + 16'd11) vol1 <= idata;
-                            ms_i <= ms_i + 16'd1;
+                            if ({6'd0, ms_i} == hl - 16'd1) ms_bdl <= idata;
+                            if ({6'd0, ms_i} == po) ms_pg <= idata[5:0];
+                            if (is_cd && ms_pg == 6'h0E && {6'd0, ms_i} == po + 16'd9) vol0 <= idata;
+                            if (is_cd && ms_pg == 6'h0E && {6'd0, ms_i} == po + 16'd11) vol1 <= idata;
+                            if (ms_i != 10'h3FF) ms_i <= ms_i + 10'd1;      // the pages lie below 275
                         end
                         else begin b_we <= 1'b1; b_wdata <= idata; chunk <= chunk - 12'd1; end
                     end else if (!req) begin
@@ -642,12 +657,15 @@ module scsi_targets #(
                         if (x_blocks == 0 && d_left == 0 && chunk == 0 && !b_we) go_status(8'h00);
                         else if (x_blocks == 0 && d_left != 0) req <= 1'b1;
                         else if (chunk == 12'd0 && !b_we) begin
-                            logic [31:0] n;
-                            n = (x_blocks >= 4) ? 32'd4 : x_blocks;
-                            sd_lba[dev] <= x_lba; sd_blk_cnt[dev] <= 6'(n - 1); sd_wr[dev] <= 1'b1;
-                            sd_busy <= 1'b1; sd_dev <= dev;
-                            x_lba <= x_lba + n; x_blocks <= x_blocks - n;
-                            st <= T_STORE;
+                            // once a CD frame in flight is done (s_lba is shared)
+                            if (!sd_busy) begin
+                                logic [2:0] n;
+                                n = (x_blocks >= 19'd4) ? 3'd4 : x_blocks[2:0];
+                                s_lba <= x_lba; s_blk_cnt <= {3'd0, n - 3'd1}; sd_wr[dev] <= 1'b1;
+                                sd_busy <= 1'b1; sd_dev <= dev;
+                                x_lba <= x_lba + {29'd0, n}; x_blocks <= x_blocks - {16'd0, n};
+                                st <= T_STORE;
+                            end
                         end else if (!b_we) req <= 1'b1;
                     end
                 end
@@ -663,7 +681,7 @@ module scsi_targets #(
                 // header bytes 0 (first track) and 1 (n) and n + 1 entries of 8
                 // bytes from byte 8 into toc; then the command runs again
                 T_TOC: if (!sd_busy) begin
-                    sd_lba[2] <= 32'hC000_0000; sd_blk_cnt[2] <= 6'd1; sd_rd[2] <= 1'b1;
+                    s_lba <= 32'hC000_0000; s_blk_cnt <= 6'd1; sd_rd[2] <= 1'b1;
                     sd_busy <= 1'b1; sd_dev <= 2'd2; st <= T_TOCW;
                 end
                 T_TOCW: if (!sd_busy) begin cp_b <= 11'd0; cp_s <= 2'd0; st <= T_TOCCP; end
@@ -676,8 +694,8 @@ module scsi_targets #(
                         if (cp_b == 11'd0) toc_first <= b_q;
                         else if (cp_b == 11'd1) toc_n <= b_q > 8'd99 ? 8'd99 : b_q;
                         else if (cp_b >= 11'd8) begin
-                            toc_wd[8 * (7 - cp_b[2:0]) +: 8] <= b_q;
-                            if (cp_b[2:0] == 3'd7) begin toc_we <= 1'b1; toc_a_r <= 7'((cp_b - 11'd8) >> 3); end
+                            // straight into the entry, a byte at a time
+                            toc_we <= 1'b1; toc_a_r <= 7'((cp_b - 11'd8) >> 3); toc_wb <= cp_b[2:0]; toc_wd <= b_q;
                         end
                         if ((cp_b == 11'd1 && b_q == 8'd0) || last_e) cp_s <= 2'd3;
                         else begin cp_b <= cp_b == 11'd1 ? 11'd8 : cp_b + 11'd1; cp_s <= 2'd0; end
@@ -691,13 +709,13 @@ module scsi_targets #(
                     trk_s <= trk_s + 3'd1;
                     if (trk_s == 3'd1) begin
                         logic [7:0] et;
-                        a_start <= toc_q[23:0];
+                        a_start <= frame19(toc_q[23:0]);
                         et = (cdb[7] == 8'd0 || cdb[7] > toc_first + toc_n - 8'd1) ? toc_first + toc_n - 8'd1 :
                              cdb[7] < cdb[4] ? cdb[4] : cdb[7];
                         toc_a_r <= 7'(et - toc_first + 8'd1);
                     end
                     if (trk_s == 3'd3) begin
-                        a_end <= toc_q[23:0]; a_play <= 1'b1;
+                        a_end <= frame19(toc_q[23:0]); a_play <= 1'b1;
                         skey[dev] <= 4'd0; sasc[dev] <= 8'd0; go_status(8'h00);
                     end
                 end
