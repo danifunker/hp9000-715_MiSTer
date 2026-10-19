@@ -66,5 +66,8 @@ No new fit was made for the release.
    drive and audio input are not built (README "Hardware", STUBS).
 8. Main_MiSTer `hp9k-family` is one commit, `6d7ece1` "HP 9000 family:
    HP9K715 and HP9K385 support (support/hp9k)", rebased onto upstream master
-   `88d2d10` on 2026-10-18 and pushed; `release/MiSTer` is built from it (not
-   yet run on a board). The HP9K385 core shares it, so coordinate changes.
+   `88d2d10` on 2026-10-18 and pushed; `release/MiSTer` is built from it (run
+   on .92 with build 65: HP-UX 11.11 from ID 6 to CDE, LAN, UTC clock; and
+   with HP9K385 on .143). Note: .92's MiSTer.ini `[MiSTer] main=` names a
+   missing file, so a per-core Main (e.g. `[Pippin] main=MiSTer_pippin`)
+   stays running for the next core until the MiSTer reboots. The HP9K385 core shares it, so coordinate changes.
