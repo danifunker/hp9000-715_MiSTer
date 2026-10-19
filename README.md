@@ -91,8 +91,9 @@ on. A black screen in CDE is the screen saver: move the mouse.
 The 715 boots from SCSI ID 6 by default. An HP-UX disk records the SCSI ID it
 was installed at, so an image installed at another ID, or on another machine
 or emulator, has to be adjusted once before it boots at ID 6.
-[`disks/README.md`](disks/README.md) has the steps, including for
-tenox's HP-UX 10.20 image (made for QEMU) and for moving an installed 11.11 disk from ID 5 to ID 6.
+[`disks/README.md`](disks/README.md) has the steps, including for an
+HP-UX 10.20 image made for QEMU and for moving an installed 11.11 disk from
+ID 5 to ID 6.
 
 To install HP-UX 11i, put the install CD/DVD in the CD-ROM slot and an empty
 image of at least 4 GB at ID 6, then type `boot scsi.2` at `BOOT_ADMIN>`.
