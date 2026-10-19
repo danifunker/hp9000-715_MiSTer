@@ -1,7 +1,7 @@
 # 06 -- What HP-UX 10.20 and Linux need from the 715 hardware and firmware
 
 Status: review, 2026-10-07. Evidence comes from the real OS binaries (the HP-UX 10.20
-kernel taken out of the tenox disk image and disassembled with its symbol table),
+kernel taken out of the QEMU disk image and disassembled with its symbol table),
 from HP-UX booting under QEMU with every PDC call logged, from the Linux 5.15
 source, and from the HP architecture documents.
 

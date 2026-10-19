@@ -51,7 +51,7 @@ system.md 11.
   setup +0.254 ns, hold +0.251 ns, 28,601 ALMs; system.md 10): the whole
   start-up sequence runs, VUE fails to start its X server (no graphics yet)
   and offers the console login. `root` asks for a password: the image's
-  (tenox's) root password is not recorded anywhere here, so the login is
+  original root password is not recorded anywhere here, so the login is
   the user's to do (or, if the user wants, blank it from a single-user boot).
   `release/` holds build 14.
 * romsim: `obj_dir_rom_fix4` = both fixes; `ck_su16_fix4.sav` (scratch

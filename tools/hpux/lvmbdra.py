@@ -11,7 +11,7 @@ of elements, then the elements -- and `lv_hwpath_to_dev` looks the path up in
 the I/O tree. A disk installed on another machine therefore fails with
 "LVM: Activation of root volume group failed ... Could not configure root VG"
 until the path is rewritten (HP-UX's own way is `hpux -lm` and `lvlnboot -R`).
-tenox's HP-UX 10.20 image was installed on QEMU's B160L, whose PCI SCSI disk
+The HP-UX 10.20 QEMU image was installed on QEMU's B160L, whose PCI SCSI disk
 is 8/0/0/0.6.0; the 715's LASI SCSI disk is 2/0/1.6.0.
 
     lvmbdra.py show IMG
@@ -81,7 +81,7 @@ def setpath(b, path):
     if len(paths) != 1:
         sys.exit("expected one PV in the table, found %d" % len(paths))
     # keep the table's own layout: a 0 count after the last path only if the
-    # original has one (tenox's 10.20 table does; an 11.11 install's does not,
+    # original has one (the 10.20 QEMU image's table does; an 11.11 install's does not,
     # 2026-10-18)
     old_n = struct.unpack(">I", b[PV_LEN_AT:PV_LEN_AT + 4])[0]
     term = old_n > 4 * (1 + len(paths[0]))

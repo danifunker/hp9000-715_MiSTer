@@ -17,9 +17,9 @@ This replaces `RESUME-20261009-hpux-login.md` (its steps 1 and 3 are done).
 
 ## What happened (session 22f75121, 2026-10-09 05:30-08:30)
 
-* **Root logs in on the board.** root's password on tenox's image is not
-  published; at the user's request it was set to `password` from a
-  single-user boot (original kept as `/etc/passwd.tenox` on the board's
+* **Root logs in on the board.** root's password on the 10.20 image is not
+  known; at the user's request it was set to `password` from a
+  single-user boot (original kept as a backup copy in `/etc` on the board's
   image). `/etc/lvmtab` named QEMU's `c0t6d0`; rebuilt with `vgscan`
   (`c2t6d0`, the 715's SCSI is ext_bus 2). `disks/README.md`, root README.
 * **The board's build-14 boot was at 64 MB**, not 16 (the OSD's setting);

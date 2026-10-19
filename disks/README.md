@@ -7,7 +7,7 @@ committed (`.gitignore`).
 
 ## `hpux1020.img` -- HP-UX 10.20
 
-From tenox's HP-UX 10.20 + applications QEMU image
+From an HP-UX 10.20 + applications QEMU image
 (`hpux1020-apps-qemu.tar.lz` on the NAS; its `hpux.img` is qcow2, set up for
 QEMU `-M B160L`, sha256 `1b8331261ed3c75bfe531a245a516b3ef4a04447cc93d5a913b0b6a796e2c902`).
 
@@ -57,13 +57,13 @@ sed 's/^10.0.2.15/127.0.0.1/' /etc/hosts.qemu > /etc/hosts
 sync; reboot
 ```
 
-**root's password** (2026-10-09). The image's root password is tenox's and is
-not published (the tarball holds only `hpux.img` and `run.sh`). On the
+**root's password** (2026-10-09). The image's original root password is
+not known (the tarball holds only `hpux.img` and `run.sh`). On the
 MiSTer's copy it was set to `password` from a single-user boot, with the
 original file kept:
 
 ```sh
-cp -p /etc/passwd /etc/passwd.tenox
+cp -p /etc/passwd /etc/passwd.orig
 passwd root
 sync; reboot
 ```
