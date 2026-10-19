@@ -124,8 +124,8 @@ and for the LAN it needs a Main_MiSTer that sends this core UTC (HP-UX reads
 the clock as UTC) and bridges the 82596's frames to the MiSTer's Ethernet:
 branch `hp9k-family` of
 [danifunker/Main_MiSTer](https://github.com/danifunker/Main_MiSTer); the
-`release/MiSTer` binary is that Main built on 2026-10-14 from commit
-`12b0f43` (replace
+`release/MiSTer` binary is that Main built on 2026-10-18 from commit
+`6d7ece1` (the branch rebased onto upstream Main `88d2d10`; replace
 `/media/fat/MiSTer` with it). With a stock Main_MiSTer HP-UX's clock is off
 by your zone offset (STUBS S-022) and there is no network.
 

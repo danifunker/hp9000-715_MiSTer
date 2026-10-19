@@ -16,8 +16,8 @@ On 2026-10-18 the core was wrapped up with **build 65** as the release
 (the OSD standard, area trims, the fetch timing cut; every clock met; it
 replaced build 57): `release/HP9K715_20261018.rbf`,
 `boot0.rom` (HP's PDC 1.6; the user chose to keep it in the public repo),
-`hp715.eep` and `MiSTer` (Main_MiSTer `hp9k-family` at `12b0f43`, built
-2026-10-14). The release notes and known limitations are in the root README.
+`hp715.eep` and `MiSTer` (Main_MiSTer `hp9k-family` at `6d7ece1`, rebased onto upstream
+`88d2d10`, built 2026-10-18; not yet run on a board). The release notes and known limitations are in the root README.
 No new fit was made for the release.
 
 ## Open, roughly in order
@@ -64,7 +64,7 @@ No new fit was made for the release.
 7. The rest of the CPU plan (stall-on-use, one-cycle E redirects, dual issue)
    is in `RESUME-20261015-dual-issue.md`. RAM above 128 MB in DDR3, a floppy
    drive and audio input are not built (README "Hardware", STUBS).
-8. Main_MiSTer `hp9k-family`: the local checkout is 2 commits ahead of
-   GitHub (2026-10-16: HP9K385 work, multicast in eth0/eth1). Those commits
-   belong to the HP9K385 work, so don't push them from this project without
-   asking. The released binary is `12b0f43`.
+8. Main_MiSTer `hp9k-family` is one commit, `6d7ece1` "HP 9000 family:
+   HP9K715 and HP9K385 support (support/hp9k)", rebased onto upstream master
+   `88d2d10` on 2026-10-18 and pushed; `release/MiSTer` is built from it (not
+   yet run on a board). The HP9K385 core shares it, so coordinate changes.
